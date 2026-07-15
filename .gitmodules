@@ -1,0 +1,3 @@
+[submodule "EasyDesk"]
+	path = EasyDesk
+	url = https://github.com/lishuangquan1987/EasyDesk.git
