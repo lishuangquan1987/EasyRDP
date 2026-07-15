@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/EasyRDP.Client.Avalonia/EasyRDP.Client.Avalonia.csproj" />
+    <Project Path="src/EasyRDP.Client/EasyRDP.Client.csproj" />
+    <Project Path="src/EasyRDP.Core/EasyRDP.Core.csproj" />
+    <Project Path="src/EasyRDP.Server/EasyRDP.Server.csproj" />
+  </Folder>
+</Solution>
