@@ -50,7 +50,7 @@
                     <Label>认证令牌</Label>
                     <TextBox Text="{Binding Config.AuthToken}" />
                     <Label>压缩类型</Label>
-                    <ComboBox SelectedItem="{Binding Config.CompressType}">
+                    <ComboBox SelectedValue="{Binding Config.CompressType}" SelectedValuePath="Content">
                         <ComboBoxItem>Zlib</ComboBoxItem>
                         <ComboBoxItem>None</ComboBoxItem>
                     </ComboBox>

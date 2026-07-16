@@ -121,10 +121,9 @@ namespace EasyRDP.Client.Common
                         }
                     }
                 }
+                _isDirty = true;
+                _frameCount = _frameCount + 1;
             }
-
-            _isDirty = true;
-            _frameCount = _frameCount + 1;
         }
 
         // ── 消费帧 ────────────────────────────────────────

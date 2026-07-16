@@ -2,6 +2,7 @@
 
   <PropertyGroup>
     <TargetFramework>net40</TargetFramework>
+    <LangVersion>5</LangVersion>
     <OutputType>WinExe</OutputType>
     <UseWPF>true</UseWPF>
     <AssemblyName>EasyRDP.Server.Wpf</AssemblyName>
@@ -15,6 +16,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\..\..\aly\client\aly-client-sdk\AlyClient.CSharpSDK\AlyClient.CSharpSDK\AlyClient.CSharpSDK.csproj" />
     <ProjectReference Include="..\EasyRDP.Core\EasyRDP.Core.csproj" />
     <ProjectReference Include="..\..\EasyDesk\src\EasyDesk.Core\EasyDesk.Core.csproj" />
     <ProjectReference Include="..\..\EasyDesk\src\EasyDesk.Windows\EasyDesk.Windows.csproj" />

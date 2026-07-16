@@ -50,11 +50,14 @@ namespace EasyRDP.Server.Wpf.ViewModels
         private void WireServices()
         {
             _capture.SendTo = (sid, data) => _server.SendTo(sid, data);
-            _capture.OnLog = msg => Log(LogLevel.Error, msg);
+            _capture.OnLog = msg => Log(LogLevel.Debug, msg);
 
             _clipboard.BroadcastToAll = data =>
             {
-                foreach (var c in _clients)
+                // 快照客户端列表，防止后台线程枚举时 UI 线程同时修改集合
+                ClientSessionModel[] snapshot;
+                lock (_clients) { snapshot = new ClientSessionModel[_clients.Count]; _clients.CopyTo(snapshot, 0); }
+                foreach (var c in snapshot)
                     if (c.IsAuthenticated) _server.SendTo(c.SessionId, data);
             };
             _clipboard.OnLog = msg => Log(LogLevel.Warning, msg);
@@ -137,7 +140,7 @@ namespace EasyRDP.Server.Wpf.ViewModels
                 return;
             }
 
-            client.IsAuthenticated = true;
+            Dispatch(() => client.IsAuthenticated = true);
             var screen = _capture.GetPrimaryScreen();
             _server.SendTo(sid, MessageCodec.Encode(MessageType.HandshakeRes, 1, new HandshakeResMessage
             {

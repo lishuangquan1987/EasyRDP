@@ -1,9 +1,4 @@
 <Solution>
-  <Folder Name="/EasyDesk/" />
-  <Folder Name="/EasyDesk/src/">
-    <Project Path="EasyDesk/src/EasyDesk.Core/EasyDesk.Core.csproj" />
-    <Project Path="EasyDesk/src/EasyDesk.Windows/EasyDesk.Windows.csproj" />
-  </Folder>
   <Folder Name="/src/">
     <Project Path="src/EasyRDP.Client.Avalonia/EasyRDP.Client.Avalonia.csproj" />
     <Project Path="src/EasyRDP.Client.Wpf/EasyRDP.Client.Wpf.csproj" />
@@ -11,5 +6,10 @@
     <Project Path="src/EasyRDP.Core/EasyRDP.Core.csproj" />
     <Project Path="src/EasyRDP.Server.Wpf/EasyRDP.Server.Wpf.csproj" />
     <Project Path="src/EasyRDP.Server/EasyRDP.Server.csproj" />
+  </Folder>
+  <Folder Name="/Submodules/">
+    <Project Path="../aly/client/aly-client-sdk/AlyClient.CSharpSDK/AlyClient.CSharpSDK/AlyClient.CSharpSDK.csproj" />
+    <Project Path="EasyDesk/src/EasyDesk.Core/EasyDesk.Core.csproj" />
+    <Project Path="EasyDesk/src/EasyDesk.Windows/EasyDesk.Windows.csproj" />
   </Folder>
 </Solution>

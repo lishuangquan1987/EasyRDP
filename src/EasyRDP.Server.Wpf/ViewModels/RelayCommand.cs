@@ -13,7 +13,8 @@ namespace EasyRDP.Server.Wpf.ViewModels
 
         public RelayCommand(Action execute, Func<bool> canExecute = null)
         {
-            _execute = execute ?? throw new ArgumentNullException("execute");
+            if (execute == null) throw new ArgumentNullException("execute");
+            _execute = execute;
             _canExecute = canExecute;
         }
 
