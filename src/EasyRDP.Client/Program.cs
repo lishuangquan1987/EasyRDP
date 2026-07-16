@@ -10,7 +10,7 @@ namespace EasyRDP.Client
 {
     public class RemoteDesktopForm : Form
     {
-        private ClientTransport _transport;
+        private TcpTransportClient _transport;
         private SequenceTracker _tcpSeq = new SequenceTracker();
         private volatile bool _running;
         private volatile bool _connected;
@@ -24,6 +24,8 @@ namespace EasyRDP.Client
         private int _frameCount;
         private DateTime _lastFpsTime = DateTime.Now;
         private DateTime _lastAckTime = DateTime.Now;
+        private string _lastClipboardText;
+        private DateTime _lastClipboardCheck = DateTime.MinValue;
 
         public RemoteDesktopForm()
         {
@@ -84,7 +86,7 @@ namespace EasyRDP.Client
             _statusLabel.Text = string.Format("Connecting to {0}...", host);
             Application.DoEvents();
 
-            _transport = new ClientTransport();
+            _transport = new TcpTransportClient();
             _transport.OnLog = (level, msg) =>
                 BeginInvoke(new Action(() => _statusLabel.Text = msg));
             _transport.MessageReceived += OnMessage;
@@ -94,7 +96,7 @@ namespace EasyRDP.Client
                 BeginInvoke(new Action(() => _statusLabel.Text = "Disconnected"));
             };
 
-            if (!_transport.Connect(host, ProtocolConstants.DefaultTcpPort, TransportMode.Tcp, 5000))
+            if (!_transport.Connect(host, ProtocolConstants.DefaultPort, 5000))
             {
                 _statusLabel.Text = "Connection failed!";
                 return;
@@ -120,6 +122,9 @@ namespace EasyRDP.Client
 
             // Start FPS counter
             new Thread(FpsLoop) { IsBackground = true }.Start();
+
+            // Start clipboard monitor (local → remote)
+            new Thread(ClipboardMonitorLoop) { IsBackground = true, Name = "EasyRDP-Clipboard" }.Start();
 
             _statusLabel.Text = "Connected, waiting for frames...";
         }
@@ -281,6 +286,7 @@ namespace EasyRDP.Client
         {
             if (clip.Format == ClipboardFormat.UnicodeText)
             {
+                _lastClipboardText = clip.Text;
                 try { Clipboard.SetText(clip.Text); }
                 catch { }
             }
@@ -346,6 +352,34 @@ namespace EasyRDP.Client
             };
             byte[] data = MessageCodec.Encode(MessageType.InputEvent, _tcpSeq.Next(), msg);
             _transport.Send(data);
+        }
+
+        private void ClipboardMonitorLoop()
+        {
+            while (_running && _connected)
+            {
+                try
+                {
+                    if ((DateTime.Now - _lastClipboardCheck).TotalMilliseconds >= ProtocolConstants.ClipboardCooldownMs)
+                    {
+                        _lastClipboardCheck = DateTime.Now;
+                        string text = Clipboard.GetText();
+                        if (!string.IsNullOrEmpty(text) && text != _lastClipboardText)
+                        {
+                            _lastClipboardText = text;
+                            var msg = new ClipboardDataMessage
+                            {
+                                Format = ClipboardFormat.UnicodeText,
+                                Text = text
+                            };
+                            byte[] data = MessageCodec.Encode(MessageType.ClipboardData, _tcpSeq.Next(), msg);
+                            _transport?.Send(data);
+                        }
+                    }
+                }
+                catch { }
+                try { Thread.Sleep(300); } catch { break; }
+            }
         }
 
         private static int MapMouseButton(MouseButtons btn)

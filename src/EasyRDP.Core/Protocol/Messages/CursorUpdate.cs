@@ -3,7 +3,7 @@ using System;
 namespace EasyRDP.Core.Protocol
 {
     /// <summary>
-    /// 光标更新消息 S→C (UDP)
+    /// 光标更新消息 S→C
     /// </summary>
     public class CursorUpdateMessage
     {

@@ -21,7 +21,7 @@ namespace EasyRDP.Server
         private static ICursorCapturer _cursor;
         private static string _lastClipboardText = "";
 
-        private static ServerTransport _transport;
+        private static TcpTransportServer _transport;
         private static volatile bool _running = true;
         private static int _maxClients = 10;
         private static readonly ConcurrentDictionary<uint, ClientState> _clients = new();
@@ -29,7 +29,7 @@ namespace EasyRDP.Server
         private static string _authToken = "easyrdp-demo";
         private static CompressType _compressType = CompressType.Zlib;
         private static int _frameDelayMs = 66;
-        private const int TileSize = 64;
+        private const int TileSize = 64; // keep for reference, DirtyRectDetector replaces tile-based logic
 
         private class ClientState : IDisposable
         {
@@ -69,14 +69,14 @@ namespace EasyRDP.Server
             _cursor = _factory.CreateCursorCapturer();
             StartClipboardThread();
 
-            _transport = new ServerTransport();
+            _transport = new TcpTransportServer();
             _transport.OnLog = (level, msg) => Console.WriteLine("[{0}] {1}", level, msg);
             _transport.ClientConnected += OnClientConnected;
             _transport.ClientDisconnected += OnClientDisconnected;
             _transport.MessageReceived += OnMessageReceived;
 
             int port = config.Port;
-            _transport.Start(port, TransportMode.Tcp);
+            _transport.Start(port);
 
             // Clipboard monitor thread
             new Thread(ClipboardMonitorLoop) { IsBackground = true }.Start();
@@ -191,8 +191,7 @@ namespace EasyRDP.Server
                 SessionId = (result == HandshakeResult.Success) ? sessionId : 0,
                 ScreenWidth = (ushort)screenBounds.Width,
                 ScreenHeight = (ushort)screenBounds.Height,
-                CompressType = _compressType,
-                UdpPort = (ushort)ProtocolConstants.DefaultUdpPort
+                CompressType = _compressType
             };
             byte[] data = MessageCodec.Encode(MessageType.HandshakeRes, state.TcpSeq.Next(), res);
             _transport.SendTo(sessionId, data);
@@ -375,43 +374,8 @@ namespace EasyRDP.Server
 
         private static ScreenFrameMessage BuildDeltaFrame(int w, int h, byte[] cur, byte[] prev)
         {
-            int cols = (w + TileSize - 1) / TileSize;
-            int rows = (h + TileSize - 1) / TileSize;
-            var rects = new List<ScreenRect>();
-            var pixelChunks = new List<byte[]>();
+            var rects = DirtyRectDetector.Detect(cur, prev, w, h);
 
-            int offset = 0;
-            for (int ty = 0; ty < rows; ty++)
-            {
-                for (int tx = 0; tx < cols; tx++)
-                {
-                    int tileX = tx * TileSize;
-                    int tileY = ty * TileSize;
-                    int tileW = Math.Min(TileSize, w - tileX);
-                    int tileH = Math.Min(TileSize, h - tileY);
-
-                    if (TileChanged(w, cur, prev, tileX, tileY, tileW, tileH))
-                    {
-                        byte[] tileData = ExtractTile(w, cur, tileX, tileY, tileW, tileH);
-                        rects.Add(new ScreenRect { X = (ushort)tileX, Y = (ushort)tileY, Width = (ushort)tileW, Height = (ushort)tileH, Offset = (uint)offset });
-                        pixelChunks.Add(tileData);
-                        offset += tileData.Length;
-                    }
-                }
-            }
-
-            // Merge pixel chunks
-            byte[] allPixels = new byte[offset];
-            int pos = 0;
-            for (int i = 0; i < pixelChunks.Count; i++)
-            {
-                Array.Copy(pixelChunks[i], 0, allPixels, pos, pixelChunks[i].Length);
-                // Update rect offset to match merged position
-                rects[i].Offset = (uint)pos;
-                pos += pixelChunks[i].Length;
-            }
-
-            // If nothing changed, send a minimal full frame
             if (rects.Count == 0)
             {
                 return new ScreenFrameMessage
@@ -421,6 +385,28 @@ namespace EasyRDP.Server
                     Rects = new[] { new ScreenRect { X = 0, Y = 0, Width = (ushort)w, Height = (ushort)h, Offset = 0 } },
                     Pixels = new byte[0]
                 };
+            }
+
+            // Extract pixel data per rectangle, merge into single blob
+            int totalBytes = 0;
+            for (int i = 0; i < rects.Count; i++)
+                totalBytes += rects[i].Width * rects[i].Height * 4;
+
+            byte[] allPixels = new byte[totalBytes];
+            int offset = 0;
+            for (int i = 0; i < rects.Count; i++)
+            {
+                var r = rects[i];
+                int tileBytes = r.Width * r.Height * 4;
+                r.Offset = (uint)offset;
+                rects[i] = r;
+
+                for (int ty = 0; ty < r.Height; ty++)
+                {
+                    int srcOff = ((r.Y + ty) * w + r.X) * 4;
+                    Array.Copy(cur, srcOff, allPixels, offset + ty * r.Width * 4, r.Width * 4);
+                }
+                offset += tileBytes;
             }
 
             byte[] compressed = CompressHelper.Compress(allPixels, _compressType);
@@ -433,34 +419,6 @@ namespace EasyRDP.Server
                 Rects = rects.ToArray(),
                 Pixels = (useCompress == CompressType.Zlib) ? compressed : allPixels
             };
-        }
-
-        private static bool TileChanged(int stride, byte[] cur, byte[] prev, int x, int y, int w, int h)
-        {
-            for (int ty = y; ty < y + h; ty++)
-            {
-                int rowOffset = ty * stride * 4;
-                for (int tx = x; tx < x + w; tx++)
-                {
-                    int px = rowOffset + tx * 4;
-                    if (cur[px] != prev[px] || cur[px + 1] != prev[px + 1]
-                        || cur[px + 2] != prev[px + 2] || cur[px + 3] != prev[px + 3])
-                        return true;
-                }
-            }
-            return false;
-        }
-
-        private static byte[] ExtractTile(int stride, byte[] pixels, int x, int y, int w, int h)
-        {
-            byte[] tile = new byte[w * h * 4];
-            for (int ty = 0; ty < h; ty++)
-            {
-                int srcOffset = ((y + ty) * stride + x) * 4;
-                int dstOffset = ty * w * 4;
-                Array.Copy(pixels, srcOffset, tile, dstOffset, w * 4);
-            }
-            return tile;
         }
     }
 

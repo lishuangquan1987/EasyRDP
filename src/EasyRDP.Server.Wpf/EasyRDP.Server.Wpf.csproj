@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net40</TargetFramework>
+    <OutputType>WinExe</OutputType>
+    <UseWPF>true</UseWPF>
+    <AssemblyName>EasyRDP.Server.Wpf</AssemblyName>
+    <RootNamespace>EasyRDP.Server.Wpf</RootNamespace>
+    <StartupObject>EasyRDP.Server.Wpf.App</StartupObject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="System.Windows.Forms" />
+    <Reference Include="System.Drawing" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\EasyRDP.Core\EasyRDP.Core.csproj" />
+    <ProjectReference Include="..\..\EasyDesk\src\EasyDesk.Core\EasyDesk.Core.csproj" />
+    <ProjectReference Include="..\..\EasyDesk\src\EasyDesk.Windows\EasyDesk.Windows.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -37,7 +37,7 @@ namespace EasyRDP.Core.Protocol
     }
 
     /// <summary>
-    /// 屏幕帧消息 S→C (UDP)
+    /// 屏幕帧消息 S→C
     /// </summary>
     public class ScreenFrameMessage
     {

@@ -7,7 +7,7 @@ namespace EasyRDP.Core.Protocol
     /// </summary>
     public static class ProtocolConstants
     {
-        /// <summary>魔数 "ERDP" (Big-Endian)</summary>
+        /// <summary>魔数 "ERDP" (Little-Endian)</summary>
         public const uint Magic = 0x45524450;
 
         /// <summary>当前协议版本</summary>
@@ -16,17 +16,11 @@ namespace EasyRDP.Core.Protocol
         /// <summary>消息头字节数</summary>
         public const int HeaderSize = 14;
 
-        /// <summary>TCP 消息最大负载字节数</summary>
-        public const int MaxTcpPayload = 65535;
+        /// <summary>消息最大负载字节数</summary>
+        public const int MaxPayload = 65535;
 
-        /// <summary>UDP 消息最大负载字节数</summary>
-        public const int MaxUdpPayload = 1450;
-
-        /// <summary>默认 TCP 服务端口</summary>
-        public const int DefaultTcpPort = 8750;
-
-        /// <summary>默认 UDP 屏幕流端口</summary>
-        public const int DefaultUdpPort = 8751;
+        /// <summary>默认服务端口</summary>
+        public const int DefaultPort = 8750;
 
         /// <summary>心跳发送间隔（毫秒）</summary>
         public const int KeepAliveIntervalMs = 5000;

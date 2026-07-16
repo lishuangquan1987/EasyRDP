@@ -56,7 +56,7 @@ namespace EasyRDP.Core.Protocol
                 return null;
 
             // Reject oversized payloads to prevent memory exhaustion / overflow (DoS)
-            if (header.Length > ProtocolConstants.MaxTcpPayload)
+            if (header.Length > ProtocolConstants.MaxPayload)
                 return null;
 
             byte[] payload = null;

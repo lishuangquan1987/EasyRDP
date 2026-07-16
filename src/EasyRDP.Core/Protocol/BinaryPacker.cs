@@ -54,15 +54,6 @@ namespace EasyRDP.Core.Protocol
             buffer[offset + 7] = (byte)((value >> 56) & 0xFF);
         }
 
-        /// <summary>写入大端序 uint32（用于魔数）</summary>
-        public static void WriteUInt32BE(byte[] buffer, int offset, uint value)
-        {
-            buffer[offset] = (byte)((value >> 24) & 0xFF);
-            buffer[offset + 1] = (byte)((value >> 16) & 0xFF);
-            buffer[offset + 2] = (byte)((value >> 8) & 0xFF);
-            buffer[offset + 3] = (byte)(value & 0xFF);
-        }
-
         /// <summary>写入字节数组</summary>
         public static void WriteBytes(byte[] buffer, int offset, byte[] data, int dataOffset, int count)
         {
@@ -135,15 +126,6 @@ namespace EasyRDP.Core.Protocol
                 | ((ulong)buffer[offset + 5] << 40)
                 | ((ulong)buffer[offset + 6] << 48)
                 | ((ulong)buffer[offset + 7] << 56);
-        }
-
-        /// <summary>读取大端序 uint32（用于魔数）</summary>
-        public static uint ReadUInt32BE(byte[] buffer, int offset)
-        {
-            return ((uint)buffer[offset] << 24)
-                | ((uint)buffer[offset + 1] << 16)
-                | ((uint)buffer[offset + 2] << 8)
-                | (uint)buffer[offset + 3];
         }
 
         /// <summary>读取字节数组</summary>

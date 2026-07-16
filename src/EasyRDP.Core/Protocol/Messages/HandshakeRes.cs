@@ -22,13 +22,10 @@ namespace EasyRDP.Core.Protocol
         /// <summary>协商后的压缩类型</summary>
         public CompressType CompressType;
 
-        /// <summary>UDP 屏幕流端口</summary>
-        public ushort UdpPort;
-
         public byte[] Encode()
         {
-            // Result(1) + SessionId(4) + ScreenWidth(2) + ScreenHeight(2) + CompressType(1) + UdpPort(2)
-            int size = 1 + 4 + 2 + 2 + 1 + 2;
+            // Result(1) + SessionId(4) + ScreenWidth(2) + ScreenHeight(2) + CompressType(1)
+            int size = 1 + 4 + 2 + 2 + 1;
             byte[] buffer = new byte[size];
             int offset = 0;
 
@@ -41,8 +38,6 @@ namespace EasyRDP.Core.Protocol
             BinaryPacker.WriteUInt16LE(buffer, offset, ScreenHeight);
             offset += 2;
             buffer[offset] = (byte)CompressType;
-            offset += 1;
-            BinaryPacker.WriteUInt16LE(buffer, offset, UdpPort);
 
             return buffer;
         }
@@ -59,8 +54,6 @@ namespace EasyRDP.Core.Protocol
             ScreenHeight = BinaryPacker.ReadUInt16LE(payload, offset);
             offset += 2;
             CompressType = (CompressType)BinaryPacker.ReadByte(payload, offset);
-            offset += 1;
-            UdpPort = BinaryPacker.ReadUInt16LE(payload, offset);
         }
     }
 }

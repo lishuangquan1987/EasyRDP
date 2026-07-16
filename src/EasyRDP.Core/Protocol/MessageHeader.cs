@@ -5,7 +5,7 @@ namespace EasyRDP.Core.Protocol
     /// <summary>
     /// 消息头（14 字节）。
     /// 
-    /// 布局：Magic(4B, BE) + Version(1B) + Type(1B) + Sequence(4B, LE) + Length(4B, LE)
+    /// 布局：Magic(4B, LE) + Version(1B) + Type(1B) + Sequence(4B, LE) + Length(4B, LE)
     /// </summary>
     public struct MessageHeader
     {
@@ -18,7 +18,7 @@ namespace EasyRDP.Core.Protocol
         /// <summary>消息类型</summary>
         public MessageType Type;
 
-        /// <summary>通道内消息序号</summary>
+        /// <summary>消息序号</summary>
         public uint Sequence;
 
         /// <summary>负载字节数</summary>
@@ -33,7 +33,7 @@ namespace EasyRDP.Core.Protocol
         public byte[] ToBytes()
         {
             byte[] buffer = new byte[Size];
-            BinaryPacker.WriteUInt32BE(buffer, 0, Magic);
+            BinaryPacker.WriteUInt32LE(buffer, 0, Magic);
             buffer[4] = Version;
             buffer[5] = (byte)Type;
             BinaryPacker.WriteUInt32LE(buffer, 6, Sequence);
@@ -46,7 +46,7 @@ namespace EasyRDP.Core.Protocol
         /// </summary>
         public void WriteTo(byte[] buffer, int offset)
         {
-            BinaryPacker.WriteUInt32BE(buffer, offset, Magic);
+            BinaryPacker.WriteUInt32LE(buffer, offset, Magic);
             buffer[offset + 4] = Version;
             buffer[offset + 5] = (byte)Type;
             BinaryPacker.WriteUInt32LE(buffer, offset + 6, Sequence);
@@ -59,7 +59,7 @@ namespace EasyRDP.Core.Protocol
         public static MessageHeader FromBytes(byte[] buffer)
         {
             MessageHeader header = new MessageHeader();
-            header.Magic = BinaryPacker.ReadUInt32BE(buffer, 0);
+            header.Magic = BinaryPacker.ReadUInt32LE(buffer, 0);
             header.Version = buffer[4];
             header.Type = (MessageType)buffer[5];
             header.Sequence = BinaryPacker.ReadUInt32LE(buffer, 6);
@@ -73,7 +73,7 @@ namespace EasyRDP.Core.Protocol
         public static MessageHeader ReadFrom(byte[] buffer, int offset)
         {
             MessageHeader header = new MessageHeader();
-            header.Magic = BinaryPacker.ReadUInt32BE(buffer, offset);
+            header.Magic = BinaryPacker.ReadUInt32LE(buffer, offset);
             header.Version = buffer[offset + 4];
             header.Type = (MessageType)buffer[offset + 5];
             header.Sequence = BinaryPacker.ReadUInt32LE(buffer, offset + 6);

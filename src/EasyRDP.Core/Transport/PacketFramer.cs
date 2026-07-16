@@ -4,8 +4,9 @@ using System.Collections.Generic;
 namespace EasyRDP.Core.Transport
 {
     /// <summary>
-    /// TCP 流式数据分包器——处理粘包/半包问题。
+    /// 流式数据分包器——处理粘包/半包问题。
     /// 从连续的字节流中提取完整的 EasyRDP 消息帧。
+    /// 传输无关：TCP/UDP/任意流式传输均可使用。
     /// </summary>
     public class PacketFramer
     {
@@ -16,6 +17,9 @@ namespace EasyRDP.Core.Transport
         private const int InitialBufferSize = 65536; // 64 KB
         private const int MaxBufferSize = 1048576;   // 1 MB
 
+        /// <summary>
+        /// 创建分包器实例。
+        /// </summary>
         public PacketFramer()
         {
             _buffer = new byte[InitialBufferSize];
@@ -26,6 +30,10 @@ namespace EasyRDP.Core.Transport
         /// <summary>
         /// 输入新收到的字节数据。返回解析出的完整消息列表。
         /// </summary>
+        /// <param name="data">收到的数据</param>
+        /// <param name="offset">数据起始偏移</param>
+        /// <param name="count">数据长度</param>
+        /// <returns>解析出的完整消息帧列表（每条为完整的 header + payload 字节数组）</returns>
         public List<byte[]> Feed(byte[] data, int offset, int count)
         {
             List<byte[]> messages = new List<byte[]>();
@@ -64,7 +72,7 @@ namespace EasyRDP.Core.Transport
             uint payloadLen = Protocol.BinaryPacker.ReadUInt32LE(_buffer, _bufferPos + 10);
 
             // 检查负载长度是否合法
-            if (payloadLen > Protocol.ProtocolConstants.MaxTcpPayload)
+            if (payloadLen > Protocol.ProtocolConstants.MaxPayload)
             {
                 // 协议错误——丢弃缓冲区并重置
                 Reset();
@@ -84,8 +92,8 @@ namespace EasyRDP.Core.Transport
 
             _bufferPos += totalSize;
 
-            // 如果 buffer 中剩余数据很多且前面的已全部消费，压缩一下
-            if (_bufferPos > 0 && _bufferPos == _bufferLen)
+            // 如果 buffer 已全部消费，重置指针
+            if (_bufferPos == _bufferLen)
             {
                 _bufferPos = 0;
                 _bufferLen = 0;
