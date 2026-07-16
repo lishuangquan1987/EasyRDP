@@ -1,6 +1,10 @@
+using System;
 using System.ComponentModel;
+using System.Globalization;
 using System.Windows;
+using System.Windows.Data;
 using System.Windows.Forms;
+using AlyClient.CSharpSDK;
 using EasyRDP.Server.Wpf.ViewModels;
 
 namespace EasyRDP.Server.Wpf
@@ -32,6 +36,27 @@ namespace EasyRDP.Server.Wpf
             if (!_forceExit) { e.Cancel = true; WindowState = WindowState.Minimized; return; }
             if (_vm.IsRunning) _vm.StopCommand.Execute(null);
             _tray.Visible = false; _tray.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// 将 AlyClientStatus 转换为 Visibility：仅在 DiscoveredUpdate/DownloadingUpdate/DownloadedUpdate 时可见。
+    /// </summary>
+    public class AlyStatusToVisibilityConverter : IValueConverter
+    {
+        public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
+        {
+            var status = (AlyClientStatus)value;
+            return (status == AlyClientStatus.DiscoveredUpdate ||
+                    status == AlyClientStatus.DownloadingUpdate ||
+                    status == AlyClientStatus.DownloadedUpdate)
+                ? Visibility.Visible
+                : Visibility.Collapsed;
+        }
+
+        public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
+        {
+            return null;
         }
     }
 }

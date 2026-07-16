@@ -2,6 +2,7 @@ using System;
 using System.Threading;
 using EasyDesk.Core;
 using EasyDesk.Windows;
+using EasyRDP.Core.Logging;
 using EasyRDP.Core.Protocol;
 
 namespace EasyRDP.Server.Wpf.Services
@@ -41,12 +42,14 @@ namespace EasyRDP.Server.Wpf.Services
             _thread.IsBackground = true;
             _thread.Name = "EasyRDP-Clipboard";
             _thread.Start();
+            LogHelper.Info("剪贴板同步已启动");
         }
 
         public void Stop()
         {
             _running = false;
             if (_thread != null && _thread.IsAlive) _thread.Join(1000);
+            LogHelper.Info("剪贴板同步已停止");
         }
 
         public void OnRemoteClipboard(ClipboardDataMessage msg)
@@ -54,7 +57,6 @@ namespace EasyRDP.Server.Wpf.Services
             if (msg == null || msg.Format != ClipboardFormat.UnicodeText) return;
             _lastSentText = msg.Text;
             _cooldownUntil = DateTime.Now.AddMilliseconds(500);
-            // STA 线程在 MonitorLoop 中直接操作剪贴板，这里只更新状态
         }
 
         private void MonitorLoop()
@@ -65,19 +67,19 @@ namespace EasyRDP.Server.Wpf.Services
                 {
                     if (DateTime.Now < _cooldownUntil)
                     {
-                        // 处理远程剪贴板写入（OnRemoteClipboard 设置了 _lastSentText，这里写入本地）
                         if (_lastSentText != null)
                         {
-                            try { _clipboard.SetText(_lastSentText); } catch { }
+                            try { _clipboard.SetText(_lastSentText); }
+                            catch (Exception ex) { LogHelper.Warn(string.Format("剪贴板写入失败: {0}", ex.Message)); }
                             _lastSentText = null;
                         }
                         Thread.Sleep(300);
                         continue;
                     }
 
-                    // 读取本地剪贴板并比较
                     string text = null;
-                    try { text = _clipboard.GetText(); } catch { }
+                    try { text = _clipboard.GetText(); }
+                    catch (Exception ex) { LogHelper.Warn(string.Format("剪贴板读取失败: {0}", ex.Message)); }
 
                     if (!string.IsNullOrEmpty(text) && text != _lastSentText)
                     {
@@ -88,7 +90,10 @@ namespace EasyRDP.Server.Wpf.Services
                         if (broadcast != null) broadcast(data);
                     }
                 }
-                catch { }
+                catch (Exception ex)
+                {
+                    LogHelper.Warn(string.Format("剪贴板同步异常: {0}", ex.Message));
+                }
                 try { Thread.Sleep(300); } catch { break; }
             }
         }

@@ -11,6 +11,7 @@
     <Window.Resources>
         <local:BoolToVisibilityConverter x:Key="BoolToVis" />
         <local:InverseBoolConverter x:Key="InvertBool" />
+        <local:AlyStatusToVisibilityConverter x:Key="AlyStatusToVis" />
     </Window.Resources>
 
     <DockPanel>
@@ -23,6 +24,12 @@
             <StatusBarItem Content="{Binding Status}" />
             <Separator />
             <StatusBarItem Content="{Binding Fps, StringFormat={}{0:F0} FPS}" />
+            <Separator />
+            <StatusBarItem Visibility="{Binding AlyClientStatus, Converter={StaticResource AlyStatusToVis}}">
+                <Button Command="{Binding CheckUpdateCommand}"
+                        Content="{Binding AlyClientUpdateStr}"
+                        Padding="8,2" />
+            </StatusBarItem>
         </StatusBar>
 
         <!-- Connect Panel -->

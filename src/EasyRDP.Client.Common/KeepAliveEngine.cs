@@ -1,5 +1,6 @@
 using System;
 using System.Threading;
+using EasyRDP.Core.Logging;
 
 namespace EasyRDP.Client.Common
 {
@@ -44,6 +45,8 @@ namespace EasyRDP.Client.Common
             _cts = new CancellationTokenSource();
             var token = _cts.Token;
 
+            LogHelper.Info(string.Format("KeepAlive 启动 (间隔={0}ms 超时={1}ms)", _intervalMs, _timeoutMs));
+
             _thread = new Thread(() => Loop(sendAction, token));
             _thread.IsBackground = true;
             _thread.Name = "EasyRDP-KeepAlive";
@@ -56,6 +59,7 @@ namespace EasyRDP.Client.Common
         public void Stop()
         {
             _running = false;
+            LogHelper.Info("KeepAlive 停止");
 
             if (_cts != null)
             {
@@ -116,6 +120,7 @@ namespace EasyRDP.Client.Common
                 if (_running && IsTimeout)
                 {
                     _running = false;
+                    LogHelper.Warn(string.Format("KeepAlive 超时 (>{0}ms 无 Ack)", _timeoutMs));
                     var handler = Timeout;
                     if (handler != null)
                         handler();

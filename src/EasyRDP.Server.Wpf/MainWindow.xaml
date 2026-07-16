@@ -13,6 +13,7 @@
     <Window.Resources>
         <cv:BoolToColorConverter x:Key="BoolToColor" />
         <cv:LogLevelToColorConverter x:Key="LogColor" />
+        <local:AlyStatusToVisibilityConverter x:Key="AlyStatusToVis" />
         <vm:MainViewModel x:Key="VM" />
     </Window.Resources>
 
@@ -25,6 +26,9 @@
             </MenuItem>
             <MenuItem Header="帮助">
                 <MenuItem Header="关于" Command="{Binding AboutCommand}" />
+                <MenuItem Header="{Binding AlyClientUpdateStr, FallbackValue='检查更新'}"
+                          Command="{Binding CheckUpdateCommand}"
+                          Visibility="{Binding AlyClientStatus, Converter={StaticResource AlyStatusToVis}}" />
             </MenuItem>
         </Menu>
 

@@ -4,6 +4,7 @@ using System.Threading;
 using EasyDesk.Core;
 using EasyDesk.Core.Models;
 using EasyDesk.Windows;
+using EasyRDP.Core.Logging;
 using EasyRDP.Core.Protocol;
 
 namespace EasyRDP.Server.Wpf.Services
@@ -46,6 +47,7 @@ namespace EasyRDP.Server.Wpf.Services
         {
             var cts = new CancellationTokenSource();
             lock (_clientLock) _clientTokens[sessionId] = cts;
+            LogHelper.Info(string.Format("截屏启动 ClientId={0}", sessionId));
             var t = new Thread(() => CaptureLoop(sessionId, cts.Token))
             {
                 IsBackground = true,
@@ -62,6 +64,7 @@ namespace EasyRDP.Server.Wpf.Services
                 if (_clientTokens.TryGetValue(sessionId, out cts))
                 {
                     cts.Cancel(); cts.Dispose(); _clientTokens.Remove(sessionId);
+                    LogHelper.Info(string.Format("截屏停止 ClientId={0}", sessionId));
                 }
             }
         }
@@ -141,7 +144,7 @@ namespace EasyRDP.Server.Wpf.Services
                     finally { System.Runtime.InteropServices.Marshal.FreeHGlobal(frame.Scan0); }
                 }
                 catch (OperationCanceledException) { break; }
-                catch (Exception ex) { var log = OnLog; if (log != null) log(string.Format("Capture error: {0}", ex.Message)); }
+                catch (Exception ex) { LogHelper.Error(ex, "Capture error"); var log = OnLog; if (log != null) log(string.Format("Capture error: {0}", ex.Message)); }
 
                 try { Thread.Sleep(FrameDelayMs); } catch { break; }
             }

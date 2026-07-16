@@ -8,7 +8,7 @@
     <Project Path="src/EasyRDP.Server/EasyRDP.Server.csproj" />
   </Folder>
   <Folder Name="/Submodules/">
-    <Project Path="../aly/client/aly-client-sdk/AlyClient.CSharpSDK/AlyClient.CSharpSDK/AlyClient.CSharpSDK.csproj" />
+    <Project Path="aly/client/aly-client-sdk/AlyClient.CSharpSDK/AlyClient.CSharpSDK/AlyClient.CSharpSDK.csproj" />
     <Project Path="EasyDesk/src/EasyDesk.Core/EasyDesk.Core.csproj" />
     <Project Path="EasyDesk/src/EasyDesk.Windows/EasyDesk.Windows.csproj" />
   </Folder>

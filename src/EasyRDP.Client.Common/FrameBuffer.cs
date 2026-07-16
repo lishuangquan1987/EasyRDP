@@ -1,4 +1,5 @@
 using System;
+using EasyRDP.Core.Logging;
 using EasyRDP.Core.Protocol;
 
 namespace EasyRDP.Client.Common
@@ -16,6 +17,8 @@ namespace EasyRDP.Client.Common
         private volatile bool _isDirty;
         private int _frameCount;
         private readonly object _lock = new object();
+        private bool _firstFrameLogged;
+        private bool _noBaselineLogged;
 
         /// <summary>帧缓冲宽度。</summary>
         public int Width
@@ -84,19 +87,38 @@ namespace EasyRDP.Client.Common
                     rectH = rect.Height;
                     int size = rectW * rectH * 4;
 
-                    if (_buffer == null || _buffer.Length != size)
+                    bool resized = _buffer == null || _buffer.Length != size;
+
+                    if (resized)
+                    {
                         _buffer = new byte[size];
+                        if (_width != 0 || _height != 0)
+                            LogHelper.Info(string.Format("帧缓冲分辨率变更: {0}x{1} → {2}x{3}", _width, _height, rectW, rectH));
+                    }
 
                     _width = rectW;
                     _height = rectH;
 
                     if (pixels.Length >= size)
                         Array.Copy(pixels, 0, _buffer, 0, size);
+
+                    if (!_firstFrameLogged)
+                    {
+                        _firstFrameLogged = true;
+                        LogHelper.Info(string.Format("收到首帧 (Full) 分辨率={0}x{1} 大小={2}KB", rectW, rectH, size / 1024));
+                    }
                 }
                 else // Delta
                 {
                     if (_buffer == null)
+                    {
+                        if (!_noBaselineLogged)
+                        {
+                            _noBaselineLogged = true;
+                            LogHelper.Warn("收到增量帧但无全帧基准，已丢弃（等待首帧全帧）");
+                        }
                         return; // 还没有全帧基准，忽略增量
+                    }
 
                     int stride = _width * 4;
 
@@ -168,6 +190,8 @@ namespace EasyRDP.Client.Common
                 _height = 0;
                 _isDirty = false;
                 _frameCount = 0;
+                _firstFrameLogged = false;
+                _noBaselineLogged = false;
             }
         }
     }

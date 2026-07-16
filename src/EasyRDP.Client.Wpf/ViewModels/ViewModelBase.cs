@@ -34,5 +34,10 @@ namespace EasyRDP.Client.Wpf.ViewModels
             remove { System.Windows.Input.CommandManager.RequerySuggested -= value; }
         }
         public void Execute(object p) { _execute(); }
+
+        public void RaiseCanExecuteChanged()
+        {
+            System.Windows.Input.CommandManager.InvalidateRequerySuggested();
+        }
     }
 }

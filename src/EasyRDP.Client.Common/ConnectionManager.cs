@@ -1,5 +1,6 @@
 using System;
 using System.Threading;
+using EasyRDP.Core.Logging;
 using EasyRDP.Core.Protocol;
 using EasyRDP.Core.Transport;
 
@@ -100,6 +101,8 @@ namespace EasyRDP.Client.Common
             _handshakeEvent.Reset();
             _failureReason = null;
 
+            LogHelper.Info(string.Format("开始连接 {0}:{1}", host, port));
+
             // 创建 TCP 传输
             _transport = new TcpTransportClient();
             _transport.MessageReceived += OnTransportMessage;
@@ -109,6 +112,7 @@ namespace EasyRDP.Client.Common
             {
                 _state = ConnectionState.Disconnected;
                 _failureReason = "TCP connection failed";
+                LogHelper.Warn(string.Format("TCP 连接失败: {0}:{1}", host, port));
                 var cf2 = ConnectionFailed;
                 if (cf2 != null) cf2(_failureReason);
                 return false;
@@ -124,6 +128,7 @@ namespace EasyRDP.Client.Common
             };
             byte[] reqData = MessageCodec.Encode(MessageType.HandshakeReq, _seqTracker.Next(), req);
             _transport.Send(reqData);
+            LogHelper.Info("已发送 HandshakeReq，等待响应...");
 
             // 等待握手响应
             bool signalled = _handshakeEvent.WaitOne(timeoutMs);
@@ -133,6 +138,7 @@ namespace EasyRDP.Client.Common
                 _state = ConnectionState.Disconnected;
                 _transport.Disconnect();
                 _failureReason = "Handshake timeout";
+                LogHelper.Warn(string.Format("握手超时 ({0}ms)", timeoutMs));
                 var cf3 = ConnectionFailed;
                 if (cf3 != null) cf3(_failureReason);
                 return false;
@@ -147,6 +153,7 @@ namespace EasyRDP.Client.Common
 
             // 握手失败
             _transport.Disconnect();
+            LogHelper.Warn(_failureReason ?? "Handshake failed");
             var cf4 = ConnectionFailed;
             if (cf4 != null) cf4(_failureReason ?? "Handshake failed");
             return false;
@@ -221,6 +228,7 @@ namespace EasyRDP.Client.Common
             if (_state == ConnectionState.Connected)
             {
                 _state = ConnectionState.Disconnected;
+                LogHelper.Warn("传输层意外断开");
                 var d = Disconnected;
                 if (d != null) d("Transport disconnected");
             }
@@ -234,11 +242,14 @@ namespace EasyRDP.Client.Common
                 _remoteScreenHeight = res.ScreenHeight;
                 _sessionId = res.SessionId;
                 _state = ConnectionState.Connected;
+                LogHelper.Info(string.Format("握手成功 SessionId={0} 屏幕={1}x{2} 压缩={3}",
+                    res.SessionId, res.ScreenWidth, res.ScreenHeight, res.CompressType));
             }
             else
             {
                 _state = ConnectionState.Disconnected;
                 _failureReason = "Handshake rejected: " + res.Result.ToString();
+                LogHelper.Warn(_failureReason);
             }
 
             _handshakeEvent.Set();
