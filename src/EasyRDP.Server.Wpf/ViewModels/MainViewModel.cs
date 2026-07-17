@@ -121,6 +121,7 @@ namespace EasyRDP.Server.Wpf.ViewModels
         {
             _capture.SendTo = (sid, data) => _server.SendTo(sid, data);
             _capture.OnLog = msg => Log(LogLevel.Debug, msg);
+            _capture.CursorTracker.SendTo = (sid, data) => _server.SendTo(sid, data);
 
             _clipboard.BroadcastToAll = data =>
             {

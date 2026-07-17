@@ -57,7 +57,7 @@ namespace EasyRDP.Client.Common
 
             // 解压像素
             byte[] pixels;
-            if (frame.Compress == CompressType.Zlib)
+            if (frame.Compress == CompressType.Zlib || frame.Compress == CompressType.JPEG)
             {
                 // 估算原始大小
                 int estimatedRaw = 0;
@@ -129,17 +129,46 @@ namespace EasyRDP.Client.Common
                         rectH = rect.Height;
                         int tileBytes = rectW * rectH * 4;
 
-                        if ((int)rect.Offset + tileBytes > pixels.Length)
-                            continue;
+                        // 纯色块检测：pixels 中此 rect 只占了 4 字节（一个 BGRA 颜色值）
+                        bool isSolid = ((int)rect.Offset + 4 <= pixels.Length) && tileBytes > 4;
 
-                        // 逐行拷贝矩形像素到帧缓冲
-                        for (int ty = 0; ty < rectH; ty++)
+                        if (isSolid)
                         {
-                            int srcOffset = (int)rect.Offset + ty * rectW * 4;
-                            int dstOffset = ((rect.Y + ty) * stride) + rect.X * 4;
+                            // 只需 4 字节就能填充满整个 rect → 纯色块
+                            byte solidB = pixels[(int)rect.Offset];
+                            byte solidG = pixels[(int)rect.Offset + 1];
+                            byte solidR = pixels[(int)rect.Offset + 2];
+                            byte solidA = pixels[(int)rect.Offset + 3];
+                            for (int ty = 0; ty < rectH; ty++)
+                            {
+                                int dstOffset = ((rect.Y + ty) * stride) + rect.X * 4;
+                                for (int tx = 0; tx < rectW; tx++)
+                                {
+                                    int d = dstOffset + tx * 4;
+                                    if (d + 4 <= _buffer.Length)
+                                    {
+                                        _buffer[d] = solidB;
+                                        _buffer[d + 1] = solidG;
+                                        _buffer[d + 2] = solidR;
+                                        _buffer[d + 3] = solidA;
+                                    }
+                                }
+                            }
+                        }
+                        else 
+                        {
+                            if ((int)rect.Offset + tileBytes > pixels.Length)
+                                continue;
 
-                            if (dstOffset + rectW * 4 <= _buffer.Length)
-                                Array.Copy(pixels, srcOffset, _buffer, dstOffset, rectW * 4);
+                            // 逐行拷贝矩形像素到帧缓冲
+                            for (int ty = 0; ty < rectH; ty++)
+                            {
+                                int srcOffset = (int)rect.Offset + ty * rectW * 4;
+                                int dstOffset = ((rect.Y + ty) * stride) + rect.X * 4;
+
+                                if (dstOffset + rectW * 4 <= _buffer.Length)
+                                    Array.Copy(pixels, srcOffset, _buffer, dstOffset, rectW * 4);
+                            }
                         }
                     }
                 }
@@ -177,6 +206,28 @@ namespace EasyRDP.Client.Common
         }
 
         // ── 重置 ──────────────────────────────────────────
+
+        /// <summary>
+        /// 执行区域复制：将源矩形像素复制到目标位置。
+        /// 用于处理 CopyRectMessage。
+        /// </summary>
+        public void CopyRegion(int srcX, int srcY, int dstX, int dstY, int width, int height)
+        {
+            lock (_lock)
+            {
+                if (_buffer == null) return;
+                int stride = _width * 4;
+                for (int ty = 0; ty < height; ty++)
+                {
+                    int srcOffset = ((srcY + ty) * stride) + srcX * 4;
+                    int dstOffset = ((dstY + ty) * stride) + dstX * 4;
+                    if (srcOffset + width * 4 <= _buffer.Length && dstOffset + width * 4 <= _buffer.Length)
+                        Array.Copy(_buffer, srcOffset, _buffer, dstOffset, width * 4);
+                }
+                _isDirty = true;
+                _frameCount = _frameCount + 1;
+            }
+        }
 
         /// <summary>
         /// 重置帧缓冲（断连时调用）。

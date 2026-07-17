@@ -16,8 +16,8 @@ namespace EasyRDP.Core.Protocol
         /// <summary>消息头字节数</summary>
         public const int HeaderSize = 14;
 
-        /// <summary>消息最大负载字节数</summary>
-        public const int MaxPayload = 65535;
+        /// <summary>消息最大负载字节数（100MB，支持 4K 屏幕全帧）</summary>
+        public const int MaxPayload = 104857600;
 
         /// <summary>默认服务端口</summary>
         public const int DefaultPort = 8750;

@@ -14,8 +14,8 @@ namespace EasyRDP.Core.Transport
         private int _bufferPos;
         private int _bufferLen;
 
-        private const int InitialBufferSize = 65536; // 64 KB
-        private const int MaxBufferSize = 1048576;   // 1 MB
+        private const int InitialBufferSize = 262144; // 256 KB
+        private const int MaxBufferSize = 104857600;   // 100 MB
 
         /// <summary>
         /// 创建分包器实例。

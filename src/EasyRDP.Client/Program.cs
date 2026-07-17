@@ -27,6 +27,13 @@ namespace EasyRDP.Client
         private string _lastClipboardText;
         private DateTime _lastClipboardCheck = DateTime.MinValue;
 
+        // Cursor state (self-drawn, no system cursor flicker)
+        private byte[] _cursorRgba;
+        private int _cursorW, _cursorH;
+        private int _cursorHotX, _cursorHotY;
+        private int _remoteCursorX, _remoteCursorY;
+        private bool _cursorVisible;
+
         public RemoteDesktopForm()
         {
             Text = "EasyRDP Client";
@@ -41,6 +48,11 @@ namespace EasyRDP.Client
                 BackColor = Color.Black
             };
             Controls.Add(_screenBox);
+
+            // 隐藏 PictureBox 上的系统光标，改用自绘光标避免闪烁
+            _screenBox.Cursor = Cursors.Default;
+            _screenBox.MouseEnter += (s, e) => Cursor.Hide();
+            _screenBox.MouseLeave += (s, e) => Cursor.Show();
 
             _statusLabel = new Label
             {
@@ -261,6 +273,9 @@ namespace EasyRDP.Client
 
                 _frameBitmap.UnlockBits(bmpData);
 
+                // 叠加自绘光标
+                DrawCursorOverlay(_frameBitmap, w, h);
+
                 var oldImage = _screenBox.Image;
                 _screenBox.Image = _frameBitmap;
                 oldImage?.Dispose();
@@ -268,18 +283,113 @@ namespace EasyRDP.Client
             catch (Exception) { /* skip bad frames */ }
         }
 
-        private void HandleCursorUpdate(CursorUpdateMessage cursor)
+        private void HandleCursorUpdate(CursorUpdateMessage msg)
         {
-            // For now, just track cursor position
-            if (cursor.Visible)
+            _remoteCursorX = msg.X;
+            _remoteCursorY = msg.Y;
+
+            if (!msg.Visible)
             {
-                BeginInvoke(new Action(() =>
-                {
-                    Cursor.Position = PointToScreen(new Point(
-                        cursor.X * _screenBox.Width / Math.Max(_screenWidth, 1),
-                        cursor.Y * _screenBox.Height / Math.Max(_screenHeight, 1)));
-                }));
+                _cursorVisible = false;
+                return;
             }
+
+            _cursorVisible = true;
+
+            // 如果有形状数据，缓存下来
+            if (msg.Width > 0 && msg.Height > 0 && msg.ImageData != null && msg.ImageData.Length > 0)
+            {
+                _cursorRgba = msg.ImageData;
+                _cursorW = msg.Width;
+                _cursorH = msg.Height;
+                _cursorHotX = msg.HotspotX;
+                _cursorHotY = msg.HotspotY;
+            }
+        }
+
+        /// <summary>
+        /// 在帧 Bitmap 上叠加绘制远程光标。
+        /// 使用 LockBits 直接内存操作进行 Alpha 混合，避免 GetPixel/SetPixel 带来的性能损失。
+        /// </summary>
+        private void DrawCursorOverlay(Bitmap bmp, int screenW, int screenH)
+        {
+            if (!_cursorVisible || _cursorRgba == null || _cursorW <= 0 || _cursorH <= 0)
+                return;
+
+            try
+            {
+                // 将远程坐标映射到 PictureBox 坐标
+                float scaleX = (float)_screenBox.Width / Math.Max(screenW, 1);
+                float scaleY = (float)_screenBox.Height / Math.Max(screenH, 1);
+
+                int drawX = (int)(_remoteCursorX * scaleX) - _cursorHotX;
+                int drawY = (int)(_remoteCursorY * scaleY) - _cursorHotY;
+
+                // 计算光标与位图的交集区域
+                int srcStartX = Math.Max(0, -drawX);
+                int srcStartY = Math.Max(0, -drawY);
+                int destStartX = Math.Max(0, drawX);
+                int destStartY = Math.Max(0, drawY);
+                int copyW = Math.Min(_cursorW - srcStartX, bmp.Width - destStartX);
+                int copyH = Math.Min(_cursorH - srcStartY, bmp.Height - destStartY);
+
+                if (copyW <= 0 || copyH <= 0)
+                    return;
+
+                // LockBits 读取目标区域像素（BGRA32 格式）
+                var rect = new Rectangle(destStartX, destStartY, copyW, copyH);
+                var bmpData = bmp.LockBits(rect, ImageLockMode.ReadWrite, PixelFormat.Format32bppArgb);
+
+                try
+                {
+                    int stride = bmpData.Stride;
+                    byte[] destRow = new byte[stride];
+
+                    for (int cy = 0; cy < copyH; cy++)
+                    {
+                        IntPtr rowPtr = IntPtr.Add(bmpData.Scan0, cy * stride);
+                        System.Runtime.InteropServices.Marshal.Copy(rowPtr, destRow, 0, stride);
+
+                        bool rowModified = false;
+
+                        for (int cx = 0; cx < copyW; cx++)
+                        {
+                            int srcIdx = ((srcStartY + cy) * _cursorW + (srcStartX + cx)) * 4;
+                            byte a = _cursorRgba[srcIdx + 3];
+                            if (a == 0) continue;
+
+                            int destIdx = cx * 4;
+                            // destRow 是 BGRA (Format32bppArgb 在 Windows 上是 BGRA 字节序)
+                            byte b = destRow[destIdx];
+                            byte g = destRow[destIdx + 1];
+                            byte r = destRow[destIdx + 2];
+
+                            if (a == 255)
+                            {
+                                destRow[destIdx]     = _cursorRgba[srcIdx + 2]; // B
+                                destRow[destIdx + 1] = _cursorRgba[srcIdx + 1]; // G
+                                destRow[destIdx + 2] = _cursorRgba[srcIdx];     // R
+                            }
+                            else
+                            {
+                                float alpha = a / 255f;
+                                destRow[destIdx]     = (byte)(_cursorRgba[srcIdx + 2] * alpha + b * (1 - alpha));
+                                destRow[destIdx + 1] = (byte)(_cursorRgba[srcIdx + 1] * alpha + g * (1 - alpha));
+                                destRow[destIdx + 2] = (byte)(_cursorRgba[srcIdx]     * alpha + r * (1 - alpha));
+                            }
+                            rowModified = true;
+                        }
+
+                        if (rowModified)
+                            System.Runtime.InteropServices.Marshal.Copy(destRow, 0, rowPtr, stride);
+                    }
+                }
+                finally
+                {
+                    bmp.UnlockBits(bmpData);
+                }
+            }
+            catch { /* 光标绘制失败不应影响帧渲染 */ }
         }
 
         private void HandleClipboard(ClipboardDataMessage clip)

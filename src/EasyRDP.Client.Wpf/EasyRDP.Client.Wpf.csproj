@@ -18,4 +18,8 @@
     <ProjectReference Include="..\..\EasyDesk\src\EasyDesk.Windows\EasyDesk.Windows.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <PackageReference Include="FontAwesome.Sharp" Version="4.6.3" />
+  </ItemGroup>
+
 </Project>

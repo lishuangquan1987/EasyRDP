@@ -19,6 +19,7 @@ namespace EasyRDP.Server
         private static IInputSimulator _input;
         private static IClipboardService _clipboard;
         private static ICursorCapturer _cursor;
+        private static CursorTracker _cursorTracker;
         private static string _lastClipboardText = "";
 
         private static TcpTransportServer _transport;
@@ -67,6 +68,28 @@ namespace EasyRDP.Server
             _capturer = _factory.CreateScreenCapturer();
             _input = _factory.CreateInputSimulator();
             _cursor = _factory.CreateCursorCapturer();
+            _cursorTracker = new CursorTracker(
+                delegate
+                {
+                    int cx, cy;
+                    _cursor.GetCursorPosition(out cx, out cy);
+                    return CursorPosition.Create((short)cx, (short)cy);
+                },
+                delegate
+                {
+                    var info = _cursor.GetCursorInfo();
+                    if (info == null || info.ImageData == null || info.ImageData.Length == 0)
+                        return null;
+                    return new CursorShapeData
+                    {
+                        ImageData = info.ImageData,
+                        Width = info.Width,
+                        Height = info.Height,
+                        HotspotX = info.HotspotX,
+                        HotspotY = info.HotspotY
+                    };
+                });
+            _cursorTracker.EnableShape = true;
             StartClipboardThread();
 
             _transport = new TcpTransportServer();
@@ -76,6 +99,7 @@ namespace EasyRDP.Server
             _transport.MessageReceived += OnMessageReceived;
 
             int port = config.Port;
+            _cursorTracker.SendTo = (sid, data) => _transport.SendTo(sid, data);
             _transport.Start(port);
 
             // Clipboard monitor thread
@@ -135,6 +159,7 @@ namespace EasyRDP.Server
         {
             Console.WriteLine("Client {0} disconnected", e.SessionId);
             if (_clients.TryRemove(e.SessionId, out var state)) state.Dispose();
+            _cursorTracker.StopForClient(e.SessionId);
         }
 
         private static void OnMessageReceived(object sender, MessageReceivedEventArgs e)
@@ -201,6 +226,7 @@ namespace EasyRDP.Server
                 var captState = state;
                 new Thread(() => CaptureLoop(captState))
                 { IsBackground = true, Name = string.Format("EasyRDP-Capture-{0}", sessionId) }.Start();
+                _cursorTracker.StartForClient(sessionId);
             }
             else _transport.Disconnect(sessionId);
         }
@@ -334,16 +360,6 @@ namespace EasyRDP.Server
                         state.PrevWidth = w;
                         state.PrevHeight = h;
                         frameCount++;
-
-                        // Cursor
-                        int cx, cy;
-                        _cursor.GetCursorPosition(out cx, out cy);
-                        var cursorMsg = new CursorUpdateMessage
-                        {
-                            Visible = true, X = (short)cx, Y = (short)cy,
-                            HotspotX = 0, HotspotY = 0, Width = 0, Height = 0, ImageData = new byte[0]
-                        };
-                        _transport.SendTo(sessionId, MessageCodec.Encode(MessageType.CursorUpdate, state.FrameSeq.Next(), cursorMsg));
 
                         // curPixels ownership transferred to state, don't dispose
                         curPixels = null;

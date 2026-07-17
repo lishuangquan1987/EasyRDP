@@ -205,12 +205,46 @@ namespace EasyRDP.Client.Wpf.ViewModels
                 case MessageType.KeepAliveAck:
                     _keepAlive.OnAckReceived();
                     break;
+                case MessageType.CursorUpdate:
+                    HandleCursorUpdate((CursorUpdateMessage)msg.Body);
+                    break;
+                case MessageType.CopyRect:
+                    HandleCopyRect((CopyRectMessage)msg.Body);
+                    break;
             }
         }
 
         public void SendInput(byte[] data)
         {
             if (IsConnected) _conn.Transport.Send(data);
+        }
+
+        private void HandleCursorUpdate(CursorUpdateMessage msg)
+        {
+            if (!msg.Visible)
+            {
+                _render.SetCursor(false, 0, 0, null, 0, 0, 0, 0);
+                return;
+            }
+
+            _render.SetCursor(true, msg.X, msg.Y,
+                msg.ImageData != null && msg.ImageData.Length > 0 ? msg.ImageData : null,
+                msg.Width, msg.Height, msg.HotspotX, msg.HotspotY);
+        }
+
+        private void HandleCopyRect(CopyRectMessage msg)
+        {
+            if (msg.Entries == null || msg.Entries.Length == 0) return;
+            foreach (var entry in msg.Entries)
+            {
+                _frameBuf.CopyRegion(entry.SrcX, entry.SrcY, entry.DstX, entry.DstY, entry.Width, entry.Height);
+            }
+            // 触发重新渲染
+            byte[] px; int w, h;
+            if (_frameBuf.TryGetFrame(out px, out w, out h))
+            {
+                Dispatch(() => { _render.Render(px, w, h); OnPropertyChanged("FrameSource"); });
+            }
         }
 
         private void ClipboardLoop(CancellationToken ct)

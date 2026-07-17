@@ -17,6 +17,9 @@ namespace EasyRDP.Core.Protocol
         /// <summary>光标状态更新 S→C</summary>
         CursorUpdate = 0x11,
 
+        /// <summary>屏幕区域复制指令 S→C（零像素传输，客户端自行复制已有区域）</summary>
+        CopyRect = 0x12,
+
         /// <summary>键鼠输入事件 C→S</summary>
         InputEvent = 0x20,
 
@@ -108,7 +111,10 @@ namespace EasyRDP.Core.Protocol
         Zlib = 1,
 
         /// <summary>LZ4 压缩</summary>
-        Lz4 = 2
+        Lz4 = 2,
+
+        /// <summary>JPEG 有损压缩（适用于全帧/大脏矩形）</summary>
+        JPEG = 3
     }
 
     /// <summary>

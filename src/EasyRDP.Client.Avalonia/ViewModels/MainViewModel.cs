@@ -121,10 +121,26 @@ public class MainViewModel : INotifyPropertyChanged
             case MessageType.KeepAliveAck:
                 _keepAlive.OnAckReceived();
                 break;
+            case MessageType.CursorUpdate:
+                HandleCursorUpdate((CursorUpdateMessage)msg.Body);
+                break;
         }
     }
 
     public void SendInput(byte[] data) { if (IsConnected) _conn.Transport.Send(data); }
+
+    private void HandleCursorUpdate(CursorUpdateMessage msg)
+    {
+        if (!msg.Visible)
+        {
+            _render.SetCursor(false, 0, 0, null, 0, 0, 0, 0);
+            return;
+        }
+
+        _render.SetCursor(true, msg.X, msg.Y,
+            msg.ImageData != null && msg.ImageData.Length > 0 ? msg.ImageData : null,
+            msg.Width, msg.Height, msg.HotspotX, msg.HotspotY);
+    }
 
     private void ClipboardLoop(CancellationToken ct)
     {

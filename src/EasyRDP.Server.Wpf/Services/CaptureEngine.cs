@@ -17,6 +17,7 @@ namespace EasyRDP.Server.Wpf.Services
         private readonly IScreenCapturer _capturer;
         private readonly IInputSimulator _input;
         private readonly ICursorCapturer _cursor;
+        private readonly CursorTracker _cursorTracker;
         private readonly Dictionary<uint, CancellationTokenSource> _clientTokens = new Dictionary<uint, CancellationTokenSource>();
         private readonly object _captureLock = new object();
         private readonly object _clientLock = new object();
@@ -26,12 +27,39 @@ namespace EasyRDP.Server.Wpf.Services
         public Action<uint, byte[]> SendTo { get; set; }
         public Action<string> OnLog { get; set; }
 
+        /// <summary>独立光标追踪器（60Hz，与屏幕帧循环解耦）。由外部在启动时设置 SendTo。</summary>
+        public CursorTracker CursorTracker { get { return _cursorTracker; } }
+
         public CaptureEngine()
         {
             var factory = new WindowsDesktopFactory();
             _capturer = factory.CreateScreenCapturer();
             _input = factory.CreateInputSimulator();
             _cursor = factory.CreateCursorCapturer();
+
+            _cursorTracker = new CursorTracker(
+                delegate
+                {
+                    int cx, cy;
+                    _cursor.GetCursorPosition(out cx, out cy);
+                    return CursorPosition.Create((short)cx, (short)cy);
+                },
+                delegate
+                {
+                    var info = _cursor.GetCursorInfo();
+                    if (info == null || info.ImageData == null || info.ImageData.Length == 0)
+                        return null;
+                    return new CursorShapeData
+                    {
+                        ImageData = info.ImageData,
+                        Width = info.Width,
+                        Height = info.Height,
+                        HotspotX = info.HotspotX,
+                        HotspotY = info.HotspotY
+                    };
+                });
+            _cursorTracker.EnableShape = true;
+
             FrameDelayMs = 66;
             CompressType = CompressType.Zlib;
         }
@@ -54,6 +82,8 @@ namespace EasyRDP.Server.Wpf.Services
                 Name = string.Format("EasyRDP-Capture-{0}", sessionId)
             };
             t.Start();
+
+            _cursorTracker.StartForClient(sessionId);
         }
 
         public void StopForClient(uint sessionId)
@@ -67,6 +97,7 @@ namespace EasyRDP.Server.Wpf.Services
                     LogHelper.Info(string.Format("截屏停止 ClientId={0}", sessionId));
                 }
             }
+            _cursorTracker.StopForClient(sessionId);
         }
 
         public void StopAll()
@@ -76,6 +107,7 @@ namespace EasyRDP.Server.Wpf.Services
                 foreach (var kvp in _clientTokens) { kvp.Value.Cancel(); kvp.Value.Dispose(); }
                 _clientTokens.Clear();
             }
+            _cursorTracker.StopAll();
         }
 
         public void HandleInput(InputEventMessage msg)
@@ -101,12 +133,25 @@ namespace EasyRDP.Server.Wpf.Services
             }
         }
 
+        /// <summary>空闲无变化帧数达到此值时降帧到 IdleFrameDelayMs</summary>
+        private const int IdleThreshold = 15;
+        /// <summary>空闲时的帧间隔（毫秒），约 1fps</summary>
+        private const int IdleFrameDelayMs = 1000;
+        /// <summary>最小帧间隔（毫秒），最多 30fps</summary>
+        private const int MinFrameDelayMs = 33;
+
         private void CaptureLoop(uint sessionId, CancellationToken ct)
         {
             var seq = new SequenceTracker();
             int frameCount = 0;
-            byte[] prevPixels = null;
+            // 双缓冲池：bufA / bufB 轮流充当当前帧和上一帧，避免每帧 new byte[]
+            byte[] bufA = null;
+            byte[] bufB = null;
+            bool useBufA = true;
             int prevW = 0, prevH = 0;
+            // 自适应帧率状态
+            int idleFrames = 0;
+            int currentDelayMs = FrameDelayMs;
             var send = SendTo;
             if (send == null) return;
 
@@ -120,45 +165,85 @@ namespace EasyRDP.Server.Wpf.Services
                     {
                         if (frame.Scan0 == IntPtr.Zero) continue;
                         int w = frame.Width, h = frame.Height, pixelSize = w * h * 4;
-                        byte[] curPixels = new byte[pixelSize];
+
+                        // 从池中取出当前帧缓冲区（尺寸变化时重新分配）
+                        byte[] curPixels = useBufA ? bufA : bufB;
+                        if (curPixels == null || curPixels.Length != pixelSize)
+                            curPixels = new byte[pixelSize];
                         System.Runtime.InteropServices.Marshal.Copy(frame.Scan0, curPixels, 0, pixelSize);
 
+                        byte[] prevPixels = useBufA ? bufB : bufA; // 另一块就是上一帧
                         bool isKey = frameCount % 30 == 0 || prevPixels == null || prevW != w || prevH != h;
                         ScreenFrameMessage screenMsg;
-                        if (isKey) screenMsg = BuildFullFrame(w, h, curPixels);
+                        bool hasChanges = true;
+
+                        if (isKey)
+                        {
+                            screenMsg = BuildFullFrame(w, h, curPixels);
+                        }
                         else
                         {
                             screenMsg = BuildDeltaFrame(w, h, curPixels, prevPixels);
-                            if (screenMsg.Pixels.Length >= pixelSize)
+                            // BuildDeltaFrame 无变化时返回空像素 Full 帧
+                            if (screenMsg.Pixels == null || screenMsg.Pixels.Length == 0)
+                                hasChanges = false;
+                            else if (screenMsg.Pixels.Length >= pixelSize)
                                 screenMsg = BuildFullFrame(w, h, curPixels);
                         }
-                        send(sessionId, MessageCodec.Encode(MessageType.ScreenFrame, seq.Next(), screenMsg));
 
-                        prevPixels = curPixels; prevW = w; prevH = h; frameCount++; curPixels = null;
+                        if (hasChanges)
+                        {
+                            send(sessionId, MessageCodec.Encode(MessageType.ScreenFrame, seq.Next(), screenMsg));
+                            idleFrames = 0;
+                            // 大面积变化 → 30fps；小面积 → 配置帧率
+                            if (screenMsg.Rects != null && screenMsg.Rects.Length > 10)
+                                currentDelayMs = MinFrameDelayMs;
+                            else
+                                currentDelayMs = FrameDelayMs;
+                        }
+                        else
+                        {
+                            idleFrames++;
+                            // 空闲达到阈值后降帧到 1fps
+                            if (idleFrames >= IdleThreshold)
+                                currentDelayMs = IdleFrameDelayMs;
+                        }
 
-                        int cx, cy;
-                        _cursor.GetCursorPosition(out cx, out cy);
-                        send(sessionId, MessageCodec.Encode(MessageType.CursorUpdate, seq.Next(),
-                            new CursorUpdateMessage { Visible = true, X = (short)cx, Y = (short)cy, HotspotX = 0, HotspotY = 0, Width = 0, Height = 0, ImageData = new byte[0] }));
+                        // 交换缓冲区：当前帧 → 上一帧，另一块下次用
+                        if (useBufA)
+                            bufA = curPixels;
+                        else
+                            bufB = curPixels;
+                        useBufA = !useBufA;
+
+                        prevW = w; prevH = h; frameCount++;
                     }
                     finally { System.Runtime.InteropServices.Marshal.FreeHGlobal(frame.Scan0); }
                 }
                 catch (OperationCanceledException) { break; }
                 catch (Exception ex) { LogHelper.Error(ex, "Capture error"); var log = OnLog; if (log != null) log(string.Format("Capture error: {0}", ex.Message)); }
 
-                try { Thread.Sleep(FrameDelayMs); } catch { break; }
+                try { Thread.Sleep(currentDelayMs); } catch { break; }
             }
         }
 
         private ScreenFrameMessage BuildFullFrame(int w, int h, byte[] raw)
         {
-            byte[] compressed = CompressHelper.Compress(raw, CompressType.Zlib);
-            bool useZlib = compressed.Length < raw.Length;
+            int pixelCount = w * h;
+            CompressType bestType = CompressType.Zlib;
+
+            // 对照片/高熵/大画面用 JPEG，静止/低熵画面用 Zlib
+            if (pixelCount > 10000 && CompressHelper.ShouldUseJPEG(raw, pixelCount))
+                bestType = CompressType.JPEG;
+
+            byte[] compressed = CompressHelper.Compress(raw, bestType, w, h);
+            bool useCompress = compressed.Length < raw.Length && compressed.Length > 0;
             return new ScreenFrameMessage
             {
-                FrameType = FrameType.Full, Compress = useZlib ? CompressType.Zlib : CompressType.None,
+                FrameType = FrameType.Full,
+                Compress = useCompress ? bestType : CompressType.None,
                 Rects = new[] { new ScreenRect { X = 0, Y = 0, Width = (ushort)w, Height = (ushort)h, Offset = 0 } },
-                Pixels = useZlib ? compressed : raw
+                Pixels = useCompress ? compressed : raw
             };
         }
 
@@ -175,7 +260,9 @@ namespace EasyRDP.Server.Wpf.Services
             int offset = 0;
             for (int i = 0; i < rects.Count; i++)
             {
-                var r = rects[i]; r.Offset = (uint)offset; rects[i] = r;
+                var r = rects[i];
+                r.Offset = (uint)offset;
+                rects[i] = r;
                 int tileBytes = r.Width * r.Height * 4;
                 for (int ty = 0; ty < r.Height; ty++)
                     Array.Copy(cur, ((r.Y + ty) * w + r.X) * 4, allPixels, offset + ty * r.Width * 4, r.Width * 4);
@@ -185,6 +272,30 @@ namespace EasyRDP.Server.Wpf.Services
             bool useZlib = compressed.Length < allPixels.Length;
             return new ScreenFrameMessage { FrameType = FrameType.Delta, Compress = useZlib ? CompressType.Zlib : CompressType.None,
                 Rects = rects.ToArray(), Pixels = useZlib ? compressed : allPixels };
+        }
+
+        /// <summary>
+        /// 判断指定矩形区域内的所有像素是否相同。
+        /// </summary>
+        private static bool IsSolidColor(byte[] pixels, int x, int y, int w, int h, int screenW)
+        {
+            int firstIdx = (y * screenW + x) * 4;
+            byte b = pixels[firstIdx], g = pixels[firstIdx + 1];
+            byte r = pixels[firstIdx + 2], a = pixels[firstIdx + 3];
+            int stride = screenW * 4;
+
+            for (int row = 0; row < h; row++)
+            {
+                int rowBase = (y + row) * stride;
+                for (int col = 0; col < w; col++)
+                {
+                    int idx = rowBase + (x + col) * 4;
+                    if (pixels[idx] != b || pixels[idx + 1] != g ||
+                        pixels[idx + 2] != r || pixels[idx + 3] != a)
+                        return false;
+                }
+            }
+            return true;
         }
     }
 }

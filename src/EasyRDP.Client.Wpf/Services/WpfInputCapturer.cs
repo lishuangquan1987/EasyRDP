@@ -43,13 +43,13 @@ namespace EasyRDP.Client.Wpf.Services
             return _encoder.EncodeKey(seq, isDown, vk, 0);
         }
 
-        private static byte MapButton(MouseButton btn)
+        private static byte MapButton(System.Windows.Input.MouseButton btn)
         {
-            if (btn == MouseButton.Left) return 0;
-            if (btn == MouseButton.Right) return 1;
-            if (btn == MouseButton.Middle) return 2;
-            if (btn == MouseButton.XButton1) return 3;
-            if (btn == MouseButton.XButton2) return 4;
+            if (btn == System.Windows.Input.MouseButton.Left) return 1;
+            if (btn == System.Windows.Input.MouseButton.Right) return 2;
+            if (btn == System.Windows.Input.MouseButton.Middle) return 3;
+            if (btn == System.Windows.Input.MouseButton.XButton1) return 4;
+            if (btn == System.Windows.Input.MouseButton.XButton2) return 5;
             return 0;
         }
 
