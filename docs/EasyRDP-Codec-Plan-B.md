@@ -607,8 +607,8 @@ EasyDesk 子模块指针更新至 `be87684`，包含：
 | B-2 协商基础 | CodecId / CodecCapabilities / CodecNegotiator | ✅ cf18788 |
 | B-2 协议扩展 | HandshakeReq/Res、MessageType、VideoFrame、VideoFrameMessage、MessageCodec | ✅ 已落地（编译通过） |
 | B-2 集成 | Server.Wpf / Client.Wpf MainViewModel、ConnectionManager | ✅ 已落地（编译通过） |
-| B-3 编解码 | YuvConverter / OpenH264Native / H264Encoder / H264Decoder | ❌ 待落地 |
-| B-3 集成 | Server/Client 端编码切换逻辑 | ❌ 待落地 |
+| B-3 编解码 | YuvConverter / OpenH264Native / IVideoEncoder / H264Encoder / H264Decoder | ✅ 代码骨架已落地（需 openh264.dll + net8.0 运行时验证） |
+| B-3 集成 | Server/Client 端编码切换逻辑（CaptureEngine + MainViewModel） | ✅ 已落地（需 net8.0 运行时） |
 | B-4 | 硬件编码、配置枚举、测试 | ❌ 待落地 |
 | Bug 修复 | 鼠标按键 +1 映射、HandshakeReq trailing-zero | ✅ 已落地 |
 
