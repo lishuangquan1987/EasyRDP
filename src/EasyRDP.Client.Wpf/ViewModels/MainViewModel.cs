@@ -20,6 +20,9 @@ namespace EasyRDP.Client.Wpf.ViewModels
         private readonly WpfRenderEngine _render = new WpfRenderEngine();
         private readonly WpfInputCapturer _inputCap;
         private readonly WpfClipboardProvider _clipProv = new WpfClipboardProvider();
+#if NET8_0_OR_GREATER
+        private H264Decoder _h264Decoder;
+#endif
         private CancellationTokenSource _clipCts;
         private volatile bool _running;
         private bool _firstFrameArrived;
@@ -287,7 +290,28 @@ namespace EasyRDP.Client.Wpf.ViewModels
 
         private void HandleVideoFrame(VideoFrameMessage msg)
         {
-            LogHelper.Warn("收到 VideoFrame 消息，当前未处理（H.264 编解码尚未实现）");
+#if NET8_0_OR_GREATER
+            if (msg.Codec == CodecId.H264Software)
+            {
+                if (_h264Decoder == null)
+                {
+                    _h264Decoder = new H264Decoder();
+                    if (_h264Decoder.IsAvailable)
+                        _h264Decoder.Initialize(msg.Width, msg.Height);
+                }
+
+                if (_h264Decoder != null && _h264Decoder.IsAvailable)
+                {
+                    byte[] pixels = _h264Decoder.Decode(msg.Pixels);
+                    if (pixels != null && pixels.Length > 0)
+                    {
+                        _frameBuf.ProcessFullFrame(msg.Width, msg.Height, pixels);
+                        return;
+                    }
+                }
+            }
+#endif
+            LogHelper.Warn("收到 VideoFrame 消息，当前未处理（H.264 编解码不可用）");
         }
 
         private void ClipboardLoop(CancellationToken ct)

@@ -47,10 +47,10 @@ namespace EasyRDP.Core.Protocol
             if (result != OpenH264Native.ERROR_CODE_NONE || _decoder == IntPtr.Zero)
                 throw new InvalidOperationException("Failed to create decoder");
 
-            result = OpenH264Native.WelsInitializeDecoder(_decoder);
+            result = OpenH264Native.DecoderInitialize(_decoder);
             if (result != OpenH264Native.ERROR_CODE_NONE)
             {
-                OpenH264Native.WelsDestroyDecoder(_decoder);
+                OpenH264Native.DestroyDecoder(_decoder);
                 _decoder = IntPtr.Zero;
                 throw new InvalidOperationException("Failed to initialize decoder");
             }
@@ -80,7 +80,7 @@ namespace EasyRDP.Core.Protocol
                     _width, _width / 2);
 
                 int frameStatus = 0;
-                int result = OpenH264Native.WelsDecodeFrame2(_decoder, data, data.Length, ref dstPic, ref frameStatus);
+                int result = OpenH264Native.DecoderDecodeFrame2(_decoder, data, data.Length, ref dstPic, ref frameStatus);
                 if (result != OpenH264Native.ERROR_CODE_NONE)
                     return null;
 
@@ -109,7 +109,7 @@ namespace EasyRDP.Core.Protocol
         {
             if (_decoder != IntPtr.Zero)
             {
-                OpenH264Native.WelsDestroyDecoder(_decoder);
+                OpenH264Native.DestroyDecoder(_decoder);
                 _decoder = IntPtr.Zero;
             }
             _isInitialized = false;

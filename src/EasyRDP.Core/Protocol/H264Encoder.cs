@@ -67,10 +67,10 @@ namespace EasyRDP.Core.Protocol
             param.iDeblockingFilterAlphaC0Offset = 0;
             param.iDeblockingFilterBetaOffset = 0;
 
-            result = OpenH264Native.WelsInitializeEncoder(_encoder, ref param);
+            result = OpenH264Native.EncoderInitialize(_encoder, ref param);
             if (result != OpenH264Native.ERROR_CODE_NONE)
             {
-                OpenH264Native.WelsDestroySvcEncoder(_encoder);
+                OpenH264Native.DestroyEncoder(_encoder);
                 _encoder = IntPtr.Zero;
                 throw new InvalidOperationException("Failed to initialize encoder");
             }
@@ -99,16 +99,18 @@ namespace EasyRDP.Core.Protocol
                     _width, _width / 2);
 
                 OpenH264Native.SFrameBSInfo bsInfo = new OpenH264Native.SFrameBSInfo();
+                bsInfo.sLayerInfo = new OpenH264Native.SLayerBSInfo[OpenH264Native.WelsMaxLayerNum];
 
-                int result = OpenH264Native.WelsEncodeFrameNoDelay(_encoder, ref srcPic, ref bsInfo);
+                int result = OpenH264Native.EncoderEncodeFrameNoDelay(_encoder, ref srcPic, ref bsInfo);
                 if (result != OpenH264Native.ERROR_CODE_NONE)
                     return null;
 
-                if (bsInfo.iBsLen <= 0 || bsInfo.pBsBuf == IntPtr.Zero)
+                OpenH264Native.SLayerBSInfo layerInfo = bsInfo.sLayerInfo[0];
+                if (layerInfo.iBsLen <= 0 || layerInfo.pBsBuf == IntPtr.Zero)
                     return null;
 
-                byte[] encodedData = new byte[bsInfo.iBsLen];
-                Marshal.Copy(bsInfo.pBsBuf, encodedData, 0, bsInfo.iBsLen);
+                byte[] encodedData = new byte[layerInfo.iBsLen];
+                Marshal.Copy(layerInfo.pBsBuf, encodedData, 0, layerInfo.iBsLen);
 
                 bool isKey = bsInfo.iFrameType == 0 || forceKeyframe;
 
@@ -143,7 +145,7 @@ namespace EasyRDP.Core.Protocol
         {
             if (_encoder != IntPtr.Zero)
             {
-                OpenH264Native.WelsDestroySvcEncoder(_encoder);
+                OpenH264Native.DestroyEncoder(_encoder);
                 _encoder = IntPtr.Zero;
             }
             _isInitialized = false;

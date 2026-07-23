@@ -19,6 +19,9 @@ namespace EasyRDP.Server.Wpf.Services
         private readonly object _captureLock = new object();
         private readonly object _clientLock = new object();
         private readonly Dictionary<uint, IFrameEncoder> _clientEncoders = new Dictionary<uint, IFrameEncoder>();
+#if NET8_0_OR_GREATER
+        private readonly Dictionary<uint, IVideoEncoder> _clientVideoEncoders = new Dictionary<uint, IVideoEncoder>();
+#endif
 
         public int FrameDelayMs { get; set; }
         public CompressType CompressType { get; set; }
@@ -74,11 +77,21 @@ namespace EasyRDP.Server.Wpf.Services
         public void StartForClient(uint sessionId)
         {
             var cts = new CancellationTokenSource();
-            var encoder = EncoderFactory.CreateFrame(Codec);
             lock (_clientLock)
             {
                 _clientTokens[sessionId] = cts;
-                _clientEncoders[sessionId] = encoder;
+#if NET8_0_OR_GREATER
+                if (Codec == CodecId.H264Software)
+                {
+                    var videoEncoder = EncoderFactory.CreateVideo(Codec);
+                    _clientVideoEncoders[sessionId] = videoEncoder;
+                }
+                else
+#endif
+                {
+                    var encoder = EncoderFactory.CreateFrame(Codec);
+                    _clientEncoders[sessionId] = encoder;
+                }
             }
             LogHelper.Info(string.Format("截屏启动 ClientId={0} Codec={1}", sessionId, Codec));
             var t = new Thread(() => CaptureLoop(sessionId, cts.Token))
@@ -102,6 +115,14 @@ namespace EasyRDP.Server.Wpf.Services
                     LogHelper.Info(string.Format("截屏停止 ClientId={0}", sessionId));
                 }
                 _clientEncoders.Remove(sessionId);
+#if NET8_0_OR_GREATER
+                IVideoEncoder videoEncoder;
+                if (_clientVideoEncoders.TryGetValue(sessionId, out videoEncoder))
+                {
+                    videoEncoder.Dispose();
+                    _clientVideoEncoders.Remove(sessionId);
+                }
+#endif
             }
             _cursorTracker.StopForClient(sessionId);
         }
@@ -221,35 +242,69 @@ namespace EasyRDP.Server.Wpf.Services
 
                             byte[] prevPixels = useBufA ? bufB : bufA;
                             bool isKey = frameCount % 30 == 0 || prevPixels == null || prevW != w || prevH != h;
-                            ScreenFrameMessage screenMsg;
                             bool hasChanges = true;
                             bool frameIsKey = isKey;
+                            byte[] encoded = null;
 
-                            IFrameEncoder encoder;
-                            lock (_clientLock) _clientEncoders.TryGetValue(sessionId, out encoder);
-                            if (encoder != null)
+#if NET8_0_OR_GREATER
+                            IVideoEncoder videoEncoder;
+                            lock (_clientLock) _clientVideoEncoders.TryGetValue(sessionId, out videoEncoder);
+                            if (videoEncoder != null)
                             {
-                                screenMsg = encoder.Encode(w, h, curPixels, prevPixels, isKey);
-                                frameIsKey = screenMsg.FrameType == FrameType.Full;
+                                if (!videoEncoder.IsAvailable)
+                                {
+                                    ScreenFrameMessage fallbackMsg = BuildFullFrame(w, h, curPixels);
+                                    encoded = MessageCodec.Encode(MessageType.ScreenFrame, seq.Next(), fallbackMsg);
+                                }
+                                else
+                                {
+                                    if (frameCount == 0)
+                                        videoEncoder.Initialize(w, h);
+                                    VideoFrameMessage videoMsg = videoEncoder.Encode(curPixels, isKey);
+                                    if (videoMsg != null && videoMsg.Pixels != null && videoMsg.Pixels.Length > 0)
+                                    {
+                                        encoded = MessageCodec.Encode(MessageType.VideoFrame, seq.Next(), videoMsg);
+                                        frameIsKey = videoMsg.FrameType == FrameType.Full;
+                                    }
+                                    else
+                                    {
+                                        hasChanges = false;
+                                    }
+                                }
                             }
                             else
+#endif
                             {
-                                screenMsg = BuildFullFrame(w, h, curPixels);
+                                ScreenFrameMessage screenMsg;
+                                IFrameEncoder encoder;
+                                lock (_clientLock) _clientEncoders.TryGetValue(sessionId, out encoder);
+                                if (encoder != null)
+                                {
+                                    screenMsg = encoder.Encode(w, h, curPixels, prevPixels, isKey);
+                                    frameIsKey = screenMsg.FrameType == FrameType.Full;
+                                }
+                                else
+                                {
+                                    screenMsg = BuildFullFrame(w, h, curPixels);
+                                }
+
+                                if (screenMsg.Pixels == null || screenMsg.Pixels.Length == 0)
+                                    hasChanges = false;
+
+                                if (hasChanges)
+                                {
+                                    encoded = MessageCodec.Encode(MessageType.ScreenFrame, seq.Next(), screenMsg);
+                                    if (screenMsg.Rects != null && screenMsg.Rects.Length > 10)
+                                        currentDelayMs = MinFrameDelayMs;
+                                    else
+                                        currentDelayMs = FrameDelayMs;
+                                }
                             }
 
-                            if (screenMsg.Pixels == null || screenMsg.Pixels.Length == 0)
-                                hasChanges = false;
-
-                            if (hasChanges)
+                            if (hasChanges && encoded != null)
                             {
-                                byte[] encoded = MessageCodec.Encode(MessageType.ScreenFrame, seq.Next(), screenMsg);
                                 EnqueueFrame(sendQueue, queueLock, encoded, frameIsKey);
                                 idleFrames = 0;
-                                // 大面积变化 → 30fps；小面积 → 配置帧率
-                                if (screenMsg.Rects != null && screenMsg.Rects.Length > 10)
-                                    currentDelayMs = MinFrameDelayMs;
-                                else
-                                    currentDelayMs = FrameDelayMs;
                             }
                             else
                             {

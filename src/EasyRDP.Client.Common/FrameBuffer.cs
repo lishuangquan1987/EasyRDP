@@ -188,6 +188,49 @@ namespace EasyRDP.Client.Common
             }
         }
 
+        /// <summary>
+        /// 处理原始 BGRA32 全帧像素数据。
+        /// 直接替换整个缓冲区，适用于视频解码后的帧数据。
+        /// </summary>
+        public void ProcessFullFrame(int width, int height, byte[] pixels)
+        {
+            if (pixels == null || pixels.Length == 0 || width <= 0 || height <= 0)
+                return;
+
+            int size = width * height * 4;
+            if (pixels.Length < size)
+                return;
+
+            lock (_lock)
+            {
+                bool resized = _buffer == null || _buffer.Length != size;
+
+                if (resized)
+                {
+                    _buffer = new byte[size];
+                    if (_width != 0 || _height != 0)
+                        LogHelper.Info(string.Format("帧缓冲分辨率变更: {0}x{1} → {2}x{3}", _width, _height, width, height));
+                }
+
+                _width = width;
+                _height = height;
+
+                Array.Copy(pixels, 0, _buffer, 0, size);
+
+                _pendingDirty.Clear();
+                _pendingDirty.Add(new ScreenRect { X = 0, Y = 0, Width = (ushort)width, Height = (ushort)height, Offset = 0 });
+
+                if (!_firstFrameLogged)
+                {
+                    _firstFrameLogged = true;
+                    LogHelper.Info(string.Format("收到首帧 (Full) 分辨率={0}x{1} 大小={2}KB", width, height, size / 1024));
+                }
+
+                _isDirty = true;
+                _frameCount = _frameCount + 1;
+            }
+        }
+
         // ── 消费帧 ────────────────────────────────────────
 
         /// <summary>
