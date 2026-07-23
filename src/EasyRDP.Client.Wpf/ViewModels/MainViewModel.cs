@@ -23,6 +23,14 @@ namespace EasyRDP.Client.Wpf.ViewModels
         private CancellationTokenSource _clipCts;
         private volatile bool _running;
         private bool _firstFrameArrived;
+        // 光标状态变化标志：CursorUpdate 到达后置位，渲染循环据此决定是否重绘光标
+        private volatile bool _cursorDirty;
+        // 鼠标移动限频：移动事件可达 100+Hz，逐包发送浪费带宽且让服务端输入队列拥塞。
+        // 策略：8ms 内只保留最新位置，由 OnRendering 补发；按下/释放前强制 flush 保证位置正确。
+        private const int MoveThrottleMs = 8;
+        private int _pendingMoveX, _pendingMoveY;
+        private volatile bool _hasPendingMove;
+        private int _lastMoveSendMs;
 
         private string _host = "127.0.0.1";
         private int _port = 8750;
@@ -156,7 +164,11 @@ namespace EasyRDP.Client.Wpf.ViewModels
             _running = true;
             _prevFrameCount = 0;
             _firstFrameArrived = false;
+            _cursorDirty = false;
             new Thread(FpsLoop) { IsBackground = true, Name = "EasyRDP-Fps" }.Start();
+
+            // 渲染由 UI 线程的 vsync 回调驱动，每帧拉取最新帧，避免 dispatcher 队列堆积
+            CompositionTarget.Rendering += OnRendering;
 
             IsConnected = true;
             IsConnecting = false;
@@ -166,6 +178,7 @@ namespace EasyRDP.Client.Wpf.ViewModels
 
         private void OnDisconnected(string reason)
         {
+            CompositionTarget.Rendering -= OnRendering;
             _keepAlive.Stop();
             if (_clipCts != null) { _clipCts.Cancel(); _clipCts = null; }
             _frameBuf.Reset();
@@ -186,17 +199,8 @@ namespace EasyRDP.Client.Wpf.ViewModels
             switch (msg.Header.Type)
             {
                 case MessageType.ScreenFrame:
+                    // 仅入帧缓冲，渲染由 CompositionTarget.Rendering 拉取，避免 dispatcher 队列堆积
                     _frameBuf.ProcessFrame((ScreenFrameMessage)msg.Body);
-                    byte[] px; int w, h;
-                    if (_frameBuf.TryGetFrame(out px, out w, out h))
-                    {
-                        if (!_firstFrameArrived)
-                        {
-                            _firstFrameArrived = true;
-                            LogHelper.Info(string.Format("首帧已渲染 ({0}x{1})", w, h));
-                        }
-                        Dispatch(() => { _render.Render(px, w, h); OnPropertyChanged("FrameSource"); });
-                    }
                     break;
                 case MessageType.ClipboardData:
                     var text = _clipSync.OnRemoteClipboard((ClipboardDataMessage)msg.Body);
@@ -219,17 +223,53 @@ namespace EasyRDP.Client.Wpf.ViewModels
             if (IsConnected) _conn.Transport.Send(data);
         }
 
+        /// <summary>
+        /// 处理本地鼠标移动事件：记录最新位置并限频发送。
+        /// 仅移动事件限频；按下/释放/滚轮/键盘仍立即发送以保证响应。
+        /// </summary>
+        public void OnLocalMouseMove(Point position, UIElement el)
+        {
+            int x, y;
+            _inputCap.MapToScreen(position, el, out x, out y);
+            _pendingMoveX = x;
+            _pendingMoveY = y;
+            _hasPendingMove = true;
+            FlushPendingMove(false);
+        }
+
+        /// <summary>
+        /// 发送待发的鼠标移动。
+        /// </summary>
+        /// <param name="force">true 表示无视限频立即发送（按下/释放前调用，保证位置正确）</param>
+        public void FlushPendingMove(bool force)
+        {
+            if (!_hasPendingMove || !IsConnected)
+                return;
+
+            int now = Environment.TickCount;
+            if (force || now - _lastMoveSendMs >= MoveThrottleMs)
+            {
+                _lastMoveSendMs = now;
+                _hasPendingMove = false;
+                byte[] data = _inputCap.EncodeMouseMove(_pendingMoveX, _pendingMoveY, _conn.SeqTracker.Next());
+                SendInput(data);
+            }
+        }
+
         private void HandleCursorUpdate(CursorUpdateMessage msg)
         {
             if (!msg.Visible)
             {
                 _render.SetCursor(false, 0, 0, null, 0, 0, 0, 0);
-                return;
             }
-
-            _render.SetCursor(true, msg.X, msg.Y,
-                msg.ImageData != null && msg.ImageData.Length > 0 ? msg.ImageData : null,
-                msg.Width, msg.Height, msg.HotspotX, msg.HotspotY);
+            else
+            {
+                _render.SetCursor(true, msg.X, msg.Y,
+                    msg.ImageData != null && msg.ImageData.Length > 0 ? msg.ImageData : null,
+                    msg.Width, msg.Height, msg.HotspotX, msg.HotspotY);
+            }
+            // 标记光标变化，由渲染循环重绘（含恢复旧光标位置残影）
+            _cursorDirty = true;
         }
 
         private void HandleCopyRect(CopyRectMessage msg)
@@ -239,12 +279,7 @@ namespace EasyRDP.Client.Wpf.ViewModels
             {
                 _frameBuf.CopyRegion(entry.SrcX, entry.SrcY, entry.DstX, entry.DstY, entry.Width, entry.Height);
             }
-            // 触发重新渲染
-            byte[] px; int w, h;
-            if (_frameBuf.TryGetFrame(out px, out w, out h))
-            {
-                Dispatch(() => { _render.Render(px, w, h); OnPropertyChanged("FrameSource"); });
-            }
+            // CopyRegion 已置 IsDirty=true，渲染循环会自动拉取
         }
 
         private void ClipboardLoop(CancellationToken ct)
@@ -274,6 +309,47 @@ namespace EasyRDP.Client.Wpf.ViewModels
             }
         }
 
+        /// <summary>
+        /// 渲染回调（由 UI 线程 vsync 触发，约 60Hz）。
+        /// 每帧检查是否有新屏幕帧或光标变化，有则拉取最新帧并渲染。
+        /// 若 UI 仍在渲染上一帧则自然跳过（下一 vsync 再试），形成背压。
+        /// </summary>
+        private void OnRendering(object sender, EventArgs e)
+        {
+            if (!_running)
+                return;
+
+            // 补发限频积压的鼠标移动，保证操作跟手
+            FlushPendingMove(false);
+
+            bool hasScreen = _frameBuf.IsDirty;
+            bool cursorMoved = _cursorDirty;
+            _cursorDirty = false;
+
+            // 无新屏幕帧且光标未动 → 跳过，避免空转消耗 CPU
+            if (!hasScreen && !cursorMoved)
+                return;
+
+            byte[] px;
+            int w, h;
+            ScreenRect[] dirtyRects;
+            if (!_frameBuf.TryGetFrame(out px, out w, out h, out dirtyRects))
+                return;
+
+            if (!_firstFrameArrived)
+            {
+                _firstFrameArrived = true;
+                LogHelper.Info(string.Format("首帧已渲染 ({0}x{1})", w, h));
+            }
+
+            // 有明确屏幕脏区 → 按区局部更新；
+            // 仅有光标移动（无屏幕帧）→ 全屏刷新以恢复旧光标位置残影并绘制新位置
+            ScreenRect[] rectsToDraw = (hasScreen && dirtyRects != null && dirtyRects.Length > 0)
+                ? dirtyRects : null;
+
+            _render.Render(px, w, h, rectsToDraw);
+        }
+
         private void CheckUpdate()
         {
             if (this.AlyClientStatus == AlyClientStatus.DiscoveredUpdate)
@@ -290,6 +366,7 @@ namespace EasyRDP.Client.Wpf.ViewModels
 
         public void Cleanup()
         {
+            CompositionTarget.Rendering -= OnRendering;
             _running = false;
             _keepAlive.Stop();
             if (_clipCts != null) { _clipCts.Cancel(); _clipCts = null; }

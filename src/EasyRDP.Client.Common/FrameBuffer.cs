@@ -19,6 +19,9 @@ namespace EasyRDP.Client.Common
         private readonly object _lock = new object();
         private bool _firstFrameLogged;
         private bool _noBaselineLogged;
+        // 自上次 TryGetFrame 消费后累积的脏矩形列表（全帧时为整屏单矩形）
+        // 供渲染层做局部 WritePixels，避免每帧全屏刷新
+        private readonly List<ScreenRect> _pendingDirty = new List<ScreenRect>();
 
         /// <summary>帧缓冲宽度。</summary>
         public int Width
@@ -102,6 +105,10 @@ namespace EasyRDP.Client.Common
                     if (pixels.Length >= size)
                         Array.Copy(pixels, 0, _buffer, 0, size);
 
+                    // 全帧重置脏区为整屏（覆盖此前累积的增量脏区）
+                    _pendingDirty.Clear();
+                    _pendingDirty.Add(new ScreenRect { X = 0, Y = 0, Width = (ushort)rectW, Height = (ushort)rectH, Offset = 0 });
+
                     if (!_firstFrameLogged)
                     {
                         _firstFrameLogged = true;
@@ -155,7 +162,7 @@ namespace EasyRDP.Client.Common
                                 }
                             }
                         }
-                        else 
+                        else
                         {
                             if ((int)rect.Offset + tileBytes > pixels.Length)
                                 continue;
@@ -170,6 +177,9 @@ namespace EasyRDP.Client.Common
                                     Array.Copy(pixels, srcOffset, _buffer, dstOffset, rectW * 4);
                             }
                         }
+
+                        // 累积该脏矩形（克隆以脱离协议解码实例）
+                        _pendingDirty.Add(new ScreenRect { X = rect.X, Y = rect.Y, Width = rect.Width, Height = rect.Height, Offset = 0 });
                     }
                 }
                 _isDirty = true;
@@ -186,6 +196,18 @@ namespace EasyRDP.Client.Common
         /// </summary>
         public bool TryGetFrame(out byte[] pixels, out int w, out int h)
         {
+            ScreenRect[] ignored;
+            return TryGetFrame(out pixels, out w, out h, out ignored);
+        }
+
+        /// <summary>
+        /// 尝试获取最新帧的像素副本，并返回自上次消费后累积的脏矩形列表。
+        /// 脏矩形供渲染层做局部 WritePixels，避免每帧全屏刷新。
+        /// 全帧时 dirtyRects 含一个整屏矩形；增量帧含若干脏区；无新帧时为空数组。
+        /// 消费后 IsDirty 变为 false，脏矩形列表被清空。
+        /// </summary>
+        public bool TryGetFrame(out byte[] pixels, out int w, out int h, out ScreenRect[] dirtyRects)
+        {
             lock (_lock)
             {
                 if (_buffer == null)
@@ -193,6 +215,7 @@ namespace EasyRDP.Client.Common
                     pixels = null;
                     w = 0;
                     h = 0;
+                    dirtyRects = new ScreenRect[0];
                     return false;
                 }
 
@@ -200,6 +223,8 @@ namespace EasyRDP.Client.Common
                 Array.Copy(_buffer, pixels, _buffer.Length);
                 w = _width;
                 h = _height;
+                dirtyRects = _pendingDirty.Count > 0 ? _pendingDirty.ToArray() : new ScreenRect[0];
+                _pendingDirty.Clear();
                 _isDirty = false;
                 return true;
             }
@@ -243,6 +268,7 @@ namespace EasyRDP.Client.Common
                 _frameCount = 0;
                 _firstFrameLogged = false;
                 _noBaselineLogged = false;
+                _pendingDirty.Clear();
             }
         }
     }

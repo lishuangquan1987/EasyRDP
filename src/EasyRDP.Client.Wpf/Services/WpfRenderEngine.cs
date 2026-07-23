@@ -3,13 +3,15 @@ using System.Windows;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using EasyRDP.Core.Logging;
+using EasyRDP.Core.Protocol;
 
 namespace EasyRDP.Client.Wpf.Services
 {
     /// <summary>
     /// WPF WriteableBitmap 渲染引擎。
-    /// 每帧创建新 WriteableBitmap，避免 .NET 4.0 下引用相等导致 Image 不刷新。
+    /// 复用单个 WriteableBitmap，仅尺寸变化时重建，避免每帧分配带来的 GC 压力。
     /// BGRA32 像素直接映射（PixelFormats.Bgra32 与 EasyDesk 格式一致）。
+    /// 支持按脏矩形局部 WritePixels，减少每帧刷新面积。
     /// 支持自绘光标叠加，消除系统光标闪烁。
     /// </summary>
     public class WpfRenderEngine
@@ -27,21 +29,62 @@ namespace EasyRDP.Client.Wpf.Services
         public ImageSource Source { get { return _bitmap; } }
 
         /// <summary>
-        /// 渲染一帧。每次创建新 WriteableBitmap → 写入像素 → 叠加光标 → 替换 Source。
+        /// 渲染一帧（全屏刷新）。保留旧 API 兼容。
         /// </summary>
         public void Render(byte[] bgraPixels, int w, int h)
         {
+            Render(bgraPixels, w, h, null);
+        }
+
+        /// <summary>
+        /// 渲染一帧。复用 WriteableBitmap，仅尺寸变化时重建。
+        /// 当 dirtyRects 非空时按脏区逐块 WritePixels，否则全屏 WritePixels。
+        /// 写入像素后叠加自绘光标。
+        /// </summary>
+        /// <param name="dirtyRects">自上次渲染后变化的屏幕区域；null 或空表示全屏</param>
+        public void Render(byte[] bgraPixels, int w, int h, ScreenRect[] dirtyRects)
+        {
+            if (bgraPixels == null || w <= 0 || h <= 0)
+                return;
+
             try
             {
                 _screenW = w;
                 _screenH = h;
-                var bitmap = new WriteableBitmap(w, h, 96, 96, PixelFormats.Bgra32, null);
-                bitmap.WritePixels(new Int32Rect(0, 0, w, h), bgraPixels, w * 4, 0);
+
+                // 尺寸变化或首次：重建位图
+                if (_bitmap == null || _bitmap.PixelWidth != w || _bitmap.PixelHeight != h)
+                {
+                    _bitmap = new WriteableBitmap(w, h, 96, 96, PixelFormats.Bgra32, null);
+                    dirtyRects = null; // 重建后强制全屏
+                }
+
+                int stride = w * 4;
+
+                if (dirtyRects == null || dirtyRects.Length == 0)
+                {
+                    // 全屏
+                    _bitmap.WritePixels(new Int32Rect(0, 0, w, h), bgraPixels, stride, 0);
+                }
+                else
+                {
+                    // 逐脏区写入。脏区坐标来自服务端 ScreenRect（屏幕像素坐标）
+                    // 全帧时 dirtyRects 含一个整屏矩形，等价全屏 WritePixels
+                    for (int i = 0; i < dirtyRects.Length; i++)
+                    {
+                        var r = dirtyRects[i];
+                        if (r.Width <= 0 || r.Height <= 0) continue;
+                        if (r.X < 0 || r.Y < 0 || r.X + r.Width > w || r.Y + r.Height > h) continue;
+
+                        int srcOffset = (r.Y * w + r.X) * 4;
+                        _bitmap.WritePixels(
+                            new Int32Rect(r.X, r.Y, r.Width, r.Height),
+                            bgraPixels, stride, srcOffset);
+                    }
+                }
 
                 // 叠加自绘光标
-                DrawCursorOverlay(bitmap);
-
-                _bitmap = bitmap;
+                DrawCursorOverlay(_bitmap);
             }
             catch (Exception ex)
             {
@@ -56,7 +99,8 @@ namespace EasyRDP.Client.Wpf.Services
         {
             _screenW = w;
             _screenH = h;
-            _bitmap = new WriteableBitmap(w, h, 96, 96, PixelFormats.Bgra32, null);
+            if (_bitmap == null || _bitmap.PixelWidth != w || _bitmap.PixelHeight != h)
+                _bitmap = new WriteableBitmap(w, h, 96, 96, PixelFormats.Bgra32, null);
         }
 
         /// <summary>
