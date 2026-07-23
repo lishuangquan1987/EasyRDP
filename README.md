@@ -150,7 +150,8 @@ EasyRDP/
 ├── .gitignore
 ├── .gitmodules                  ← EasyDesk 子模块引用
 ├── docs/
-│   └── EasyRDP-Protocol-v1.md   ← 协议规范
+│   ├── EasyRDP-Protocol-v1.md   ← 协议规范
+│   └── EasyRDP-Codec-Plan-B.md ← 编码层抽象改进计划（B1–B4）
 ├── src/
 │   ├── EasyRDP.Core/            # 协议 + 传输层共享库 (net40;net8.0)
 │   │   ├── Protocol/            # 消息类型、编解码、BinaryPacker、CompressHelper
@@ -177,6 +178,10 @@ EasyRDP/
 | **Phase 5** | 剪贴板同步 — 双向同步 + 静默期防死循环 | ✅ 已完成 |
 | **Phase 6** | 服务端 / 客户端 UI — WPF (.NET 4, XP 兼容) + Avalonia (.NET 8, 跨平台) | ⏳ 进行中 |
 | **Phase 7** | 跨平台扩展 — Linux X11、macOS 实现 | ⏳ 计划中 |
+| **Phase 8** | 编码层抽象（B1–B4）— 可插拔编码后端：Bitmap / H.264 软编 / H.264 硬编 | 🔄 进行中（B-2 协商基础 ✅） |
+
+> Phase 8 详见 [docs/EasyRDP-Codec-Plan-B.md](docs/EasyRDP-Codec-Plan-B.md)：在不破坏 XP 兼容性的前提下
+> 引入可插拔编码层，H.264 代码用 `#if NET8_0_OR_GREATER` 隔离，net40/XP 路径保留 Bitmap 兜底。
 
 ---
 
@@ -252,5 +257,6 @@ MIT License — 详见 [EasyDesk/LICENSE](EasyDesk/LICENSE)。
 ## 更多文档
 
 - 协议规范：**[docs/EasyRDP-Protocol-v1.md](docs/EasyRDP-Protocol-v1.md)**
+- 编码层改进计划：**[docs/EasyRDP-Codec-Plan-B.md](docs/EasyRDP-Codec-Plan-B.md)**（B1–B4 可插拔编码后端）
 - 开发规范：**[EasyDesk/AGENTS.md](EasyDesk/AGENTS.md)**
 - API 参考：**[EasyDesk/README.md](EasyDesk/README.md)**

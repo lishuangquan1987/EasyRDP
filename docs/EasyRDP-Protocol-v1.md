@@ -1,8 +1,8 @@
 # EasyRDP 协议规范 v1
 
-> 版本：1.0  
-> 状态：草案  
-> 最后更新：2026-07-16
+> 版本：1.2  
+> 状态：草案（含 B-2 编码协商扩展草案）  
+> 最后更新：2026-07-23
 
 ---
 
@@ -99,6 +99,7 @@ EasyRDP 协议是 EasyRDP 远程桌面系统的自定义通信协议，用于局
 | `0x02` | HandshakeRes | S→C | 握手响应 |
 | `0x10` | ScreenFrame | S→C | 屏幕帧数据 |
 | `0x11` | CursorUpdate | S→C | 光标状态更新 |
+| `0x12` | CopyRect | S→C | 屏幕区域复制指令（零像素传输，客户端复制已有区域，见 6.5） |
 | `0x20` | InputEvent | C→S | 键鼠输入事件 |
 | `0x21` | ClipboardData | 双向 | 剪贴板同步 |
 | `0x30` | KeepAlive | C→S | 心跳请求 |
@@ -124,7 +125,7 @@ EasyRDP 协议是 EasyRDP 远程桌面系统的自定义通信协议，用于局
 | 2    | N    | AuthToken | UTF-8 编码的认证令牌 |
 | 2+N  | 2    | ScreenWidth | 期望屏幕宽度 (uint16 LE) |
 | 4+N  | 2    | ScreenHeight | 期望屏幕高度 (uint16 LE) |
-| 6+N  | 1    | CompressType | 支持的压缩类型：0=无，1=ZLIB，2=LZ4 |
+| 6+N  | 1    | CompressType | 支持的压缩类型：0=无，1=ZLIB，2=LZ4，3=JPEG |
 ```
 
 ### 5.2 HandshakeRes（0x02）
@@ -182,7 +183,7 @@ Client                              Server
 | 偏移 | 大小 | 字段 | 说明 |
 |---|---|---|---|
 | 0    | 1    | FrameType | 0=全帧(关键帧)，1=增量帧 |
-| 1    | 1    | Compress | 0=无压缩，1=ZLIB，2=LZ4 |
+| 1    | 1    | Compress | 0=无压缩，1=ZLIB，2=LZ4，3=JPEG |
 | 2    | 2    | RectCount | 本帧包含的矩形区域数量 (uint16 LE) |
 | 4    | 4    | DataLen | 像素数据总字节数 (uint32 LE) |
 | 8    | N    | Rects | 矩形区域列表（见 6.2） |
@@ -212,6 +213,33 @@ Client                              Server
 ### 6.4 大帧处理
 
 单帧像素数据（压缩后）可能超过传输层的分段大小，由传输层流式处理。接收端通过 `PacketFramer` 从字节流中提取完整消息帧。
+
+### 6.5 屏幕区域复制（CopyRect 0x12）
+
+服务端→客户端。告知客户端将指定区域从源位置复制到目标位置，**无需传输像素数据**（适用于窗口移动/滚动等场景，节省带宽）。
+
+```
+| 偏移 | 大小 | 字段 | 说明 |
+|---|---|---|---|
+| 0    | 2    | Count | 复制操作数量 (uint16 LE) |
+| 2    | N×12 | Entries | 复制操作列表，每条 12 字节（见下） |
+```
+
+每条复制操作（CopyRectEntry，12 字节）：
+
+```
+| 偏移 | 大小 | 字段 | 说明 |
+|---|---|---|---|
+| 0    | 2    | SrcX   | 源矩形左上角 X (uint16 LE) |
+| 2    | 2    | SrcY   | 源矩形左上角 Y (uint16 LE) |
+| 4    | 2    | DstX   | 目标矩形左上角 X (uint16 LE) |
+| 6    | 2    | DstY   | 目标矩形左上角 Y (uint16 LE) |
+| 8    | 2    | Width  | 矩形宽度 (uint16 LE) |
+| 10   | 2    | Height | 矩形高度 (uint16 LE) |
+```
+
+- 客户端在本地帧缓冲中执行 `CopyRegion(SrcX,SrcY → DstX,DstY, W×H)`（见 `FrameBuffer.CopyRegion`）。
+- 源区域须为客户端已持有的有效像素；服务端发 CopyRect 前应确保客户端已有对应全帧基准。
 
 ---
 
@@ -446,14 +474,52 @@ Client                              Server
 |---|---|---|
 | 1.0 | 2026-07-15 | 初始版本：握手、屏幕帧、光标、输入事件、剪贴板、文件传输、心跳、断连 |
 | 1.1 | 2026-07-16 | 协议与传输解耦（移除双通道概念，传输无关）；全部字段统一小端序 |
+| 1.2 | 2026-07-23 | 补 CopyRect(0x12) 类型与负载规格；重排预留码（`0x12` 归 CopyRect、`RequestKeyFrame`→`0x13`、`0x50–0x6F` 归视频流、`AudioData`→`0x70`）；新增 13.4 编码能力协商扩展草案（B-2） |
 
 ### 13.3 预留消息类型码（供后续版本）
 
-| 类型码 | 名称 | 用途 |
-|---|---|---|
-| `0x12` | `RequestKeyFrame` | C→S 请求关键帧 |
-| `0x13` | `ScreenConfig` | C→S 请求调整编码参数 |
-| `0x22` | `FileListReq` | 文件列表请求 |
-| `0x23` | `FileListRes` | 文件列表响应 |
-| `0x42` | `FileTransferAck` | 文件传输确认/进度 |
-| `0x50` | `AudioData` | 音频数据（后续版本） |
+> 注：`0x12 CopyRect` 已实现（见 4.1 类型表与 6.5），不再列入预留。
+
+| 类型码 | 名称 | 方向 | 用途 |
+|---|---|---|---|
+| `0x13` | `RequestKeyFrame` | C→S | 请求关键帧（H.264 丢包恢复，配合 B-3 视频流） |
+| `0x14` | `ScreenConfig` | C→S | 请求调整编码参数 |
+| `0x22` | `FileListReq` | 双向 | 文件列表请求 |
+| `0x23` | `FileListRes` | 双向 | 文件列表响应 |
+| `0x42` | `FileTransferAck` | 双向 | 文件传输确认/进度 |
+| `0x50` | `VideoFrame` | S→C | 视频帧数据（H.264 等，详见 [Codec-Plan-B](EasyRDP-Codec-Plan-B.md)） |
+| `0x51`–`0x6F` | （视频流预留） | S→C | 视频流相关扩展 |
+| `0x70` | `AudioData` | 双向 | 音频数据（后续版本） |
+
+### 13.4 编码能力协商扩展（草案 / B-2，未落地）
+
+> 本节描述计划中的握手扩展，对应 `docs/EasyRDP-Codec-Plan-B.md` 的 B-2 阶段。
+> **当前尚未落地**，老客户端/老服务端无感知，自动降级为 Bitmap。落地后以向后兼容方式追加可选字节。
+
+**目标**：客户端在握手中声明可解码的编码，服务端据此选出双方都支持的编码并在响应中告知。
+
+**HandshakeReq 扩展**（末尾追加 1 字节，可选）：
+
+```
+| 偏移 | 大小 | 字段 | 说明 |
+|---|---|---|---|
+| 10   | 1    | Capabilities | CodecCapabilities 位掩码 (uint8)：0=Legacy，1=Bitmap，2=H264Software，4=H264Hardware |
+```
+
+- 老客户端负载不含此字节，服务端通过 `payload.Length == 10` 判定为 `Legacy` → 视为 `Bitmap`。
+
+**HandshakeRes 扩展**（末尾追加 1 字节，可选）：
+
+```
+| 偏移 | 大小 | 字段 | 说明 |
+|---|---|---|---|
+| 10   | 1    | NegotiatedCodec | CodecId (uint8)：0=Bitmap，1=H264Software，2=H264Hardware |
+```
+
+- 老服务端响应不含此字节，客户端通过 `payload.Length == 10` 判定，默认 `Bitmap`。
+
+**协商优先级**：`H264Hardware > H264Software > Bitmap`；交集为空时回退 `Bitmap`。
+详见 `CodecNegotiator`（已提交 cf18788）。
+
+**VideoFrame 消息（0x50，B-3）**：协商为 H.264 时，服务端以 `VideoFrame` 消息发送 NAL 单元，
+客户端解码后渲染。结构见 Codec-Plan-B §2.3 `VideoFrameMessage`。

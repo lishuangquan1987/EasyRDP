@@ -6,7 +6,8 @@
 
 - **Stack**: C#, dual-framework — `net40` (XP 兼容) + `net8.0` (Avalonia, 跨平台)
 - **Submodule**: `EasyDesk/` — 桌面 I/O 库 (net40;netstandard2.0, 零依赖 P/Invoke)
-- **Current phase**: EasyDesk ✅ | EasyRDP.Core Protocol ✅ | Transport (TCP/UDP + Options) ✅ | WPF/Avalonia UIs ⏳
+- **Current phase**: EasyDesk ✅ | EasyRDP.Core Protocol ✅ | Transport (TCP/UDP + Options) ✅ | Codec 协商基础 (B-2: CodecId/CodecCapabilities/CodecNegotiator) ✅ | 编码层抽象 B-1/B-3/B-4 ⏳ | WPF/Avalonia UIs ⏳
+  - 编码层改进计划见 `docs/EasyRDP-Codec-Plan-B.md`（B1–B4：可插拔编码后端 Bitmap/H.264 软编/H.264 硬编，net40 保留 Bitmap 兜底，H.264 代码用 `#if NET8_0_OR_GREATER` 隔离）。
 - **Entry**: `src/EasyRDP.Server/Program.cs` (server) / `src/EasyRDP.Client/Program.cs` (client)
 - **Config**: `src/EasyRDP.Server/appsettings.json` (port, auth token, compression, frame rate)
 - **Tests**: `test/EasyRDP.Core.Tests/` — Transport 集成测试 (xUnit, 37 cases)

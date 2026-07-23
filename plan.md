@@ -1,9 +1,14 @@
 # EasyRDP 完整开发计划
 
-> 最后更新: 2026-07-16
+> 最后更新: 2026-07-23
 >
 > **架构策略**：服务端仅 WPF (.NET 4，XP 兼容)；客户端 WPF (.NET 4) + Avalonia (.NET 8) 双版本，共用
 > `EasyRDP.Client.Common` 逻辑库。页面 UI 层面不做代码共享，各实现各的。Avalonia 服务端待定。
+>
+> **关联计划**：编码层（取像素→压缩→传输）的可插拔抽象见 `docs/EasyRDP-Codec-Plan-B.md`
+> （B1–B4：Bitmap / H.264 软编 / H.264 硬编）。本计划的 `CaptureEngine` 截屏压缩部分将在 B-1 阶段
+> 抽离为 `IFrameEncoder`/`BitmapEncoder`，下文 §2.6 描述为重构前形态，实际代码已含 b545cad 的
+> 双缓冲 + 发送队列重构，B-1 落地时再行抽象。
 
 ---
 
@@ -610,6 +615,11 @@
      ```
 
 #### `CaptureEngine.cs`
+   > ⚠️ **实现已演进**：下文为重构前设计。实际代码（commit b545cad）已改为无参构造 +
+   > `SendTo`/`CompressType`/`FrameDelayMs` 属性注入，并加入双缓冲（`bufA/bufB` 复用 PrevPixels）、
+   > 独立发送线程 + 队列限流（`MaxPendingFrames=3`，丢非关键帧保关键帧）、自适应帧率（空闲降 1fps）。
+   > 后续 B-1 阶段（见 `docs/EasyRDP-Codec-Plan-B.md`）将把 `BuildFullFrame`/`BuildDeltaFrame`
+   > 压缩逻辑抽离为 `IFrameEncoder`/`BitmapEncoder`，`CaptureEngine` 仅负责采集 + 调用编码器。
    - 构造函数：`CaptureEngine(ServerEngine server, ServerConfigModel config)`
      - `_capturer = new WindowsDesktopFactory().CreateScreenCapturer()`
      - `_input = new WindowsDesktopFactory().CreateInputSimulator()`

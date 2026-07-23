@@ -125,6 +125,9 @@ public static class EncoderFactory
 ### 2.2 兼容性策略
 
 - 新消息类型 `VideoFrame = 0x50` 放在保留区间（`0x50–0x6F` 预留给视频流）。
+  > ⚠️ **跨文档冲突（已协调）**：`docs/EasyRDP-Protocol-v1.md` 旧版 13.3 曾把 `0x50` 预留给 `AudioData`，
+  > 与本计划的 `VideoFrame = 0x50` 冲突。协调结论：**`0x50–0x6F` 统一划归视频流**，
+  > `VideoFrame = 0x50`；`AudioData` 占位挪至 `0x70–0x7F` 音频区。协议文档已同步修订。
 - `HandshakeReq` 末尾追加 1 字节能力位（**可选**）。老客户端的负载长度不含此字节，
   服务端通过 `payload.Length` 检测是否存在扩展字节 —— 存在则读取，不存在则视为 `Legacy`。
 - `HandshakeRes` 末尾追加 1 字节协商结果（**可选**）。同理，老服务端不含此字节，
@@ -178,52 +181,80 @@ public static CodecId Negotiate(CodecCapabilities clientCaps, CodecCapabilities 
 
 #### ⏳ `src/EasyRDP.Core/Protocol/Messages/HandshakeReq.cs`（待落地）
 
-扩展字段：
+扩展字段（以当前提交代码的实际字段为准）：
 
 ```csharp
 public class HandshakeReqMessage
 {
-    public string Token;                 // 现有
-    public ushort ClientWidth;           // 现有
-    public ushort ClientHeight;          // 现有
-    public byte RequestedFrameRate;      // 现有
-    public CodecCapabilities Capabilities; // 新增（可选扩展字节）
+    public string AuthToken;               // 现有（长度前缀 UTF-8：2 字节长度头 + N 字节）
+    public ushort ScreenWidth;            // 现有
+    public ushort ScreenHeight;           // 现有
+    public CompressType CompressType;     // 现有（1 字节）
+    public CodecCapabilities Capabilities; // 新增（可选扩展字节，1 字节）
 }
 ```
 
+> ⚠️ 字段名须与现有实现对齐：当前类使用 `AuthToken`/`ScreenWidth`/`ScreenHeight`/`CompressType`，
+> 并无 `Token`/`ClientWidth`/`ClientHeight`/`RequestedFrameRate` 等字段（早期文档示例有误，已订正）。
+
 `Encode()`：
 ```csharp
-int size = tokenLen + 2 + 2 + 1 + (hasCaps ? 1 : 0);  // 注意：不含尾部 0，避免 trailing-zero bug
-// ... 写入 Token、宽高、帧率，最后（新客户端）追加 1 字节 Capabilities
+// tokenLen = BinaryPacker.MeasureStringUTF8(AuthToken) = 2 + utf8ByteCount（已含 2 字节长度头）
+// 负载 = tokenLen + ScreenWidth(2) + ScreenHeight(2) + CompressType(1) + (hasCaps ? 1 : 0)
+int size = tokenLen + 2 + 2 + 1 + (hasCaps ? 1 : 0);  // 不含尾部 0，避免 trailing-zero bug
+// 写入：BinaryPacker.WriteStringUTF8(buffer, offset, AuthToken); offset += tokenLen;
+//      WriteUInt16LE(...ScreenWidth); WriteUInt16LE(...ScreenHeight); buffer[..]=CompressType;
+//      新客户端最后追加 1 字节 Capabilities
 ```
 
 `Decode()`：
 ```csharp
+// 先读长度前缀 AuthToken，再读 ScreenWidth/ScreenHeight/CompressType；
 // 通过 payload.Length 检测扩展字节是否存在
 bool hasCaps = offset < payload.Length;
 Capabilities = hasCaps ? (CodecCapabilities)payload[offset] : CodecCapabilities.Legacy;
 ```
 
-> **已修复的 Bug**：原始实现 `int size = 2 + tokenLen + ...` 会多分配 2 字节尾部零，
-> 导致老服务端解析异常。改为精确计算 `tokenLen + 2 + 2 + 1 + (hasCaps ? 1 : 0)` 并直接用
-> `BinaryPacker.WriteStringUTF8`。
+> **待修复的 Bug（trailing-zero，当前提交代码仍存在）**：
+> 现有 `Encode()` 用 `int size = 2 + tokenLen + 2 + 2 + 1;`，而 `tokenLen` 来自
+> `MeasureStringUTF8`（已含 2 字节长度头），额外 `2 +` 会重复计入长度头，多分配 **2 字节尾部零**。
+> 同版本编解码因 `ReadStringUTF8` 按长度前缀读取、忽略尾部零，故功能可用；但严格校验负载长度的
+> 老服务端会解析异常。修复方案：精确计算 `tokenLen + 2 + 2 + 1 + (hasCaps ? 1 : 0)` 并直接用
+> `BinaryPacker.WriteStringUTF8` 写入（取代当前 `tokenBuf` 中转拷贝）。
+>
+> **附带问题（待修复）**：当 `AuthToken` 为空时，三元式取 `tokenLen = 0`，但 `WriteStringUTF8`
+> 仍要写 2 字节长度头到长度为 0 的 `tokenBuf` → `IndexOutOfRangeException`。空令牌握手会崩溃。
+> 修复时应对空串保留 2 字节长度头预算（`tokenLen = MeasureStringUTF8(AuthToken)` 恒为 `2 + 字节数`，
+> 不应短路为 0）。
 
 #### ⏳ `src/EasyRDP.Core/Protocol/Messages/HandshakeRes.cs`（待落地）
 
-扩展字段：
+扩展字段（以当前提交代码的实际字段为准）：
 
 ```csharp
 public class HandshakeResMessage
 {
-    public HandshakeResult Result;          // 现有
-    public ushort ServerWidth;              // 现有
-    public ushort ServerHeight;             // 现有
-    public CompressType Compress;           // 现有
-    public CodecId NegotiatedCodec;        // 新增（可选扩展字节）
+    public HandshakeResult Result;          // 现有（1 字节）
+    public uint SessionId;                  // 现有（4 字节，仅 Result=Success 时有效）
+    public ushort ScreenWidth;              // 现有（2 字节）
+    public ushort ScreenHeight;             // 现有（2 字节）
+    public CompressType CompressType;       // 现有（1 字节）
+    public CodecId NegotiatedCodec;        // 新增（可选扩展字节，1 字节）
 }
 ```
 
-同样用 `payload.Length` 检测扩展字节，老服务端不含则默认 `Bitmap`。
+> ⚠️ 现有响应已含 `SessionId`（uint32 LE），且字段名为 `ScreenWidth`/`ScreenHeight`/`CompressType`
+> （早期文档误写为 `ServerWidth`/`ServerHeight`/`Compress` 且漏写 `SessionId`，已订正）。
+> 现有负载固定长度 = `1 + 4 + 2 + 2 + 1 = 10` 字节。
+
+`Decode()` 扩展检测：
+```csharp
+// 读完固定 10 字节后，通过 payload.Length 检测扩展字节
+bool hasCodec = offset < payload.Length;
+NegotiatedCodec = hasCodec ? (CodecId)payload[offset] : CodecId.Bitmap;
+```
+
+老服务端不含扩展字节则默认 `Bitmap`。
 
 #### ⏳ `src/EasyRDP.Core/Protocol/MessageType.cs`（待落地）
 
@@ -501,8 +532,10 @@ EasyDesk 子模块指针更新至 `be87684`，包含：
 - `fix: SendMouseMove 绝对坐标 off-by-one 导致最右下像素不可达`
 - `fix(windows): harden P/Invoke calls, fix 64-bit compat and resource leaks`
 
-> ⚠️ 子模块 fix 分支 `fix/mouse-absolute-coord-offbyone`（commit be87684）目前仅本地存在，
-> 需推送到 `origin/fix/mouse-absolute-coord-offbyone` 才能在 GitHub 可见。
+> ✅ 子模块 fix 分支 `fix/mouse-absolute-coord-offbyone`（commit be87684）**已推送至 origin**
+> （`git -C EasyDesk branch -r` 可见 `origin/fix/mouse-absolute-coord-offbyone`，远程为
+> `https://github.com/lishuangquan1987/EasyDesk.git`）。GitHub 可见性已具备。
+> 后续可考虑将其合入 `origin/master` 以结束 fix 分支生命周期。
 
 ### 5.3 B-2 协商基础（cf18788）
 
@@ -515,7 +548,19 @@ EasyDesk 子模块指针更新至 `be87684`，包含：
 
 ## 6. 关键 Bug 修复汇总
 
-以下 bug 在场景梳理中发现并修复（代码因环境重置丢失，需重新落地）：
+> **状态说明（2026-07-23 代码核对后订正）**：早期版本笼统标注"代码因环境重置丢失，需重新落地"，
+> 经逐一核对提交代码，实际情况分为两类：
+>
+> - **✅ 已落地（存在于 b545cad 提交，当前代码可验证）**：`HandleInput` try/catch 隔离、
+>   `CaptureEngine` 双缓冲（`bufA/bufB` 复用 PrevPixels）+ 发送队列限流（`MaxPendingFrames=3`）、
+>   `FrameBuffer` isSolid 纯色块处理、`WpfRenderEngine` 脏矩形 `WritePixels` 局部刷新。
+> - **❌ 待落地（当前提交代码确未应用，需重新实现）**：鼠标按键 `+1` 映射、HandshakeReq
+>   trailing-zero（当前 `size = 2 + tokenLen + ...` 仍在）、全部 H.264 相关（B-3 整体未实现）。
+> - **⏳ 不再适用（架构已变，原 bug 场景消失）**：`_frameBitmap` 提前 Dispose —— 当前
+>   `WpfRenderEngine` 改用单 `WriteableBitmap` 复用 + `WritePixels`，从不 `Dispose` 旧位图，
+>   "第二帧后画面冻结"的旧 Dispose 模式已不存在。
+>
+> 下表保留原始 bug 记录，落地状态以本说明为准。
 
 ### 6.1 鼠标操作相关
 
@@ -556,7 +601,7 @@ EasyDesk 子模块指针更新至 `be87684`，包含：
 |---|---|---|
 | 初始项目 + 协议/传输 | 全部基础文件 | ✅ f99839c |
 | WPF 改进 | FrameBuffer/UI/CaptureEngine | ✅ b545cad |
-| EasyDesk 子模块 | 指针更新 | ✅ faf97af（fix 分支需推送） |
+| EasyDesk 子模块 | 指针更新 | ✅ faf97af（fix 分支已推送 origin） |
 | B-1 | IFrameEncoder / BitmapEncoder / EncoderFactory | ❌ 待落地 |
 | B-2 协商基础 | CodecId / CodecCapabilities / CodecNegotiator | ✅ cf18788 |
 | B-2 协议扩展 | HandshakeReq/Res、MessageType、MessageCodec、VideoFrameMessage | ❌ 待落地 |
@@ -572,8 +617,57 @@ EasyDesk 子模块指针更新至 `be87684`，包含：
 1. **恢复 B-1**：重新创建 `IFrameEncoder.cs`、`BitmapEncoder.cs`、`EncoderFactory.cs`，重构 `CaptureEngine` 调用。
 2. **落地 B-2 协议扩展**：扩展 `HandshakeReq/Res`、追加 `VideoFrame` 消息类型与 `VideoFrameMessage`。
 3. **落地 B-3**：`YuvConverter` → `OpenH264Native` → `H264Encoder/H264Decoder` → Server/Client 集成。
-4. **推送 EasyDesk fix 分支**：`git push origin fix/mouse-absolute-coord-offbyone`。
+4. **推送 EasyDesk fix 分支**：~~`git push origin fix/mouse-absolute-coord-offbyone`~~
+   **已完成**（`origin/fix/mouse-absolute-coord-offbyone` 已存在）。建议下一步将其合入 `origin/master`。
 5. **B-4 收尾**：配置枚举化、硬件编码、测试补充。
 
 > C# 5.0 约束提醒（net40 路径）：禁用 `$""`、`?.`、`nameof()`、表达式体、`async/await`、`out var`。
 > H.264 原生代码必须用 `#if NET8_0_OR_GREATER` 包裹。
+
+---
+
+## 9. 文档审查与代码核对（2026-07-23）
+
+> 本节为对全文计划与代码库实际状态的逐项核对结论，供后续落地参考。
+
+### 9.1 计划落地状态核对（对照 `git ls-files` / 源码）
+
+| 计划项 | 文档原标注 | 实际状态 | 结论 |
+|---|---|---|---|
+| B-1 `IFrameEncoder/BitmapEncoder/EncoderFactory` | 待落地 | 三个文件均不存在；`CaptureEngine` 仍内联压缩 | ✅ 标注准确 |
+| B-2 `CodecId/CodecCapabilities/CodecNegotiator` | 已提交 cf18788 | 三文件存在，内容与文档示例一致 | ✅ 标注准确 |
+| B-2 `HandshakeReq/Res` 扩展字段 | 待落地 | 当前无 `Capabilities`/`NegotiatedCodec` 字段 | ✅ 标注准确 |
+| B-2 `MessageType.VideoFrame` / `MessageCodec` 分支 | 待落地 | `MessageType` 无 `0x50`；`MessageCodec` 无 VideoFrame 分支 | ✅ 标注准确 |
+| B-2 `VideoFrameMessage` | 待落地 | 文件不存在 | ✅ 标注准确 |
+| B-3 `YuvConverter/OpenH264Native/H264Encoder/H264Decoder` | 待落地 | 四文件均不存在 | ✅ 标注准确 |
+| B-3 Server/Client 集成 | 待落地 | `Server/Program.cs`、`Client/Program.cs` 均未引用 Codec 类型，无 `ClientState`/`VideoFrame`/`RequestKeyFrame` 处理 | ✅ 标注准确 |
+| EasyDesk fix 分支推送 | "需推送" | `origin/fix/mouse-absolute-coord-offbyone` 已存在 | ❌ 标注过时，已订正为"已推送" |
+
+### 9.2 技术准确性勘误（本次修订）
+
+| # | 位置 | 问题 | 修订 |
+|---|---|---|---|
+| 1 | §2.3 HandshakeReq "现有字段" | 误写 `Token/ClientWidth/ClientHeight/RequestedFrameRate`，实际为 `AuthToken/ScreenWidth/ScreenHeight/CompressType`，无帧率字段 | 订正字段名并加 ⚠️ 说明 |
+| 2 | §2.3 HandshakeRes "现有字段" | 误写 `ServerWidth/ServerHeight/Compress` 且漏 `SessionId` | 订正为 `ScreenWidth/ScreenHeight/CompressType` 并补 `SessionId` |
+| 3 | §2.3 HandshakeReq "已修复的 Bug" | trailing-zero 当前代码仍存在（`size = 2 + tokenLen + ...`），"已修复"标注矛盾 | 改为"待修复"，并补充空令牌崩溃的附带问题 |
+| 4 | §2.2 / §2.3 VideoFrame=0x50 | 与协议文档 13.3 的 `0x50=AudioData` 预留冲突 | 协调为 `0x50–0x6F` 归视频流，AudioData 挪至 `0x70–0x7F` |
+| 5 | §5.2 / §7 / §8 EasyDesk 推送 | "需推送"/"仅本地" | 订正为"已推送 origin" |
+| 6 | §6 笼统"代码丢失"声明 | try/catch、双缓冲、限流、isSolid 等实际已存在于 b545cad | 加状态说明区分"已落地/待落地/不再适用" |
+
+### 9.3 经核对确认的额外代码问题（落地 B-1/B-2 时建议一并处理）
+
+1. **鼠标按键映射（真实 bug，待落地）**：`EasyDesk.MouseButton` 枚举为 `None=0, Left=1, Right=2,
+   Middle=3, XButton1=4, XButton2=5`（1-based 含 None），而线协议按钮为 0-based（`0=Left`）。
+   当前 `CaptureEngine.HandleInput` 第 124 行 `(MouseButton)u.Button` 把 `0→None`，**左键完全失效**。
+   修复 `(MouseButton)(u.Button + 1)`，需在 B-1 重构 `CaptureEngine` 时落地。
+2. **HandshakeReq 空令牌崩溃**：见 §2.3 附带问题。空 `AuthToken` 会让 `WriteStringUTF8` 写越界。
+3. **协议文档 `0x12` 冲突**：代码 `CopyRect = 0x12` 已实现并经 `MessageCodec` 分发，但协议文档
+   4.1 类型表未列、13.3 又把 `0x12` 预留给 `RequestKeyFrame`。协议文档已同步补 `CopyRect` 并重排预留。
+
+### 9.4 同步修订的相关文档
+
+- `docs/EasyRDP-Protocol-v1.md`：4.1 类型表补 `CopyRect(0x12)`；13.3 预留重排（`0x12` 归 CopyRect、
+  `RequestKeyFrame` 移至 `0x13`、`0x50–0x6F` 归视频流、`AudioData` 挪至 `0x70`）；新增编码能力协商扩展说明。
+- `README.md`：路线图补编码层抽象（B1–B4）阶段，并引用本文档。
+- `AGENTS.md`：`Current phase` 补 B-2 协商基础已完成。
+- `plan.md`：标注 `CaptureEngine` 已重构（双缓冲/发送队列），并交叉引用本文档 B-1 抽象计划。
