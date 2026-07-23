@@ -215,6 +215,9 @@ namespace EasyRDP.Client.Wpf.ViewModels
                 case MessageType.CopyRect:
                     HandleCopyRect((CopyRectMessage)msg.Body);
                     break;
+                case MessageType.VideoFrame:
+                    HandleVideoFrame((VideoFrameMessage)msg.Body);
+                    break;
             }
         }
 
@@ -280,6 +283,11 @@ namespace EasyRDP.Client.Wpf.ViewModels
                 _frameBuf.CopyRegion(entry.SrcX, entry.SrcY, entry.DstX, entry.DstY, entry.Width, entry.Height);
             }
             // CopyRegion 已置 IsDirty=true，渲染循环会自动拉取
+        }
+
+        private void HandleVideoFrame(VideoFrameMessage msg)
+        {
+            LogHelper.Warn("收到 VideoFrame 消息，当前未处理（H.264 编解码尚未实现）");
         }
 
         private void ClipboardLoop(CancellationToken ct)

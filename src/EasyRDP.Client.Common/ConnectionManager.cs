@@ -22,6 +22,7 @@ namespace EasyRDP.Client.Common
         private int _remoteScreenWidth;
         private int _remoteScreenHeight;
         private uint _sessionId;
+        private CodecId _negotiatedCodec;
 
         /// <summary>收到消息时触发（原始消息对象，含 Header + Body）。</summary>
         public event Action<Message> MessageReceived;
@@ -75,6 +76,12 @@ namespace EasyRDP.Client.Common
             get { return _sessionId; }
         }
 
+        /// <summary>协商后的编码（握手后获得）。</summary>
+        public CodecId NegotiatedCodec
+        {
+            get { return _negotiatedCodec; }
+        }
+
         /// <summary>消息序号跟踪器（发送消息时使用）。</summary>
         public SequenceTracker SeqTracker
         {
@@ -124,7 +131,8 @@ namespace EasyRDP.Client.Common
                 AuthToken = authToken ?? string.Empty,
                 ScreenWidth = 0,
                 ScreenHeight = 0,
-                CompressType = CompressType.Zlib
+                CompressType = CompressType.Zlib,
+                Capabilities = CodecCapabilities.Bitmap | CodecCapabilities.H264Software
             };
             byte[] reqData = MessageCodec.Encode(MessageType.HandshakeReq, _seqTracker.Next(), req);
             _transport.Send(reqData);
@@ -241,9 +249,10 @@ namespace EasyRDP.Client.Common
                 _remoteScreenWidth = res.ScreenWidth;
                 _remoteScreenHeight = res.ScreenHeight;
                 _sessionId = res.SessionId;
+                _negotiatedCodec = res.NegotiatedCodec;
                 _state = ConnectionState.Connected;
-                LogHelper.Info(string.Format("握手成功 SessionId={0} 屏幕={1}x{2} 压缩={3}",
-                    res.SessionId, res.ScreenWidth, res.ScreenHeight, res.CompressType));
+                LogHelper.Info(string.Format("握手成功 SessionId={0} 屏幕={1}x{2} 压缩={3} 编码={4}",
+                    res.SessionId, res.ScreenWidth, res.ScreenHeight, res.CompressType, res.NegotiatedCodec));
             }
             else
             {

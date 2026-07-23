@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using EasyRDP.Core.Logging;
 using EasyRDP.Core.Protocol;
 

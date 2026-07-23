@@ -43,20 +43,21 @@ EasyRDP/
 ├── src/
 │   ├── EasyRDP.Core/             # 协议 + 传输共享库 (net40;net8.0)
 │   │   ├── Protocol/             # 消息类型、编解码、BinaryPacker、CompressHelper
-│   │   └── Transport/            # ITransportClient/ITransportServer + TCP/UDP + PacketFramer
-│   ├── EasyRDP.Server/           # 服务端 (.NET 8) — WPF/Avalonia 开发期入口
-│   ├── EasyRDP.Client/           # 客户端 (.NET 8-windows) — WPF/Avalonia 开发期入口
-│   ├── EasyRDP.Server.Wpf/       # .NET 4 + WPF 服务端 (XP 兼容) ⏳
-│   ├── EasyRDP.Server.Avalonia/  # .NET 8 + Avalonia 服务端 ⏳
-│   ├── EasyRDP.Client.Wpf/       # .NET 4 + WPF 客户端 (XP 兼容) ⏳
-│   └── EasyRDP.Client.Avalonia/  # .NET 8 + Avalonia 客户端 ⏳
+│   │   ├── Transport/            # ITransportClient/ITransportServer + TCP/UDP + PacketFramer
+│   │   └── Encoding/             # 编码层抽象 + 实现（ITransportMode，B1–B4）
+│   ├── EasyRDP.Server.Wpf/       # .NET 4 + WPF 服务端 (XP 兼容)
+│   └── EasyRDP.Client.Wpf/       # .NET 4 + WPF 客户端 (XP 兼容)
 └── EasyDesk/                     ← Git 子模块（桌面 I/O 库）
     ├── src/EasyDesk.Core/         # 5 接口 + 8 模型
     ├── src/EasyDesk.Windows/      # P/Invoke 实现 (user32/gdi32/kernel32)
     └── test/                      # xUnit 集成测试
 ```
 
-- **EasyRDP.Core** — 协议编解码 + Deflate 压缩 + 可扩展传输层（`ITransportClient` / `ITransportServer`，TCP/UDP 双实现 + `PacketFramer`）。多目标 `net40;net8.0`。
+> ⚠️ 已移除项目：`EasyRDP.Server`（Console 服务端）、`EasyRDP.Client`（Console 客户端）、
+> `EasyRDP.Server.Avalonia`（Avalonia 服务端）、`EasyRDP.Client.Avalonia`（Avalonia 客户端）。
+> 当前仅保留 WPF 版本，通过 `EasyRDP.Core` 共享协议与编码逻辑。
+
+- **EasyRDP.Core** — 协议编解码 + Deflate 压缩 + 可扩展传输层（`ITransportClient` / `ITransportServer`，TCP/UDP 双实现 + `PacketFramer`）+ 可插拔编码层（`ITransportMode`，B1–B4）。多目标 `net40;net8.0`。
 - **CompressHelper** — DeflateStream 压缩/解压，兼容 net40。`Protocol/CompressHelper.cs`
 - **EasyDesk** — 5 个接口：`IInputSimulator`, `IScreenCapturer`, `ICursorCapturer`, `IClipboardService`, `IDesktopInfo`。详见 `EasyDesk/AGENTS.md`。
 

@@ -9,9 +9,6 @@ using EasyRDP.Core.Protocol;
 
 namespace EasyRDP.Server.Wpf.Services
 {
-    /// <summary>
-    /// 截屏引擎 + 输入注入。
-    /// </summary>
     public class CaptureEngine
     {
         private readonly IScreenCapturer _capturer;
@@ -21,9 +18,11 @@ namespace EasyRDP.Server.Wpf.Services
         private readonly Dictionary<uint, CancellationTokenSource> _clientTokens = new Dictionary<uint, CancellationTokenSource>();
         private readonly object _captureLock = new object();
         private readonly object _clientLock = new object();
+        private readonly Dictionary<uint, IFrameEncoder> _clientEncoders = new Dictionary<uint, IFrameEncoder>();
 
         public int FrameDelayMs { get; set; }
         public CompressType CompressType { get; set; }
+        public CodecId Codec { get; set; }
         public Action<uint, byte[]> SendTo { get; set; }
         public Action<string> OnLog { get; set; }
 
@@ -62,6 +61,7 @@ namespace EasyRDP.Server.Wpf.Services
 
             FrameDelayMs = 66;
             CompressType = CompressType.Zlib;
+            Codec = CodecId.Bitmap;
         }
 
         /// <summary>获取主屏幕尺寸。</summary>
@@ -74,8 +74,13 @@ namespace EasyRDP.Server.Wpf.Services
         public void StartForClient(uint sessionId)
         {
             var cts = new CancellationTokenSource();
-            lock (_clientLock) _clientTokens[sessionId] = cts;
-            LogHelper.Info(string.Format("截屏启动 ClientId={0}", sessionId));
+            var encoder = EncoderFactory.CreateFrame(Codec);
+            lock (_clientLock)
+            {
+                _clientTokens[sessionId] = cts;
+                _clientEncoders[sessionId] = encoder;
+            }
+            LogHelper.Info(string.Format("截屏启动 ClientId={0} Codec={1}", sessionId, Codec));
             var t = new Thread(() => CaptureLoop(sessionId, cts.Token))
             {
                 IsBackground = true,
@@ -96,6 +101,7 @@ namespace EasyRDP.Server.Wpf.Services
                     cts.Cancel(); cts.Dispose(); _clientTokens.Remove(sessionId);
                     LogHelper.Info(string.Format("截屏停止 ClientId={0}", sessionId));
                 }
+                _clientEncoders.Remove(sessionId);
             }
             _cursorTracker.StopForClient(sessionId);
         }
@@ -121,8 +127,8 @@ namespace EasyRDP.Server.Wpf.Services
                     switch (msg.EventType)
                     {
                         case InputEventType.MouseMove: _input.SendMouseMove(u.X, u.Y, u.Absolute); break;
-                        case InputEventType.MouseDown: _input.SendMouseButton((MouseButton)u.Button, true); break;
-                        case InputEventType.MouseUp: _input.SendMouseButton((MouseButton)u.Button, false); break;
+                        case InputEventType.MouseDown: _input.SendMouseButton((MouseButton)(u.Button + 1), true); break;
+                        case InputEventType.MouseUp: _input.SendMouseButton((MouseButton)(u.Button + 1), false); break;
                         case InputEventType.MouseWheel: _input.SendMouseWheel(u.WheelDelta); break;
                         case InputEventType.KeyDown: _input.SendKeyDown((VirtualKeyCode)u.VirtualKey); break;
                         case InputEventType.KeyUp: _input.SendKeyUp((VirtualKeyCode)u.VirtualKey); break;
@@ -213,30 +219,26 @@ namespace EasyRDP.Server.Wpf.Services
                                 curPixels = new byte[pixelSize];
                             System.Runtime.InteropServices.Marshal.Copy(frame.Scan0, curPixels, 0, pixelSize);
 
-                            byte[] prevPixels = useBufA ? bufB : bufA; // 另一块就是上一帧
+                            byte[] prevPixels = useBufA ? bufB : bufA;
                             bool isKey = frameCount % 30 == 0 || prevPixels == null || prevW != w || prevH != h;
                             ScreenFrameMessage screenMsg;
                             bool hasChanges = true;
                             bool frameIsKey = isKey;
 
-                            if (isKey)
+                            IFrameEncoder encoder;
+                            lock (_clientLock) _clientEncoders.TryGetValue(sessionId, out encoder);
+                            if (encoder != null)
                             {
-                                screenMsg = BuildFullFrame(w, h, curPixels);
-                                frameIsKey = true;
+                                screenMsg = encoder.Encode(w, h, curPixels, prevPixels, isKey);
+                                frameIsKey = screenMsg.FrameType == FrameType.Full;
                             }
                             else
                             {
-                                screenMsg = BuildDeltaFrame(w, h, curPixels, prevPixels);
-                                // BuildDeltaFrame 无变化时返回空像素 Full 帧
-                                if (screenMsg.Pixels == null || screenMsg.Pixels.Length == 0)
-                                    hasChanges = false;
-                                else if (screenMsg.Pixels.Length >= pixelSize)
-                                {
-                                    // 增量退化成全帧（视作关键帧，客户端据此恢复）
-                                    screenMsg = BuildFullFrame(w, h, curPixels);
-                                    frameIsKey = true;
-                                }
+                                screenMsg = BuildFullFrame(w, h, curPixels);
                             }
+
+                            if (screenMsg.Pixels == null || screenMsg.Pixels.Length == 0)
+                                hasChanges = false;
 
                             if (hasChanges)
                             {
@@ -314,12 +316,15 @@ namespace EasyRDP.Server.Wpf.Services
             }
         }
 
+        /// <summary>
+        /// Fallback: 构建完整帧（当编码器不可用时使用）
+        /// 主路径已迁移至 IFrameEncoder（BitmapEncoder），此方法仅作为安全网保留
+        /// </summary>
         private ScreenFrameMessage BuildFullFrame(int w, int h, byte[] raw)
         {
             int pixelCount = w * h;
             CompressType bestType = CompressType.Zlib;
 
-            // 对照片/高熵/大画面用 JPEG，静止/低熵画面用 Zlib
             if (pixelCount > 10000 && CompressHelper.ShouldUseJPEG(raw, pixelCount))
                 bestType = CompressType.JPEG;
 
@@ -334,6 +339,10 @@ namespace EasyRDP.Server.Wpf.Services
             };
         }
 
+        /// <summary>
+        /// Fallback: 构建增量帧（当编码器不可用时使用）
+        /// 主路径已迁移至 IFrameEncoder（BitmapEncoder），此方法仅作为安全网保留
+        /// </summary>
         private ScreenFrameMessage BuildDeltaFrame(int w, int h, byte[] cur, byte[] prev)
         {
             var rects = DirtyRectDetector.Detect(cur, prev, w, h);
@@ -359,30 +368,6 @@ namespace EasyRDP.Server.Wpf.Services
             bool useZlib = compressed.Length < allPixels.Length;
             return new ScreenFrameMessage { FrameType = FrameType.Delta, Compress = useZlib ? CompressType.Zlib : CompressType.None,
                 Rects = rects.ToArray(), Pixels = useZlib ? compressed : allPixels };
-        }
-
-        /// <summary>
-        /// 判断指定矩形区域内的所有像素是否相同。
-        /// </summary>
-        private static bool IsSolidColor(byte[] pixels, int x, int y, int w, int h, int screenW)
-        {
-            int firstIdx = (y * screenW + x) * 4;
-            byte b = pixels[firstIdx], g = pixels[firstIdx + 1];
-            byte r = pixels[firstIdx + 2], a = pixels[firstIdx + 3];
-            int stride = screenW * 4;
-
-            for (int row = 0; row < h; row++)
-            {
-                int rowBase = (y + row) * stride;
-                for (int col = 0; col < w; col++)
-                {
-                    int idx = rowBase + (x + col) * 4;
-                    if (pixels[idx] != b || pixels[idx + 1] != g ||
-                        pixels[idx + 2] != r || pixels[idx + 3] != a)
-                        return false;
-                }
-            }
-            return true;
         }
     }
 }

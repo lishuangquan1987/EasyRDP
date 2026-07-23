@@ -28,16 +28,16 @@
 ┌─────────────────────────────────────────────────┐
 │                  EasyRDP（应用层）                │
 │                                                  │
-│  ┌────────────────────┐  ┌────────────────────┐  │
-│  │  .NET 4 + WPF      │  │  .NET 8 + Avalonia │  │
-│  │  (Windows XP~11)   │  │  (Win7+/Linux/mac) │  │
-│  ├────────────────────┤  ├────────────────────┤  │
-│  │  Server.Wpf  ⏳    │  │  Server.Avalonia ⏳ │  │
-│  │  Client.Wpf  ⏳    │  │  Client.Avalonia ⏳│  │
-│  └────────┬───────────┘  └────────┬───────────┘  │
-│           │                       │              │
-│  ┌────────┴───────────────────────┴──────────┐   │
-│  │            EasyRDP.Core 共享协议层          │   │
+│  ┌────────────────────┐                          │
+│  │  .NET 4 + WPF      │                          │
+│  │  (Windows XP~11)   │                          │
+│  ├────────────────────┤                          │
+│  │  Server.Wpf        │                          │
+│  │  Client.Wpf        │                          │
+│  └────────┬───────────┘                          │
+│           │                                      │
+│  ┌────────┴──────────────────────────────────┐   │
+│  │        EasyRDP.Core 共享核心层             │   │
 │  │  ┌─────────────────────────────────────┐  │   │
 │  │  │          Protocol（协议编解码）       │  │   │
 │  │  │  MessageHeader / MessageCodec       │  │   │
@@ -50,6 +50,12 @@
 │  │  │  TcpTransportClient/Server ✅       │  │   │
 │  │  │  UdpTransportClient/Server ✅       │  │   │
 │  │  │  PacketFramer（传输无关分包器）      │  │   │
+│  │  └────────────────┬────────────────────┘  │   │
+│  │  ┌────────────────┴────────────────────┐  │   │
+│  │  │          Encoding（可插拔编码层）    │  │   │
+│  │  │  ITransportMode / EncoderFactory    │  │   │
+│  │  │  BitmapFullMode / BitmapDeltaMode   │  │   │
+│  │  │  H264SoftwareMode / H264HardwareMode│  │   │
 │  │  └─────────────────────────────────────┘  │   │
 │  └──────────────────────┬────────────────────┘   │
 └─────────────────────────┼────────────────────────┘
@@ -76,7 +82,9 @@
 └──────────────────────────────────────────────────┘
 ```
 
-- **双 UI 策略**：服务端和客户端各两套实现——.NET 4 + WPF 兼容 Windows XP ~ 11；.NET 8 + Avalonia 面向 Windows 7+ / Linux / macOS。两套 UI 通过 `EasyRDP.Core` 共享同一套协议逻辑
+> ⚠️ Avalonia 版本已移除，当前仅保留 WPF 版本（.NET 4，XP~Win11 兼容）。
+
+- **单 UI 策略**：服务端和客户端均使用 .NET 4 + WPF，兼容 Windows XP ~ 11。所有协议、传输、编码逻辑集中在 `EasyRDP.Core`
 - **EasyRDP.Core**：协议 + 可扩展传输共享库，多目标 `net40;net8.0`。Protocol 层包含消息编解码、Deflate 压缩、脏矩形检测；Transport 层抽象 `ITransportClient` / `ITransportServer`，TCP/UDP 双实现 + `PacketFramer` 分包
 - **EasyDesk.Core**：定义 5 类桌面 I/O 抽象接口 + 8 个数据模型，零依赖
 - **EasyDesk.Windows**：P/Invoke 调用 `user32.dll`（SendInput、剪贴板、光标）、`gdi32.dll`（BitBlt 屏幕捕获）、`kernel32.dll`（内存操作），零依赖
@@ -153,15 +161,12 @@ EasyRDP/
 │   ├── EasyRDP-Protocol-v1.md   ← 协议规范
 │   └── EasyRDP-Codec-Plan-B.md ← 编码层抽象改进计划（B1–B4）
 ├── src/
-│   ├── EasyRDP.Core/            # 协议 + 传输层共享库 (net40;net8.0)
+│   ├── EasyRDP.Core/            # 协议 + 传输层 + 编码层共享库 (net40;net8.0)
 │   │   ├── Protocol/            # 消息类型、编解码、BinaryPacker、CompressHelper
-│   │   └── Transport/           # ITransportClient/ITransportServer + TCP/UDP 实现
-│   ├── EasyRDP.Server/          # 控制台服务端 (.NET 8) — WPF/Avalonia 开发期入口
-│   ├── EasyRDP.Client/          # 客户端 (.NET 8-windows) — WPF/Avalonia 开发期入口
-│   ├── EasyRDP.Server.Wpf/      # 服务端 .NET 4 + WPF (XP 兼容) ⏳
-│   ├── EasyRDP.Server.Avalonia/ # 服务端 .NET 8 + Avalonia ⏳
-│   ├── EasyRDP.Client.Wpf/      # 客户端 .NET 4 + WPF (XP 兼容) ⏳
-│   └── EasyRDP.Client.Avalonia/ # 客户端 .NET 8 + Avalonia ⏳
+│   │   ├── Transport/           # ITransportClient/ITransportServer + TCP/UDP 实现
+│   │   └── Encoding/            # 可插拔编码层（ITransportMode：Bitmap/H.264）
+│   ├── EasyRDP.Server.Wpf/      # 服务端 .NET 4 + WPF (XP 兼容)
+│   └── EasyRDP.Client.Wpf/      # 客户端 .NET 4 + WPF (XP 兼容)
 └── EasyDesk/                    ← Git 子模块（桌面 I/O 核心库）
 ```
 

@@ -146,14 +146,15 @@ namespace EasyRDP.Server.Wpf.ViewModels
             var fps = Math.Max(1, Math.Min(Config.FrameRate, 60));
             _capture.FrameDelayMs = 1000 / fps;
             _capture.CompressType = Config.CompressType == "Zlib" ? CompressType.Zlib : CompressType.None;
+            _capture.Codec = CodecId.Bitmap;
             WireServices();
 
             _server.Start(port);
             _clipboard.Start();
             IsRunning = true;
             StatusText = string.Format("运行中 - 端口 {0}", port);
-            Log(LogLevel.Info, string.Format("已启动 (端口:{0} 压缩:{1} FPS:{2})", port, Config.CompressType, fps));
-            LogHelper.Info(string.Format("服务已启动 (端口:{0} 压缩:{1} FPS:{2})", port, Config.CompressType, fps));
+            Log(LogLevel.Info, string.Format("已启动 (端口:{0} 压缩:{1} 编码:{2} FPS:{3})", port, Config.CompressType, _capture.Codec, fps));
+            LogHelper.Info(string.Format("服务已启动 (端口:{0} 压缩:{1} 编码:{2} FPS:{3})", port, Config.CompressType, _capture.Codec, fps));
         }
 
         private void Stop()
@@ -232,14 +233,17 @@ namespace EasyRDP.Server.Wpf.ViewModels
 
             Dispatch(() => client.IsAuthenticated = true);
             var screen = _capture.GetPrimaryScreen();
+            var serverCaps = CodecNegotiator.GetServerCapabilities(_capture.Codec);
+            var negotiated = CodecNegotiator.Negotiate(req.Capabilities, serverCaps);
             _server.SendTo(sid, MessageCodec.Encode(MessageType.HandshakeRes, 1, new HandshakeResMessage
             {
                 Result = HandshakeResult.Success, SessionId = sid,
                 ScreenWidth = (ushort)screen.Width, ScreenHeight = (ushort)screen.Height,
-                CompressType = _capture.CompressType
+                CompressType = _capture.CompressType,
+                NegotiatedCodec = negotiated
             }));
             _capture.StartForClient(sid);
-            Log(LogLevel.Info, string.Format("客户端 {0} 认证通过 ({1}x{2})", sid, screen.Width, screen.Height));
+            Log(LogLevel.Info, string.Format("客户端 {0} 认证通过 ({1}x{2}) 编码={3}", sid, screen.Width, screen.Height, negotiated));
         }
 
         // ── helpers ───────────────────────────────────────

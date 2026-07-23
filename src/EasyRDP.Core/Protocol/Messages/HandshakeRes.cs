@@ -2,30 +2,24 @@ using System;
 
 namespace EasyRDP.Core.Protocol
 {
-    /// <summary>
-    /// 握手响应消息 S→C
-    /// </summary>
     public class HandshakeResMessage
     {
-        /// <summary>握手结果</summary>
         public HandshakeResult Result;
-
-        /// <summary>会话 ID（仅成功时有效）</summary>
         public uint SessionId;
-
-        /// <summary>实际屏幕宽度</summary>
         public ushort ScreenWidth;
-
-        /// <summary>实际屏幕高度</summary>
         public ushort ScreenHeight;
-
-        /// <summary>协商后的压缩类型</summary>
         public CompressType CompressType;
+        public CodecId NegotiatedCodec;
+
+        public HandshakeResMessage()
+        {
+            NegotiatedCodec = CodecId.Bitmap;
+        }
 
         public byte[] Encode()
         {
-            // Result(1) + SessionId(4) + ScreenWidth(2) + ScreenHeight(2) + CompressType(1)
-            int size = 1 + 4 + 2 + 2 + 1;
+            bool hasCodec = NegotiatedCodec != CodecId.Bitmap;
+            int size = 1 + 4 + 2 + 2 + 1 + (hasCodec ? 1 : 0);
             byte[] buffer = new byte[size];
             int offset = 0;
 
@@ -38,6 +32,12 @@ namespace EasyRDP.Core.Protocol
             BinaryPacker.WriteUInt16LE(buffer, offset, ScreenHeight);
             offset += 2;
             buffer[offset] = (byte)CompressType;
+            offset += 1;
+
+            if (hasCodec)
+            {
+                buffer[offset] = (byte)NegotiatedCodec;
+            }
 
             return buffer;
         }
@@ -54,6 +54,10 @@ namespace EasyRDP.Core.Protocol
             ScreenHeight = BinaryPacker.ReadUInt16LE(payload, offset);
             offset += 2;
             CompressType = (CompressType)BinaryPacker.ReadByte(payload, offset);
+            offset += 1;
+
+            bool hasCodec = offset < payload.Length;
+            NegotiatedCodec = hasCodec ? (CodecId)payload[offset] : CodecId.Bitmap;
         }
     }
 }

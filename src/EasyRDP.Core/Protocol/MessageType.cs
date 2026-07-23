@@ -20,6 +20,9 @@ namespace EasyRDP.Core.Protocol
         /// <summary>屏幕区域复制指令 S→C（零像素传输，客户端自行复制已有区域）</summary>
         CopyRect = 0x12,
 
+        /// <summary>视频帧数据 S→C（H.264 等）</summary>
+        VideoFrame = 0x50,
+
         /// <summary>键鼠输入事件 C→S</summary>
         InputEvent = 0x20,
 

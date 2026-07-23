@@ -111,7 +111,7 @@ public static class EncoderFactory
 
 ### 1.3 状态
 
-**已实施**（代码因环境重置丢失，需重新落地）。设计稳定，可作为重构安全网先行恢复。
+**已落地**（代码已提交，编译通过）。`IFrameEncoder`/`BitmapEncoder`/`EncoderFactory` 已创建，`CaptureEngine` 已重构为使用编码器接口。
 
 ---
 
@@ -299,7 +299,8 @@ public class VideoFrameMessage
 ### 2.5 状态
 
 - `CodecId.cs` / `CodecCapabilities.cs` / `CodecNegotiator.cs` **已提交**（commit cf18788）。
-- 协议扩展（HandshakeReq/Res、MessageType、MessageCodec、VideoFrameMessage）**设计完成，待落地**。
+- 协议扩展（HandshakeReq/Res、MessageType、VideoFrame、VideoFrameMessage、MessageCodec）**已落地**（编译通过）。
+- 服务端/客户端集成（编码协商逻辑）**已落地**。
 
 ---
 
@@ -602,24 +603,26 @@ EasyDesk 子模块指针更新至 `be87684`，包含：
 | 初始项目 + 协议/传输 | 全部基础文件 | ✅ f99839c |
 | WPF 改进 | FrameBuffer/UI/CaptureEngine | ✅ b545cad |
 | EasyDesk 子模块 | 指针更新 | ✅ faf97af（fix 分支已推送 origin） |
-| B-1 | IFrameEncoder / BitmapEncoder / EncoderFactory | ❌ 待落地 |
+| B-1 | IFrameEncoder / BitmapEncoder / EncoderFactory | ✅ 已落地（编译通过） |
 | B-2 协商基础 | CodecId / CodecCapabilities / CodecNegotiator | ✅ cf18788 |
-| B-2 协议扩展 | HandshakeReq/Res、MessageType、MessageCodec、VideoFrameMessage | ❌ 待落地 |
+| B-2 协议扩展 | HandshakeReq/Res、MessageType、VideoFrame、VideoFrameMessage、MessageCodec | ✅ 已落地（编译通过） |
+| B-2 集成 | Server.Wpf / Client.Wpf MainViewModel、ConnectionManager | ✅ 已落地（编译通过） |
 | B-3 编解码 | YuvConverter / OpenH264Native / H264Encoder / H264Decoder | ❌ 待落地 |
-| B-3 集成 | Server/Client Program.cs、WPF CaptureEngine | ❌ 待落地 |
+| B-3 集成 | Server/Client 端编码切换逻辑 | ❌ 待落地 |
 | B-4 | 硬件编码、配置枚举、测试 | ❌ 待落地 |
-| Bug 修复 | 鼠标按键、帧 Dispose、H264 初始化等 | ❌ 待落地（部分在 b545cad） |
+| Bug 修复 | 鼠标按键 +1 映射、HandshakeReq trailing-zero | ✅ 已落地 |
 
 ---
 
 ## 8. 下一执行步骤
 
-1. **恢复 B-1**：重新创建 `IFrameEncoder.cs`、`BitmapEncoder.cs`、`EncoderFactory.cs`，重构 `CaptureEngine` 调用。
-2. **落地 B-2 协议扩展**：扩展 `HandshakeReq/Res`、追加 `VideoFrame` 消息类型与 `VideoFrameMessage`。
-3. **落地 B-3**：`YuvConverter` → `OpenH264Native` → `H264Encoder/H264Decoder` → Server/Client 集成。
-4. **推送 EasyDesk fix 分支**：~~`git push origin fix/mouse-absolute-coord-offbyone`~~
-   **已完成**（`origin/fix/mouse-absolute-coord-offbyone` 已存在）。建议下一步将其合入 `origin/master`。
-5. **B-4 收尾**：配置枚举化、硬件编码、测试补充。
+1. **✅ 恢复 B-1**：已完成。`IFrameEncoder.cs`、`BitmapEncoder.cs`、`EncoderFactory.cs` 已创建，`CaptureEngine` 已重构。
+2. **✅ 落地 B-2 协议扩展**：已完成。`HandshakeReq/Res` 扩展、`VideoFrame` 消息类型、`VideoFrameMessage`、`MessageCodec` 分支均已落地。
+3. **✅ B-2 集成**：已完成。服务端/客户端编码协商逻辑已集成，编译通过。
+4. **✅ 推送 EasyDesk fix 分支**：已完成（`origin/fix/mouse-absolute-coord-offbyone` 已存在）。建议下一步将其合入 `origin/master`。
+5. **✅ Bug 修复**：已完成。鼠标按键 +1 映射、HandshakeReq trailing-zero 均已修复。
+6. **落地 B-3**：`YuvConverter` → `OpenH264Native` → `H264Encoder/H264Decoder` → Server/Client 集成。
+7. **B-4 收尾**：配置枚举化、硬件编码、测试补充。
 
 > C# 5.0 约束提醒（net40 路径）：禁用 `$""`、`?.`、`nameof()`、表达式体、`async/await`、`out var`。
 > H.264 原生代码必须用 `#if NET8_0_OR_GREATER` 包裹。

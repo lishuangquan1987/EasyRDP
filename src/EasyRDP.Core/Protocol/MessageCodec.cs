@@ -147,6 +147,12 @@ namespace EasyRDP.Core.Protocol
                     msg.Decode(payload);
                     return msg;
                 }
+                case MessageType.VideoFrame:
+                {
+                    var msg = new VideoFrameMessage();
+                    msg.Decode(payload);
+                    return msg;
+                }
                 case MessageType.InputEvent:
                 {
                     var msg = new InputEventMessage();
@@ -214,6 +220,8 @@ namespace EasyRDP.Core.Protocol
                     return ((CursorUpdateMessage)body).Encode();
                 case MessageType.CopyRect:
                     return ((CopyRectMessage)body).Encode();
+                case MessageType.VideoFrame:
+                    return ((VideoFrameMessage)body).Encode();
                 case MessageType.InputEvent:
                     return ((InputEventMessage)body).Encode();
                 case MessageType.ClipboardData:
