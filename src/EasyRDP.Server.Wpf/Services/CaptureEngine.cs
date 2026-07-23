@@ -139,6 +139,18 @@ namespace EasyRDP.Server.Wpf.Services
         private const int IdleFrameDelayMs = 1000;
         /// <summary>最小帧间隔（毫秒），最多 30fps</summary>
         private const int MinFrameDelayMs = 33;
+        /// <summary>
+        /// 每客户端发送队列容量。队满时丢弃最旧的非关键帧（视频流宁可丢帧不可积压），
+        /// 关键帧予以保留以保证客户端可恢复。
+        /// </summary>
+        private const int MaxPendingFrames = 3;
+
+        /// <summary>待发送帧（含是否关键帧标记）。</summary>
+        private class PendingFrame
+        {
+            public byte[] Data;
+            public bool IsKey;
+        }
 
         private void CaptureLoop(uint sessionId, CancellationToken ct)
         {
@@ -155,75 +167,150 @@ namespace EasyRDP.Server.Wpf.Services
             var send = SendTo;
             if (send == null) return;
 
-            while (!ct.IsCancellationRequested)
+            // 发送队列 + 同步：截屏线程生产，独立发送线程消费，二者解耦
+            var sendQueue = new LinkedList<PendingFrame>();
+            var queueLock = new object();
+            // senderRunning 的读写均在 queueLock 内，可见性由锁保证
+            bool senderRunning = true;
+
+            // 发送线程：从队列取帧并同步发送到客户端。网络阻塞时只阻塞本线程，不影响截屏。
+            var senderThread = new Thread(() =>
             {
-                try
+                while (senderRunning)
                 {
-                    ScreenFrame frame;
-                    lock (_captureLock) frame = _capturer.CaptureScreen();
+                    PendingFrame pf = null;
+                    lock (queueLock)
+                    {
+                        while (sendQueue.Count == 0 && senderRunning)
+                            Monitor.Wait(queueLock);
+                        if (!senderRunning) break;
+                        pf = sendQueue.First.Value;
+                        sendQueue.RemoveFirst();
+                    }
+                    if (pf == null) break;
+                    try { send(sessionId, pf.Data); }
+                    catch (Exception ex) { LogHelper.Error(ex, "Send error"); }
+                }
+            }) { IsBackground = true, Name = string.Format("EasyRDP-Sender-{0}", sessionId) };
+            senderThread.Start();
+
+            try
+            {
+                while (!ct.IsCancellationRequested)
+                {
                     try
                     {
-                        if (frame.Scan0 == IntPtr.Zero) continue;
-                        int w = frame.Width, h = frame.Height, pixelSize = w * h * 4;
-
-                        // 从池中取出当前帧缓冲区（尺寸变化时重新分配）
-                        byte[] curPixels = useBufA ? bufA : bufB;
-                        if (curPixels == null || curPixels.Length != pixelSize)
-                            curPixels = new byte[pixelSize];
-                        System.Runtime.InteropServices.Marshal.Copy(frame.Scan0, curPixels, 0, pixelSize);
-
-                        byte[] prevPixels = useBufA ? bufB : bufA; // 另一块就是上一帧
-                        bool isKey = frameCount % 30 == 0 || prevPixels == null || prevW != w || prevH != h;
-                        ScreenFrameMessage screenMsg;
-                        bool hasChanges = true;
-
-                        if (isKey)
+                        ScreenFrame frame;
+                        lock (_captureLock) frame = _capturer.CaptureScreen();
+                        try
                         {
-                            screenMsg = BuildFullFrame(w, h, curPixels);
-                        }
-                        else
-                        {
-                            screenMsg = BuildDeltaFrame(w, h, curPixels, prevPixels);
-                            // BuildDeltaFrame 无变化时返回空像素 Full 帧
-                            if (screenMsg.Pixels == null || screenMsg.Pixels.Length == 0)
-                                hasChanges = false;
-                            else if (screenMsg.Pixels.Length >= pixelSize)
+                            if (frame.Scan0 == IntPtr.Zero) continue;
+                            int w = frame.Width, h = frame.Height, pixelSize = w * h * 4;
+
+                            // 从池中取出当前帧缓冲区（尺寸变化时重新分配）
+                            byte[] curPixels = useBufA ? bufA : bufB;
+                            if (curPixels == null || curPixels.Length != pixelSize)
+                                curPixels = new byte[pixelSize];
+                            System.Runtime.InteropServices.Marshal.Copy(frame.Scan0, curPixels, 0, pixelSize);
+
+                            byte[] prevPixels = useBufA ? bufB : bufA; // 另一块就是上一帧
+                            bool isKey = frameCount % 30 == 0 || prevPixels == null || prevW != w || prevH != h;
+                            ScreenFrameMessage screenMsg;
+                            bool hasChanges = true;
+                            bool frameIsKey = isKey;
+
+                            if (isKey)
+                            {
                                 screenMsg = BuildFullFrame(w, h, curPixels);
-                        }
-
-                        if (hasChanges)
-                        {
-                            send(sessionId, MessageCodec.Encode(MessageType.ScreenFrame, seq.Next(), screenMsg));
-                            idleFrames = 0;
-                            // 大面积变化 → 30fps；小面积 → 配置帧率
-                            if (screenMsg.Rects != null && screenMsg.Rects.Length > 10)
-                                currentDelayMs = MinFrameDelayMs;
+                                frameIsKey = true;
+                            }
                             else
-                                currentDelayMs = FrameDelayMs;
-                        }
-                        else
-                        {
-                            idleFrames++;
-                            // 空闲达到阈值后降帧到 1fps
-                            if (idleFrames >= IdleThreshold)
-                                currentDelayMs = IdleFrameDelayMs;
-                        }
+                            {
+                                screenMsg = BuildDeltaFrame(w, h, curPixels, prevPixels);
+                                // BuildDeltaFrame 无变化时返回空像素 Full 帧
+                                if (screenMsg.Pixels == null || screenMsg.Pixels.Length == 0)
+                                    hasChanges = false;
+                                else if (screenMsg.Pixels.Length >= pixelSize)
+                                {
+                                    // 增量退化成全帧（视作关键帧，客户端据此恢复）
+                                    screenMsg = BuildFullFrame(w, h, curPixels);
+                                    frameIsKey = true;
+                                }
+                            }
 
-                        // 交换缓冲区：当前帧 → 上一帧，另一块下次用
-                        if (useBufA)
-                            bufA = curPixels;
-                        else
-                            bufB = curPixels;
-                        useBufA = !useBufA;
+                            if (hasChanges)
+                            {
+                                byte[] encoded = MessageCodec.Encode(MessageType.ScreenFrame, seq.Next(), screenMsg);
+                                EnqueueFrame(sendQueue, queueLock, encoded, frameIsKey);
+                                idleFrames = 0;
+                                // 大面积变化 → 30fps；小面积 → 配置帧率
+                                if (screenMsg.Rects != null && screenMsg.Rects.Length > 10)
+                                    currentDelayMs = MinFrameDelayMs;
+                                else
+                                    currentDelayMs = FrameDelayMs;
+                            }
+                            else
+                            {
+                                idleFrames++;
+                                // 空闲达到阈值后降帧到 1fps
+                                if (idleFrames >= IdleThreshold)
+                                    currentDelayMs = IdleFrameDelayMs;
+                            }
 
-                        prevW = w; prevH = h; frameCount++;
+                            // 交换缓冲区：当前帧 → 上一帧，另一块下次用
+                            if (useBufA)
+                                bufA = curPixels;
+                            else
+                                bufB = curPixels;
+                            useBufA = !useBufA;
+
+                            prevW = w; prevH = h; frameCount++;
+                        }
+                        finally { System.Runtime.InteropServices.Marshal.FreeHGlobal(frame.Scan0); }
                     }
-                    finally { System.Runtime.InteropServices.Marshal.FreeHGlobal(frame.Scan0); }
-                }
-                catch (OperationCanceledException) { break; }
-                catch (Exception ex) { LogHelper.Error(ex, "Capture error"); var log = OnLog; if (log != null) log(string.Format("Capture error: {0}", ex.Message)); }
+                    catch (OperationCanceledException) { break; }
+                    catch (Exception ex) { LogHelper.Error(ex, "Capture error"); var log = OnLog; if (log != null) log(string.Format("Capture error: {0}", ex.Message)); }
 
-                try { Thread.Sleep(currentDelayMs); } catch { break; }
+                    try { Thread.Sleep(currentDelayMs); } catch { break; }
+                }
+            }
+            finally
+            {
+                // 在锁内停止发送线程，保证可见性
+                lock (queueLock)
+                {
+                    senderRunning = false;
+                    Monitor.PulseAll(queueLock);
+                }
+            }
+        }
+
+        /// <summary>
+        /// 入队一帧。队列满时优先丢弃最旧的非关键帧（保留关键帧以支持客户端恢复）。
+        /// </summary>
+        private static void EnqueueFrame(LinkedList<PendingFrame> q, object queueLock, byte[] data, bool isKey)
+        {
+            lock (queueLock)
+            {
+                if (q.Count >= MaxPendingFrames)
+                {
+                    // 优先丢弃最旧的非关键帧
+                    var node = q.First;
+                    while (node != null)
+                    {
+                        if (!node.Value.IsKey)
+                        {
+                            q.Remove(node);
+                            break;
+                        }
+                        node = node.Next;
+                    }
+                    // 若全是关键帧（罕见），丢弃最旧的以避免无限增长
+                    if (q.Count >= MaxPendingFrames)
+                        q.RemoveFirst();
+                }
+                q.AddLast(new PendingFrame { Data = data, IsKey = isKey });
+                Monitor.Pulse(queueLock);
             }
         }
 

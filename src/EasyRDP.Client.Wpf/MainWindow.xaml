@@ -138,6 +138,7 @@
         <Border Background="#1A1A1A" Visibility="{Binding IsConnected, Converter={StaticResource BoolToVis}}"
                 BorderBrush="#2A2A2A" BorderThickness="1">
             <Image Source="{Binding FrameSource}" Stretch="Uniform"
+                   Cursor="None"
                    MouseMove="OnMouseMove" MouseDown="OnMouseDown"
                    MouseUp="OnMouseUp" MouseWheel="OnMouseWheel"
                    Focusable="True" />

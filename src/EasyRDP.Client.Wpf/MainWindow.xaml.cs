@@ -21,11 +21,23 @@ namespace EasyRDP.Client.Wpf
         }
 
         private void OnMouseMove(object s, MouseEventArgs e)
-        { var d = _vm.InputCapturer.EncodeMouseMove(e, (UIElement)s, _vm.SeqTracker.Next()); _vm.SendInput(d); }
+        { _vm.OnLocalMouseMove(e.GetPosition((IInputElement)s), (UIElement)s); }
         private void OnMouseDown(object s, MouseButtonEventArgs e)
-        { var d = _vm.InputCapturer.EncodeMouseButton(e, true, _vm.SeqTracker.Next()); _vm.SendInput(d); }
+        {
+            // 捕获鼠标：保证拖拽过程中移出控件仍能收到 MouseUp，避免远程端按钮卡在"按下"状态
+            Mouse.Capture((IInputElement)s);
+            // 强制发送积压的鼠标移动，确保按下时位置与服务端一致
+            _vm.FlushPendingMove(true);
+            var d = _vm.InputCapturer.EncodeMouseButton(e, true, _vm.SeqTracker.Next()); _vm.SendInput(d);
+        }
         private void OnMouseUp(object s, MouseButtonEventArgs e)
-        { var d = _vm.InputCapturer.EncodeMouseButton(e, false, _vm.SeqTracker.Next()); _vm.SendInput(d); }
+        {
+            // 释放前先发送最新位置，避免松开坐标与按下时错位
+            _vm.FlushPendingMove(true);
+            var d = _vm.InputCapturer.EncodeMouseButton(e, false, _vm.SeqTracker.Next()); _vm.SendInput(d);
+            // 释放捕获，恢复正常鼠标路由
+            Mouse.Capture(null);
+        }
         private void OnMouseWheel(object s, MouseWheelEventArgs e)
         { var d = _vm.InputCapturer.EncodeMouseWheel(e, _vm.SeqTracker.Next()); _vm.SendInput(d); }
         private void OnKeyDown(object s, KeyEventArgs e)
