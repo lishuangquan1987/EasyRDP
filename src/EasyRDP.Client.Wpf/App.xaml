@@ -4,6 +4,6 @@
              xmlns:local="clr-namespace:EasyRDP.Client.Wpf"
              StartupUri="MainWindow.xaml">
     <Application.Resources>
-         
+        <local:BoolToVisibilityConverter x:Key="BoolToVis"/>
     </Application.Resources>
 </Application>

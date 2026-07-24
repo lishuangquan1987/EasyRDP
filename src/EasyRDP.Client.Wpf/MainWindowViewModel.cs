@@ -44,11 +44,17 @@ namespace EasyRDP.Client.Wpf
         // 属性字段
         private string _host = "127.0.0.1";
         private string _port = "2000";
-        private string _statusText = "Ready";
+        private string _statusText = "Disconnected";
         private bool _isConnectEnabled = true;
         private bool _isStartEnabled = true;
         private bool _isStopEnabled;
+        private bool _isConnected;
+        private string _frameSize = "—";
+        private int _frameRate;
+        private string _codecName = "—";
         private WriteableBitmap? _renderBitmap;
+        private DateTime _lastFrameTime;
+        private int _frameCountThisSecond;
 
         public MainWindowViewModel()
         {
@@ -102,7 +108,34 @@ namespace EasyRDP.Client.Wpf
             set { _renderBitmap = value; OnPropertyChanged(nameof(RenderBitmap)); }
         }
 
-        // ====== 命令 ======
+        public bool IsConnected
+        {
+            get { return _isConnected; }
+            set { _isConnected = value; OnPropertyChanged(nameof(IsConnected)); }
+        }
+
+        public string FrameSize
+        {
+            get { return _frameSize; }
+            set { _frameSize = value; OnPropertyChanged(nameof(FrameSize)); }
+        }
+
+        public int FrameRate
+        {
+            get { return _frameRate; }
+            set { _frameRate = value; OnPropertyChanged(nameof(FrameRate)); OnPropertyChanged(nameof(FrameRateText)); }
+        }
+
+        public string CodecName
+        {
+            get { return _codecName; }
+            set { _codecName = value; OnPropertyChanged(nameof(CodecName)); }
+        }
+
+        public string FrameRateText
+        {
+            get { return _frameRate > 0 ? string.Format("{0} FPS", _frameRate) : "—"; }
+        }
 
         public RelayCommand ConnectCommand { get; }
         public RelayCommand StartTestCommand { get; }
@@ -188,9 +221,13 @@ namespace EasyRDP.Client.Wpf
 
             _streamSession.Start(_transport);
             _running = true;
+            IsConnected = true;
+            CodecName = handshakeRes.Codec.ToString();
+            FrameSize = string.Format("{0}x{1}", handshakeRes.ScreenWidth, handshakeRes.ScreenHeight);
+            _lastFrameTime = DateTime.UtcNow;
 
-            StatusText = string.Format("Connected: {0}x{1} [{2}]",
-                handshakeRes.ScreenWidth, handshakeRes.ScreenHeight, handshakeRes.Codec);
+            StatusText = string.Format("Connected — {0}x{1}",
+                handshakeRes.ScreenWidth, handshakeRes.ScreenHeight);
             UpdateCommandState();
         }
 
@@ -287,7 +324,11 @@ namespace EasyRDP.Client.Wpf
             _streamSession = null;
             _inputSession = null;
 
-            SetBusy(false, "Stopped");
+            IsConnected = false;
+            FrameSize = "—";
+            FrameRate = 0;
+            CodecName = "—";
+            SetBusy(false, "Disconnected");
         }
 
         // ====== 输入事件处理（由 View 代码后置调用） ======
@@ -342,6 +383,22 @@ namespace EasyRDP.Client.Wpf
             ConnectCommand.RaiseCanExecuteChanged();
             StartTestCommand.RaiseCanExecuteChanged();
             StopCommand.RaiseCanExecuteChanged();
+        }
+
+        public void ToggleFullscreen()
+        {
+            var window = Application.Current?.MainWindow;
+            if (window == null) return;
+            if (window.WindowStyle == WindowStyle.None)
+            {
+                window.WindowStyle = WindowStyle.SingleBorderWindow;
+                window.WindowState = WindowState.Normal;
+            }
+            else
+            {
+                window.WindowStyle = WindowStyle.None;
+                window.WindowState = WindowState.Maximized;
+            }
         }
 
         // ====== INotifyPropertyChanged ======

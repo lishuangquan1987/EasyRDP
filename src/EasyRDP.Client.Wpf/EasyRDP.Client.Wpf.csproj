@@ -12,4 +12,9 @@
     <UseWPF>true</UseWPF>
   </PropertyGroup>
 
+  <ItemGroup>
+    <Content Include="..\..\libs\openh264\openh264.dll" Link="openh264.dll"
+             CopyToOutputDirectory="PreserveNewest" Visible="false"/>
+  </ItemGroup>
+
 </Project>

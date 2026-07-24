@@ -42,4 +42,10 @@ public partial class MainWindow : Window
     {
         _vm.HandleMouseWheel(e.Delta);
     }
+
+    /// <summary>全屏切换。</summary>
+    private void FullscreenBtn_Click(object sender, RoutedEventArgs e)
+    {
+        _vm.ToggleFullscreen();
+    }
 }

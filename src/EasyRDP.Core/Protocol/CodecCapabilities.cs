@@ -9,8 +9,8 @@ namespace EasyRDP.Core.Protocol
         /// <summary>No codec capability.</summary>
         None         = 0,
         /// <summary>Software H.264 encoding support.</summary>
-        H264Software = 1 << 0,  // = 1
+        H264Software = 1 << 0,
         /// <summary>Hardware-accelerated H.264 encoding support.</summary>
-        H264Hardware = 1 << 1   // = 2
+        H264Hardware = 1 << 1
     }
 }

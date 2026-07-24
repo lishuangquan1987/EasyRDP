@@ -3,6 +3,7 @@
   <ItemGroup>
     <ProjectReference Include="..\EasyRDP.Core\EasyRDP.Core.csproj" />
     <ProjectReference Include="..\..\EasyDesk\src\EasyDesk.Core\EasyDesk.Core.csproj" />
+    <ProjectReference Include="..\..\EasyDesk\src\EasyDesk.Windows\EasyDesk.Windows.csproj" />
   </ItemGroup>
 
   <PropertyGroup>
@@ -12,5 +13,10 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
   </PropertyGroup>
+
+  <ItemGroup>
+    <Content Include="..\..\libs\openh264\openh264.dll" Link="openh264.dll"
+             CopyToOutputDirectory="PreserveNewest" Visible="false"/>
+  </ItemGroup>
 
 </Project>

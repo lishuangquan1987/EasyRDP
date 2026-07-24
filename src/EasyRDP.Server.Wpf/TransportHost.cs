@@ -163,8 +163,14 @@ namespace EasyRDP.Server.Wpf
                 }
             }
 
-            // TODO: Auth check (Phase 6.5.1)
-            // For now accept any credentials
+            // 简单认证：硬编码凭据表（后续应改为配置文件或外部凭据存储）
+            if (!ValidateCredentials(req.Username, req.Password))
+            {
+                res = new HandshakeRes { Result = HandshakeResult.AuthFailed };
+                SendResponse(e.SessionId, res);
+                DisconnectSession(e.SessionId);
+                return;
+            }
 
             // Negotiate codec
             var serverCaps = EncoderFactory.GetAvailableCodecs();
@@ -272,6 +278,17 @@ namespace EasyRDP.Server.Wpf
                     DisconnectSession(sid);
                 }
             }
+        }
+
+        /// <summary>
+        /// 验证凭据。硬编码表，后续应改为配置文件或外部存储。
+        /// </summary>
+        private static bool ValidateCredentials(string username, string password)
+        {
+            // 内置凭据：admin/admin, user/user
+            if (username == "admin" && password == "admin") return true;
+            if (username == "user" && password == "user") return true;
+            return false;
         }
 
 
