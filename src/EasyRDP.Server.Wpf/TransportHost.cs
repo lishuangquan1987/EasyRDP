@@ -274,10 +274,6 @@ namespace EasyRDP.Server.Wpf
             }
         }
 
-        private class SessionInfo
-        {
-            public ServerStreamSession Stream;
-            public ServerInputSession Input;
-        }
+
     }
 }

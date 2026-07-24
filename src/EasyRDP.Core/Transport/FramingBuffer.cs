@@ -119,8 +119,12 @@ namespace EasyRDP.Core.Transport
 
         private static bool IsKnownMessageType(byte type)
         {
-            return type == 0x01 || type == 0x02 || type == 0x03
-                || type == 0x05 || type == 0x06 || type == 0x50;
+            return type == (byte)Protocol.MessageType.HandshakeReq
+                || type == (byte)Protocol.MessageType.HandshakeRes
+                || type == (byte)Protocol.MessageType.Keepalive
+                || type == (byte)Protocol.MessageType.InputEvent
+                || type == (byte)Protocol.MessageType.CursorUpdate
+                || type == (byte)Protocol.MessageType.VideoFrame;
         }
     }
 }

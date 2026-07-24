@@ -7,13 +7,21 @@ namespace EasyRDP.Core.Protocol
     /// </summary>
     public class CursorUpdateMessage
     {
+        /// <summary>Whether the cursor is visible.</summary>
         public bool Visible;
+        /// <summary>X-coordinate of the cursor hotspot.</summary>
         public int X;
+        /// <summary>Y-coordinate of the cursor hotspot.</summary>
         public int Y;
+        /// <summary>Width of the cursor bitmap in pixels.</summary>
         public int Width;
+        /// <summary>Height of the cursor bitmap in pixels.</summary>
         public int Height;
+        /// <summary>Hotspot X-offset within the cursor bitmap.</summary>
         public int HotX;
+        /// <summary>Hotspot Y-offset within the cursor bitmap.</summary>
         public int HotY;
+        /// <summary>RGBA pixel data of the cursor bitmap.</summary>
         public byte[] RgbaPixels;
 
         /// <summary>序列化为 payload 字节。</summary>

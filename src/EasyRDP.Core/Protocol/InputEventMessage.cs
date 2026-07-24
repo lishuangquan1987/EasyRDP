@@ -6,10 +6,15 @@ namespace EasyRDP.Core.Protocol
     /// </summary>
     public class InputEventMessage
     {
+        /// <summary>Type of the input event.</summary>
         public InputEventType Type;
+        /// <summary>Virtual key code or mouse button identifier.</summary>
         public int KeyCode;
+        /// <summary>X-coordinate of the mouse cursor.</summary>
         public int X;
+        /// <summary>Y-coordinate of the mouse cursor.</summary>
         public int Y;
+        /// <summary>Mouse wheel delta value.</summary>
         public int WheelDelta;
 
         /// <summary>序列化为 payload 字节。</summary>

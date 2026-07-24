@@ -14,6 +14,7 @@ namespace EasyRDP.Core.Protocol
         private readonly BinaryWriter _writer;
         private readonly BinaryReader _reader;
 
+        /// <summary>Initializes a new instance of the <see cref="BinaryPacker"/> class for writing.</summary>
         public BinaryPacker()
         {
             _stream = new MemoryStream();
@@ -26,17 +27,21 @@ namespace EasyRDP.Core.Protocol
             _reader = new BinaryReader(_stream);
         }
 
+        /// <summary>Creates a <see cref="BinaryPacker"/> instance for reading from the given byte array.</summary>
+        /// <param name="data">The byte array to read from.</param>
         public static BinaryPacker From(byte[] data)
         {
             return new BinaryPacker(data);
         }
 
+        /// <summary>Returns the written bytes as an array.</summary>
         public byte[] GetBytes()
         {
             _writer.Flush();
             return _stream.ToArray();
         }
 
+        /// <summary>Releases all resources used by the <see cref="BinaryPacker"/>.</summary>
         public void Dispose()
         {
             if (_writer != null) _writer.Dispose();
@@ -46,21 +51,25 @@ namespace EasyRDP.Core.Protocol
 
         // —— 写方法 ——
 
+        /// <summary>Writes a single byte.</summary>
         public void WriteByte(byte v)
         {
             _writer.Write(v);
         }
 
+        /// <summary>Writes a 32-bit signed integer in little-endian format.</summary>
         public void WriteInt32(int v)
         {
             _writer.Write(v);
         }
 
+        /// <summary>Writes a 32-bit unsigned integer in little-endian format.</summary>
         public void WriteUInt32(uint v)
         {
             _writer.Write(v);
         }
 
+        /// <summary>Writes a 64-bit signed integer in little-endian format.</summary>
         public void WriteInt64(long v)
         {
             _writer.Write(v);
@@ -91,21 +100,25 @@ namespace EasyRDP.Core.Protocol
 
         // —— 读方法 ——
 
+        /// <summary>Reads a single byte.</summary>
         public byte ReadByte()
         {
             return _reader.ReadByte();
         }
 
+        /// <summary>Reads a 32-bit signed integer in little-endian format.</summary>
         public int ReadInt32()
         {
             return _reader.ReadInt32();
         }
 
+        /// <summary>Reads a 32-bit unsigned integer in little-endian format.</summary>
         public uint ReadUInt32()
         {
             return _reader.ReadUInt32();
         }
 
+        /// <summary>Reads a 64-bit signed integer in little-endian format.</summary>
         public long ReadInt64()
         {
             return _reader.ReadInt64();

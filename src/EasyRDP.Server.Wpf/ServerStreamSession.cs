@@ -129,23 +129,29 @@ namespace EasyRDP.Server.Wpf
         public void Stop()
         {
             if (!_running) return;
+            // 1. Set stopping flag FIRST — encode/send threads check this at loop top
             _stopping = true;
 
-            // Unsubscribe
+            // 2. Unsubscribe from capture events so no new frames enter _frameQueue
             _captureService.FrameCaptured -= OnFrameCaptured;
 
-            // Signal queues to stop
+            // 3. Clear queues + push sentinel values to unblock waiting threads.
+            //    Order matters: Clear then Enqueue under same lock prevents a race
+            //    where a thread dequeues a stale item between clear and sentinel push.
             lock (_lock)
             {
                 _frameQueue.Clear();
                 _sendQueue.Clear();
-                // Add sentinel
-                _frameQueue.Enqueue(new CapturedFrame());
-                _sendQueue.Enqueue(new FrameToSend());
+                _frameQueue.Enqueue(new CapturedFrame()); // Sentinel: Pixels==null
+                _sendQueue.Enqueue(new FrameToSend());    // Sentinel: Data==null
                 Monitor.PulseAll(_lock);
             }
 
-            // Join threads with timeout
+            // 4. Join threads with timeout.
+            //    Anti-race: if encoding thread is stuck inside native Encode() call
+            //    (e.g. libx264 blocking), Join will timeout. We do NOT Dispose the
+            //    encoder in that case — it would crash on freed native handles.
+            //    Instead, mark for deferred cleanup and let GC/process exit reclaim.
             if (_encodeThread != null)
             {
                 if (!_encodeThread.Join(3000))

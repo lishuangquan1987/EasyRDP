@@ -22,17 +22,23 @@ namespace EasyRDP.Client.Wpf
         private Thread _renderThread;
         private long _frameCount;
 
+        /// <summary>Gets the negotiated video codec used for decoding.</summary>
         public CodecId Codec { get; private set; }
+        /// <summary>Gets the current frame width in pixels.</summary>
         public int FrameWidth { get { return _frameBuffer != null ? _frameBuffer.Width : 0; } }
+        /// <summary>Gets the current frame height in pixels.</summary>
         public int FrameHeight { get { return _frameBuffer != null ? _frameBuffer.Height : 0; } }
+        /// <summary>Gets the total number of frames received and processed.</summary>
         public long FrameCount { get { return _frameCount; } }
 
+        /// <summary>Gets or sets the render target where decoded frames are displayed.</summary>
         public IRenderTarget RenderTarget
         {
             get { return _renderTarget; }
             set { _renderTarget = value; }
         }
 
+        /// <summary>Raised when a non-recoverable error occurs during the stream session.</summary>
         public event EventHandler<ErrorEventArgs> FatalError;
 
         /// <summary>初始化渲染管线（在收到 HandshakeRes 后调用）。</summary>
@@ -47,6 +53,7 @@ namespace EasyRDP.Client.Wpf
                 _renderTarget.Resize(width, height);
         }
 
+        /// <summary>Starts the stream session: begins receiving, decoding, and rendering frames.</summary>
         public void Start(ITransportClient transport)
         {
             if (_running) return;
@@ -66,6 +73,7 @@ namespace EasyRDP.Client.Wpf
             _renderThread.Start();
         }
 
+        /// <summary>Stops the stream session, terminates background threads, and cleans up resources.</summary>
         public void Stop()
         {
             _running = false;
@@ -81,6 +89,7 @@ namespace EasyRDP.Client.Wpf
             _frameBuffer = null;
         }
 
+        /// <summary>Disposes the session by stopping all activity and releasing resources.</summary>
         public void Dispose()
         {
             Stop();

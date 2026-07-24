@@ -5,23 +5,6 @@ namespace EasyRDP.Core.Transport
     using System.Diagnostics;
     using EasyRDP.Core.Protocol;
     /// <summary>
-    /// 完整消息事件参数。MessageReassembler 组装完毕后抛出。
-    /// </summary>
-    public class MessageReceivedEventArgs : EventArgs
-    {
-        public uint SessionId;
-        public byte MessageType;
-        public byte[] Data;
-
-        public MessageReceivedEventArgs(uint sessionId, byte messageType, byte[] data)
-        {
-            SessionId = sessionId;
-            MessageType = messageType;
-            Data = data;
-        }
-    }
-
-    /// <summary>
     /// 消息分片重组器。每个 Session 独立一个实例。
     /// 接收侧：订阅传输层 DataReceived → 按 FrameId 重组 → CRC16 校验 → 收齐后抛 MessageReceived。
     /// 发送侧：FragAndSend 静态方法切分+发送。
@@ -103,10 +86,13 @@ namespace EasyRDP.Core.Transport
             if (actualCrc != expectedCrc)
                 return; // Corrupted fragment — discard
 
-            // FrameId logic
+            // FrameId ordering — three cases:
+            //   frameId > _currentFrameId: newer frame arrived, discard old partial (real-time semantics)
+            //   frameId == _currentFrameId: same frame, continue assembling
+            //   frameId < _currentFrameId: stale frame fragment, discard
+            //   !_initialized: very first fragment (regardless of frameId), initialize state
             if (frameId > _currentFrameId || !_initialized)
             {
-                // Newer frame or first frame — discard old partial, start new
                 StartNewFrame(frameId, messageType, totalPayloadLen, fragCount);
             }
             else if (frameId < _currentFrameId)
@@ -114,7 +100,8 @@ namespace EasyRDP.Core.Transport
                 return; // Old frame fragment — discard
             }
 
-            // Check timeout
+            // Timeout guard: if current frame takes too long to assemble (lost fragments),
+            // restart to prevent dead state. Real-time protocol: old incomplete frames are worthless.
             if (_reassemblyTimer.ElapsedMilliseconds > Constants.FragmentReassembleTimeoutMs)
             {
                 StartNewFrame(frameId, messageType, totalPayloadLen, fragCount);

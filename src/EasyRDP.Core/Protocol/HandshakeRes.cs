@@ -6,9 +6,13 @@ namespace EasyRDP.Core.Protocol
     /// </summary>
     public class HandshakeRes
     {
+        /// <summary>Handshake result indicating success or failure.</summary>
         public HandshakeResult Result;
+        /// <summary>The negotiated codec identifier.</summary>
         public CodecId Codec;
+        /// <summary>Screen width in pixels.</summary>
         public int ScreenWidth;
+        /// <summary>Screen height in pixels.</summary>
         public int ScreenHeight;
 
         /// <summary>序列化为 payload 字节。</summary>

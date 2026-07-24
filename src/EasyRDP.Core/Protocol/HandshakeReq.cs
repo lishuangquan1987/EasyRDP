@@ -6,9 +6,13 @@ namespace EasyRDP.Core.Protocol
     /// </summary>
     public class HandshakeReq
     {
+        /// <summary>Protocol version of the client.</summary>
         public byte Version;
+        /// <summary>Bitmask of supported codec capabilities.</summary>
         public CodecCapabilities Capabilities;
+        /// <summary>Username for authentication.</summary>
         public string Username;
+        /// <summary>Password for authentication.</summary>
         public string Password;
 
         public HandshakeReq()

@@ -27,21 +27,25 @@ namespace EasyRDP.Core.Rendering
             ReadBorrowTimeoutTicks = 5 * Stopwatch.Frequency;
         }
 
+        /// <summary>Gets the width of the current frame in pixels.</summary>
         public int Width
         {
             get { lock (_lock) return _width; }
         }
 
+        /// <summary>Gets the height of the current frame in pixels.</summary>
         public int Height
         {
             get { lock (_lock) return _height; }
         }
 
+        /// <summary>Gets the total number of frames committed since last Reset.</summary>
         public int FrameCount
         {
             get { lock (_lock) return _frameCount; }
         }
 
+        /// <summary>Gets the monotonically increasing sequence number of the latest committed frame.</summary>
         public long Sequence
         {
             get { lock (_lock) return _sequence; }

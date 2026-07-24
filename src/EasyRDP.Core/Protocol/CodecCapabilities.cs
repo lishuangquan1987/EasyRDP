@@ -6,8 +6,11 @@ namespace EasyRDP.Core.Protocol
     [System.Flags]
     public enum CodecCapabilities : byte
     {
+        /// <summary>No codec capability.</summary>
         None         = 0,
+        /// <summary>Software H.264 encoding support.</summary>
         H264Software = 1 << 0,  // = 1
+        /// <summary>Hardware-accelerated H.264 encoding support.</summary>
         H264Hardware = 1 << 1   // = 2
     }
 }

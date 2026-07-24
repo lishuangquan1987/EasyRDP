@@ -7,10 +7,15 @@ namespace EasyRDP.Core.Protocol
     /// </summary>
     public class VideoFrameMessage
     {
+        /// <summary>Width of the video frame in pixels.</summary>
         public int Width;
+        /// <summary>Height of the video frame in pixels.</summary>
         public int Height;
+        /// <summary>Whether this frame is a keyframe (IDR).</summary>
         public bool IsKeyframe;
+        /// <summary>Monotonically increasing sequence number for frame ordering.</summary>
         public long SequenceNumber;
+        /// <summary>Encoded H.264 video data.</summary>
         public byte[] Data;
 
         /// <summary>序列化为 payload 字节。</summary>

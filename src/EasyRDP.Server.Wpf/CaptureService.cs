@@ -17,8 +17,10 @@ namespace EasyRDP.Server.Wpf
         private volatile bool _running;
         private int _frameIntervalMs = 16; // ~60fps
 
+        /// <summary>Gets whether the capture loop is currently running.</summary>
         public bool IsRunning { get { return _running; } }
 
+        /// <summary>Gets or sets the interval in milliseconds between screen captures.</summary>
         public int FrameIntervalMs
         {
             get { return _frameIntervalMs; }
@@ -34,6 +36,7 @@ namespace EasyRDP.Server.Wpf
             _capturer = capturer;
         }
 
+        /// <summary>Starts the capture thread if not already running.</summary>
         public void Start()
         {
             if (_running) return;
@@ -43,6 +46,7 @@ namespace EasyRDP.Server.Wpf
             _captureThread.Start();
         }
 
+        /// <summary>Stops the capture thread and waits for it to terminate.</summary>
         public void Stop()
         {
             _running = false;
@@ -61,6 +65,7 @@ namespace EasyRDP.Server.Wpf
             return _capturer.GetPrimaryScreen();
         }
 
+        /// <summary>Disposes the service by stopping the capture thread.</summary>
         public void Dispose()
         {
             Stop();

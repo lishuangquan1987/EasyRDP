@@ -11,8 +11,10 @@ namespace EasyRDP.Core.Services
         void Start();
         void Stop();
         bool IsRunning { get; }
+        /// <summary>Gets or sets the interval in milliseconds between screen captures. Default is ~60fps (16ms).</summary>
         int FrameIntervalMs { get; set; }
         event Action<ScreenFrame> FrameCaptured;
+        /// <summary>Returns the bounds of the primary screen/monitor.</summary>
         DesktopBounds GetPrimaryScreen();
     }
 }

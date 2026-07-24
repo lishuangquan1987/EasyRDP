@@ -6,9 +6,13 @@ namespace EasyRDP.Core.Rendering
     /// </summary>
     public struct ScreenRect
     {
+        /// <summary>X origin of the rectangle in screen coordinates.</summary>
         public int X;
+        /// <summary>Y origin of the rectangle in screen coordinates.</summary>
         public int Y;
+        /// <summary>Width of the rectangle in pixels.</summary>
         public int Width;
+        /// <summary>Height of the rectangle in pixels.</summary>
         public int Height;
     }
 }
