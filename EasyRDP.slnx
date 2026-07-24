@@ -4,6 +4,9 @@
     <Project Path="src/EasyRDP.Core/EasyRDP.Core.csproj" />
     <Project Path="src/EasyRDP.Server.Wpf/EasyRDP.Server.Wpf.csproj" />
   </Folder>
+  <Folder Name="/submodules/">
+    <Project Path="EasyDesk/src/EasyDesk.Core/EasyDesk.Core.csproj" />
+  </Folder>
   <Folder Name="/test/">
     <Project Path="test/EasyRDP.Core.Tests/EasyRDP.Core.Tests.csproj" />
   </Folder>

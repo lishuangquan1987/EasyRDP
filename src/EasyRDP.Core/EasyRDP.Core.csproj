@@ -1,13 +1,13 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
-  <ItemGroup>
-    <ProjectReference Include="..\..\EasyDesk\src\EasyDesk.Core\EasyDesk.Core.csproj" />
-  </ItemGroup>
-
   <PropertyGroup>
     <TargetFrameworks>net40;netstandard2.0</TargetFrameworks>
     <LangVersion>5</LangVersion>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\EasyDesk\src\EasyDesk.Core\EasyDesk.Core.csproj" />
+  </ItemGroup>
 
 </Project>
