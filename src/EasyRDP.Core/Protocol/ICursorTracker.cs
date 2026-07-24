@@ -16,6 +16,18 @@ namespace EasyRDP.Core.Protocol
         /// <summary>是否捕获光标形状（RGBA 像素）。false 时仅追踪位置。</summary>
         bool EnableShape { get; set; }
 
+        /// <summary>
+        /// 为本连接创建一个光标追踪会话。由 ServerStreamSession.Start 调用。
+        /// 返回的 ICursorTrackerSession 仅控制本会话的光标订阅，不影响其他客户端。
+        /// </summary>
+        ICursorTrackerSession CreateSession();
+
+        /// <summary>启动光标轮询线程。</summary>
+        void Start();
+
+        /// <summary>移除已停止的光标追踪会话并释放其资源。由 ServerStreamSession.Stop 调用。</summary>
+        void RemoveSession(ICursorTrackerSession session);
+
         /// <summary>停止所有客户端的光标追踪并结束线程。仅 TransportHost 在停机时调用。</summary>
         void StopAll();
     }

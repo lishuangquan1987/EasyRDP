@@ -181,7 +181,11 @@ namespace EasyRDP.Core.Protocol
         {
             IntPtr vtable = Marshal.ReadIntPtr(pInterface);
             IntPtr method = Marshal.ReadIntPtr(vtable, slot * IntPtr.Size);
+#if NET40
+            return (T)(object)Marshal.GetDelegateForFunctionPointer(method, typeof(T));
+#else
             return Marshal.GetDelegateForFunctionPointer<T>(method);
+#endif
         }
 
         // ====== 编码器 VTable 委托类型（4号槽位：EncodeFrame） ======

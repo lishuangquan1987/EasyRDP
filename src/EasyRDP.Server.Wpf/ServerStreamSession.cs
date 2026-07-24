@@ -19,6 +19,7 @@ namespace EasyRDP.Server.Wpf
     {
         private readonly ICaptureService _captureService;
         private readonly Action<uint, byte[]> _sendTo;
+        private readonly ICursorTracker _cursorTracker;
         private readonly object _lock = new object();
 
         private uint _sessionId;
@@ -51,6 +52,9 @@ namespace EasyRDP.Server.Wpf
         // D12 global load
         private int _globalLoadLevel;
 
+        // Cursor session
+        private ICursorTrackerSession _cursorSession;
+
         // Threads
         private Thread _encodeThread;
         private Thread _sendThread;
@@ -77,10 +81,12 @@ namespace EasyRDP.Server.Wpf
 
         public event EventHandler<ErrorEventArgs> FatalError;
 
-        public ServerStreamSession(ICaptureService captureService, Action<uint, byte[]> sendTo)
+        public ServerStreamSession(ICaptureService captureService, Action<uint, byte[]> sendTo,
+            ICursorTracker cursorTracker)
         {
             _captureService = captureService;
             _sendTo = sendTo;
+            _cursorTracker = cursorTracker;
             FrameDelayMs = 33; // ~30fps default
             KeyframeInterval = 30;
             TargetBitrate = 2000000;
@@ -115,6 +121,14 @@ namespace EasyRDP.Server.Wpf
 
             // Subscribe to capture events
             _captureService.FrameCaptured += OnFrameCaptured;
+
+            // Start cursor tracking
+            if (_cursorTracker != null)
+            {
+                _cursorSession = _cursorTracker.CreateSession();
+                _cursorSession.AttachSendTo(_sendTo, _sessionId);
+                _cursorSession.Start();
+            }
 
             // Start threads
             _encodeThread = new Thread(EncodeLoop);
@@ -165,6 +179,14 @@ namespace EasyRDP.Server.Wpf
             {
                 _sendThread.Join(3000);
                 _sendThread = null;
+            }
+
+            // Stop cursor tracking
+            if (_cursorSession != null)
+            {
+                _cursorSession.Stop();
+                _cursorTracker?.RemoveSession(_cursorSession);
+                _cursorSession = null;
             }
 
             if (_encoder != null && _encodeThread == null)

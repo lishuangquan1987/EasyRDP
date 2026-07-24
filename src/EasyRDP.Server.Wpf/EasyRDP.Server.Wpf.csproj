@@ -8,11 +8,29 @@
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net8.0-windows</TargetFramework>
-    <Nullable>enable</Nullable>
-    <ImplicitUsings>enable</ImplicitUsings>
+    <TargetFrameworks>net40;net8.0-windows</TargetFrameworks>
     <UseWPF>true</UseWPF>
   </PropertyGroup>
+
+  <!-- net8.0-windows 目标：Nullable + ImplicitUsings -->
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net8.0-windows'">
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <!-- net40 目标：手动 WPF 引用 + 高语言版本（SDK Roslyn 可编译至 net40 IL） -->
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net40'">
+    <LangVersion>12</LangVersion>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)' == 'net40'">
+    <Reference Include="System" />
+    <Reference Include="System.Core" />
+    <Reference Include="WindowsBase" />
+    <Reference Include="PresentationCore" />
+    <Reference Include="PresentationFramework" />
+    <Reference Include="System.Xaml" />
+  </ItemGroup>
 
   <ItemGroup>
     <Content Include="..\..\libs\openh264\openh264.dll" Link="openh264.dll"

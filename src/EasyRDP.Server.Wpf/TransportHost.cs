@@ -28,6 +28,9 @@ namespace EasyRDP.Server.Wpf
         // Reassemblers per session
         private readonly Dictionary<uint, MessageReassembler> _reassemblers = new Dictionary<uint, MessageReassembler>();
 
+        // Cursor tracking
+        private readonly ICursorTracker _cursorTracker;
+
         // Heartbeat
         private Thread _heartbeatThread;
         private volatile bool _running;
@@ -36,11 +39,13 @@ namespace EasyRDP.Server.Wpf
         public TransportHost(
             ICaptureService captureService,
             ITransportServer transportServer,
-            IInputSimulator inputSimulator)
+            IInputSimulator inputSimulator,
+            ICursorCapturer cursorCapturer)
         {
             _captureService = captureService;
             _transportServer = transportServer;
             _inputSimulator = inputSimulator;
+            _cursorTracker = new CursorTracker(cursorCapturer);
 
             _transportServer.DataReceived += OnDataReceived;
             _transportServer.ClientConnected += OnClientConnected;
@@ -51,6 +56,8 @@ namespace EasyRDP.Server.Wpf
         {
             _running = true;
             _transportServer.Start(port);
+
+            _cursorTracker.Start();
 
             _heartbeatThread = new Thread(HeartbeatLoop);
             _heartbeatThread.IsBackground = true;
@@ -79,6 +86,7 @@ namespace EasyRDP.Server.Wpf
                 _lastActivity.Clear();
             }
 
+            _cursorTracker.StopAll();
             _transportServer.Stop();
             _heartbeatThread?.Join(2000);
         }
@@ -197,7 +205,7 @@ namespace EasyRDP.Server.Wpf
             var streamSession = new ServerStreamSession(_captureService, (sid, data) =>
             {
                 _transportServer.SendTo(sid, data);
-            });
+            }, _cursorTracker);
 
             var inputSession = new ServerInputSession(_inputSimulator);
 

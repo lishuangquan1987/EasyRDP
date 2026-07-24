@@ -97,7 +97,57 @@ namespace EasyRDP.Client.Wpf
 
         private void OnDataReceived(object sender, FragmentReceivedEventArgs e)
         {
+            if (e == null || e.Data == null || e.Data.Length < 16) return;
+
+            // 探测消息类型：wire[0]=Magic, wire[1]=MessageType
+            // 光标更新独立处理，不与视频帧共享 MessageReassembler 的 FrameId 命名空间
+            byte msgType = e.Data[1];
+            if (msgType == (byte)MessageType.CursorUpdate)
+            {
+                ProcessCursorFragment(e.Data);
+                return;
+            }
+
+            // 其他消息类型走标准重组路径
             _reassembler?.OnFragment(e);
+        }
+
+        private void ProcessCursorFragment(byte[] wire)
+        {
+            // wire format: Magic(1)+Type(1)+PayloadLen(4)+FrameId(4)+FragIdx(2)+FragCount(2)+CRC16(2)+FragData
+            // Minimum cursor payload: Visible(1)+X(4)+Y(4)+Width(4)+Height(4)+HotX(4)+HotY(4)+RgbaLen(4) = 29 bytes
+            const int WireHeaderSize = 16;
+            const int MinCursorPayload = 29;
+            const int MaxCursorPayload = 1024 * 1024; // 1MB cursor data is generous
+
+            // 验证分片参数：光标消息始终为单分片
+            ushort fragIdx = (ushort)(wire[10] | (wire[11] << 8));
+            ushort fragCount = (ushort)(wire[12] | (wire[13] << 8));
+            if (fragIdx != 0 || fragCount != 1)
+                return; // Multi-fragment cursor — discard
+
+            int fragDataLen = wire.Length - WireHeaderSize;
+            if (fragDataLen < MinCursorPayload || fragDataLen > MaxCursorPayload)
+                return; // Payload out of bounds — discard
+
+            // Verify CRC16
+            ushort expectedCrc = (ushort)(wire[14] | (wire[15] << 8));
+            ushort actualCrc = MessageReassembler.ComputeCrc16(wire, WireHeaderSize, fragDataLen);
+            if (actualCrc != expectedCrc)
+                return; // CRC mismatch — discard
+
+            // Parse cursor payload
+            byte[] cursorPayload = new byte[fragDataLen];
+            Buffer.BlockCopy(wire, WireHeaderSize, cursorPayload, 0, fragDataLen);
+            try
+            {
+                var msg = CursorUpdateMessage.Unpack(cursorPayload);
+                ProcessCursorUpdate(msg);
+            }
+            catch (Exception)
+            {
+                // Malformed cursor data — discard silently
+            }
         }
 
         private void OnMessageReceived(object sender, MessageReceivedEventArgs e)
@@ -106,11 +156,6 @@ namespace EasyRDP.Client.Wpf
             {
                 var msg = VideoFrameMessage.Unpack(e.Data);
                 ProcessVideoFrame(msg);
-            }
-            else if (e.MessageType == (byte)MessageType.CursorUpdate)
-            {
-                var msg = CursorUpdateMessage.Unpack(e.Data);
-                ProcessCursorUpdate(msg);
             }
         }
 

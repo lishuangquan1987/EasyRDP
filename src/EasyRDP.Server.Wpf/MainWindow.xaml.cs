@@ -38,6 +38,7 @@ public partial class MainWindow : Window
             var factory = new WindowsDesktopFactory();
             var capturer = factory.CreateScreenCapturer();
             var inputSim = factory.CreateInputSimulator();
+            var cursorCapturer = factory.CreateCursorCapturer();
 
             _captureService = new CaptureService(capturer);
             _captureService.Start();
@@ -45,7 +46,7 @@ public partial class MainWindow : Window
             _transportServer = new TcpTransportServer();
             _transportServer.OnLog = (msg) => Dispatcher.Invoke(() => AddLog(msg));
 
-            _transportHost = new TransportHost(_captureService, _transportServer, inputSim);
+            _transportHost = new TransportHost(_captureService, _transportServer, inputSim, cursorCapturer);
             _transportHost.Start(port);
 
             _startTime = DateTime.Now;

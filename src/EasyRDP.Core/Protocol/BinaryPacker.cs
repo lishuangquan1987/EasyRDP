@@ -139,6 +139,9 @@ namespace EasyRDP.Core.Protocol
             int len = (int)_reader.ReadUInt32();
             if (len == 0)
                 return null;
+            // 防止恶意或损坏数据触发 OOM：拒绝超过 MaxSafePayloadSize 的分配
+            if (len > Constants.MaxSafePayloadSize)
+                return null;
             return _reader.ReadBytes(len);
         }
     }
