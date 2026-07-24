@@ -12,7 +12,6 @@
 > - v2.4 → v2.5 传输健壮性 + 认证完善修订：分包机制；校验码策略；认证改用户名+密码
 > - v2.5 → v2.6 传输无关协议层重构：纠正 v2.5 按传输方式分支的做法。改为协议层统一定义帧分片+顺序保证+丢帧策略，传输层只"尽力投递分片字节"
 > - v2.6 → v2.7 分层职责闭合修订：新增 MessageReassembler（4.3.1）闭合传输层分片→Session 完整消息的桥接缺口；传输层事件改名 DataReceived（去"消息"歧义）；FrameId/SequenceNumber 语义澄清；修复 CommitFrame 双 summary / 目录树双 └── / 非视频消息丢帧策略说明
-> 关联文档：`EasyRDP-Codec-Plan-B.md`（B1–B4 编码后端）、`EasyRDP-Protocol-v1.md`（协议规范）
 
 ---
 
@@ -180,7 +179,7 @@ EasyRDP.Server.Wpf/
 > - XP 最高仅支持 .NET Framework **4.0**；4.5+ 要求 Vista+，装不上 XP。
 > - 服务端（运行于被控 XP 机器）与希望兼容 XP 的客户端，其项目 `TargetFramework` **必须锁定 net40，禁止升号到 net45/net46/net48**，否则 XP 端直接失效。
 > - **net40 必须具备可用编解码后端**：服务端跑在 XP，H.264 编码发生在服务端；若 `H264Encoder`/`H264Decoder` 仅存在于 `#if NET8_0_OR_GREATER`，net40 服务端 `EncoderFactory`/`DecoderFactory` 将全部返回 null → 握手 `Capabilities=None` → `NoCommonCodec` → 连不上。
-> - net40 编解码后端通过**原生软件库 P/Invoke** 实现：`libx264`（首选，MIT，质量/速度最佳）或 `OpenH264`（Cisco，BSD）。原生 DLL 须为 **x86 + XP 兼容构建**（工具链不得引用 Vista+ API；XP 无 MediaFoundation，无硬件编码）。详见 `EasyRDP-Codec-Plan-B.md`。
+> - net40 编解码后端通过**原生软件库 P/Invoke** 实现：`libx264`（首选，MIT，质量/速度最佳）或 `OpenH264`（Cisco，BSD）。原生 DLL 须为 **x86 + XP 兼容构建**（工具链不得引用 Vista+ API；XP 无 MediaFoundation，无硬件编码）。
 > - 抽象层契约：`EncoderFactory.Create(CodecId.H264Software)` 与 `DecoderFactory.Create(CodecId.H264Software)` 在 **net40 与 net8.0 下都必须能返回可用实例**（DLL 缺失时才返回 null），否则五层抽象无法支撑 XP 用例。
 >
 > **日志策略（D3）**：仅传输层（`ITransportClient`/`ITransportServer`）通过 `LogCallback` 回调暴露日志，因其内部网络事件最需观测。捕获/编码/解码/会话层不设独立日志钩子，状态通过返回值与事件上报：编码失败由 `Encode` 返回 null（连续 30 帧→`FatalError`）；解码故障由 `DecodeResult.Status`/`IsAvailable=false` 上报；Session 不可恢复故障经 `FatalError` 事件。若需全层统一日志，由实现层在构造各零件时注入统一的 `LogCallback`（实现可扩展，抽象层不强加）。
@@ -1748,12 +1747,3 @@ public void CleanupRenderPipeline()
 | **FrameId 与 SequenceNumber 语义重叠** | 6.3.1 澄清：FrameId 是传输级分片组 ID（所有消息适用），SequenceNumber 是视频 payload 内应用级帧序号（仅 VideoFrame），不可混用 |
 | **双 └── 树结构损坏 + 缺新文件** | v2.7 修正目录树：Session 下双 └── 修复；Transport 下新增 MessageReassembler.cs；Session 下补 CapturedFrame.cs/ErrorEventArgs.cs |
 
----
-
-## 9. 关联文档
-
-本设计落地后需同步更新的文档（不在本次实现范围内）：
-
-- `EasyRDP-Codec-Plan-B.md`：B1 取消，B2/B3/B4 保留
-- `EasyRDP-Protocol-v1.md`：移除 Bitmap 路径协议元素，版本升号
-- `AGENTS.md`：架构图更新
