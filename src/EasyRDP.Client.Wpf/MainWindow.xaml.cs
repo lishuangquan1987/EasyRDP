@@ -48,4 +48,21 @@ public partial class MainWindow : Window
     {
         _vm.ToggleFullscreen();
     }
+
+    /// <summary>键盘按下 — 路由到 ViewModel。</summary>
+    private void Window_KeyDown(object sender, KeyEventArgs e)
+    {
+        // WPF 中 Alt 键通过 SystemKey 传递
+        Key key = e.Key == Key.System ? e.SystemKey : e.Key;
+        _vm.HandleKeyDown(key);
+        e.Handled = true;
+    }
+
+    /// <summary>键盘释放 — 路由到 ViewModel。</summary>
+    private void Window_KeyUp(object sender, KeyEventArgs e)
+    {
+        Key key = e.Key == Key.System ? e.SystemKey : e.Key;
+        _vm.HandleKeyUp(key);
+        e.Handled = true;
+    }
 }

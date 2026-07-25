@@ -5,7 +5,8 @@
         Title="EasyRDP Client" Height="750" Width="1100"
         MinHeight="400" MinWidth="600"
         Background="#1E1E2E" Foreground="#CDD6F4"
-        WindowStartupLocation="CenterScreen">
+        WindowStartupLocation="CenterScreen"
+        KeyDown="Window_KeyDown" KeyUp="Window_KeyUp">
     <Window.Resources>
         <!-- 颜色 -->
         <SolidColorBrush x:Key="BgPrimary" Color="#1E1E2E"/>

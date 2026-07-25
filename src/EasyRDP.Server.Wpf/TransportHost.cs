@@ -15,6 +15,12 @@ namespace EasyRDP.Server.Wpf
     /// </summary>
     public class TransportHost : IDisposable
     {
+        /// <summary>会话 attached 事件（UI 绑定用），参数为 (sessionId, remoteEndPoint, codec, resolution)。</summary>
+        public event Action<uint, string, string, string> SessionAttached;
+
+        /// <summary>会话 detached 事件（UI 绑定用）。</summary>
+        public event Action<uint> SessionDetached;
+
         private readonly ICaptureService _captureService;
         private readonly ITransportServer _transportServer;
         private readonly IInputSimulator _inputSimulator; // Shared for all input sessions
@@ -123,7 +129,6 @@ namespace EasyRDP.Server.Wpf
 
         private void OnMessageReceived(MessageReceivedEventArgs e)
         {
-            // First message must be HandshakeReq
             if (e.MessageType == (byte)MessageType.HandshakeReq)
             {
                 HandleHandshake(e);
@@ -220,6 +225,16 @@ namespace EasyRDP.Server.Wpf
             }
 
             streamSession.Start(e.SessionId, negotiated.Value);
+
+            // Fire session attached event
+            var handler = SessionAttached;
+            if (handler != null)
+            {
+                string remote = "?";
+                string codec = negotiated.Value.ToString();
+                string resolution = bounds.Width + "x" + bounds.Height;
+                handler(e.SessionId, remote, codec, resolution);
+            }
         }
 
         private void SendResponse(uint sessionId, HandshakeRes res)
@@ -233,6 +248,9 @@ namespace EasyRDP.Server.Wpf
         private void OnClientDisconnected(object sender, ConnectionEventArgs e)
         {
             DisconnectSession(e.SessionId);
+
+            var handler = SessionDetached;
+            if (handler != null) handler(e.SessionId);
         }
 
         private void DisconnectSession(uint sessionId)

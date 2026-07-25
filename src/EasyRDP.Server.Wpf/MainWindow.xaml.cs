@@ -1,4 +1,5 @@
-﻿using System;
+﻿#nullable disable
+using System;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Windows;
@@ -9,17 +10,17 @@ using EasyDesk.Windows;
 namespace EasyRDP.Server.Wpf;
 
 /// <summary>
-/// 服务端主窗口。专业仪表盘界面。
+/// 服务端主窗口。
 /// </summary>
 public partial class MainWindow : Window
 {
-    private CaptureService? _captureService;
-    private TcpTransportServer? _transportServer;
-    private TransportHost? _transportHost;
+    private CaptureService _captureService;
+    private TcpTransportServer _transportServer;
+    private TransportHost _transportHost;
     private readonly ObservableCollection<SessionItem> _sessions = new ObservableCollection<SessionItem>();
     private readonly ObservableCollection<string> _logEntries = new ObservableCollection<string>();
     private DateTime _startTime;
-    private DispatcherTimer? _uptimeTimer;
+    private DispatcherTimer _uptimeTimer;
 
     public MainWindow()
     {
@@ -47,6 +48,11 @@ public partial class MainWindow : Window
             _transportServer.OnLog = (msg) => Dispatcher.Invoke(() => AddLog(msg));
 
             _transportHost = new TransportHost(_captureService, _transportServer, inputSim, cursorCapturer);
+
+            // 订阅会话事件以更新 UI
+            _transportHost.SessionAttached += OnSessionAttached;
+            _transportHost.SessionDetached += OnSessionDetached;
+
             _transportHost.Start(port);
 
             _startTime = DateTime.Now;
@@ -72,6 +78,13 @@ public partial class MainWindow : Window
     {
         _uptimeTimer?.Stop();
         _transportHost?.Stop();
+
+        // 先 Stop 再注销事件（确保 Stop 过程中触发的断连事件能被 UI 捕获）
+        if (_transportHost != null)
+        {
+            _transportHost.SessionAttached -= OnSessionAttached;
+            _transportHost.SessionDetached -= OnSessionDetached;
+        }
         _transportHost = null;
         _transportServer?.Dispose();
         _transportServer = null;
@@ -103,6 +116,42 @@ public partial class MainWindow : Window
             _logEntries.RemoveAt(_logEntries.Count - 1);
         LogLine.Text = message;
     }
+
+    private void OnSessionAttached(uint sessionId, string remote, string codec, string resolution)
+    {
+        Dispatcher.Invoke(() =>
+        {
+            var item = new SessionItem
+            {
+                IdValue = sessionId,
+                Id = sessionId.ToString(),
+                Remote = remote,
+                Codec = codec,
+                Resolution = resolution,
+                Frames = 0
+            };
+            _sessions.Add(item);
+            SessionCountLabel.Text = _sessions.Count.ToString();
+            AddLog("Session " + sessionId + " connected — " + codec + " " + resolution);
+        });
+    }
+
+    private void OnSessionDetached(uint sessionId)
+    {
+        Dispatcher.Invoke(() =>
+        {
+            for (int i = _sessions.Count - 1; i >= 0; i--)
+            {
+                if (_sessions[i].IdValue == sessionId)
+                {
+                    _sessions.RemoveAt(i);
+                    break;
+                }
+            }
+            SessionCountLabel.Text = _sessions.Count.ToString();
+            AddLog("Session " + sessionId + " disconnected");
+        });
+    }
 }
 
 /// <summary>
@@ -110,6 +159,8 @@ public partial class MainWindow : Window
 /// </summary>
 public class SessionItem : INotifyPropertyChanged
 {
+    /// <summary>Session ID（用于去重匹配）。</summary>
+    public uint IdValue { get; set; }
     private string _id = "";
     private string _remote = "";
     private string _codec = "";

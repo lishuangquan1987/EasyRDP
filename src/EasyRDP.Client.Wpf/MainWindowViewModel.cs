@@ -210,11 +210,13 @@ namespace EasyRDP.Client.Wpf
             // 初始化渲染管线
             _renderTarget = new WpfRenderTarget();
             _frameBuffer = new FrameBuffer();
-            RenderBitmap = _renderTarget.Bitmap;
 
             _streamSession = new ClientStreamSession();
             _streamSession.RenderTarget = _renderTarget;
             _streamSession.InitPipeline(handshakeRes.Codec, handshakeRes.ScreenWidth, handshakeRes.ScreenHeight);
+
+            // 必须在 InitPipeline（调用 Resize）之后才赋值 Bitmap
+            RenderBitmap = _renderTarget.Bitmap;
 
             _inputSession = new ClientInputSession();
             _inputSession.Start(_transport, handshakeRes.ScreenWidth, handshakeRes.ScreenHeight);
@@ -324,6 +326,19 @@ namespace EasyRDP.Client.Wpf
             _streamSession = null;
             _inputSession = null;
 
+            // 清理渲染资源
+            if (_renderTarget != null)
+            {
+                try { _renderTarget.Dispose(); } catch { }
+                _renderTarget = null;
+            }
+            if (_frameBuffer != null)
+            {
+                _frameBuffer.Reset();
+                _frameBuffer = null;
+            }
+            RenderBitmap = null;
+
             IsConnected = false;
             FrameSize = "—";
             FrameRate = 0;
@@ -365,6 +380,52 @@ namespace EasyRDP.Client.Wpf
             if (_inputSession == null || !_running) return;
             var msg = new InputEventMessage { Type = InputEventType.MouseWheel, WheelDelta = delta };
             _inputSession.SendInput(msg);
+        }
+
+        /// <summary>处理键盘按下事件（由 View 的 KeyDown 事件调用）。</summary>
+        public void HandleKeyDown(System.Windows.Input.Key key)
+        {
+            if (_inputSession == null || !_running) return;
+            int virtualKey = KeyToVirtualKey(key);
+            if (virtualKey == 0) return;
+            var msg = new InputEventMessage { Type = InputEventType.KeyDown, KeyCode = virtualKey };
+            _inputSession.SendInput(msg);
+        }
+
+        /// <summary>处理键盘释放事件（由 View 的 KeyUp 事件调用）。</summary>
+        public void HandleKeyUp(System.Windows.Input.Key key)
+        {
+            if (_inputSession == null || !_running) return;
+            int virtualKey = KeyToVirtualKey(key);
+            if (virtualKey == 0) return;
+            var msg = new InputEventMessage { Type = InputEventType.KeyUp, KeyCode = virtualKey };
+            _inputSession.SendInput(msg);
+        }
+
+        /// <summary>将 WPF Key 枚举映射为 Windows 虚拟键码。</summary>
+        private static int KeyToVirtualKey(System.Windows.Input.Key key)
+        {
+            if (key >= System.Windows.Input.Key.A && key <= System.Windows.Input.Key.Z)
+                return (int)key - (int)System.Windows.Input.Key.A + 0x41; // VK_A..VK_Z
+            if (key >= System.Windows.Input.Key.D0 && key <= System.Windows.Input.Key.D9)
+                return (int)key - (int)System.Windows.Input.Key.D0 + 0x30; // VK_0..VK_9
+            if (key == System.Windows.Input.Key.LeftShift) return 0xA0;
+            if (key == System.Windows.Input.Key.RightShift) return 0xA1;
+            if (key == System.Windows.Input.Key.LeftCtrl) return 0xA2;
+            if (key == System.Windows.Input.Key.RightCtrl) return 0xA3;
+            if (key == System.Windows.Input.Key.LeftAlt) return 0xA4;
+            if (key == System.Windows.Input.Key.RightAlt) return 0xA5;
+            if (key == System.Windows.Input.Key.Enter) return 0x0D;
+            if (key == System.Windows.Input.Key.Escape) return 0x1B;
+            if (key == System.Windows.Input.Key.Tab) return 0x09;
+            if (key == System.Windows.Input.Key.Back) return 0x08;
+            if (key == System.Windows.Input.Key.Space) return 0x20;
+            if (key == System.Windows.Input.Key.Delete) return 0x2E;
+            if (key == System.Windows.Input.Key.Up) return 0x26;
+            if (key == System.Windows.Input.Key.Down) return 0x28;
+            if (key == System.Windows.Input.Key.Left) return 0x25;
+            if (key == System.Windows.Input.Key.Right) return 0x27;
+            return 0; // 不支持
         }
 
         // ====== 内部辅助 ======
