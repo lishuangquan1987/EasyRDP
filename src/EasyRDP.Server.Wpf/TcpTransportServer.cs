@@ -72,7 +72,14 @@ namespace EasyRDP.Server.Wpf
             lock (_lock)
             {
                 if (!_clients.TryGetValue(sessionId, out client))
+                {
+                    // 静默返回会导致调用方无法察觉 bug（如把 sessionId 误传成 0）。
+                    // Warn 日志记录目标 sessionId 和数据大小，便于诊断"消息发不到对端"类问题。
+                    // 正常断连竞态也会触发此日志，但 Warn 级别足以帮助定位问题。
+                    Logger.Warn("SendTo session {0} not found — dropping {1} bytes (client may have disconnected or sessionId bug)",
+                        sessionId, data != null ? data.Length : 0);
                     return;
+                }
                 sessionLock = _sessionLocks[sessionId];
             }
             lock (sessionLock)
@@ -162,9 +169,18 @@ namespace EasyRDP.Server.Wpf
             var framing = new FramingBuffer();
             framing.FragmentReady += (fragData) =>
             {
-                var handler = DataReceived;
-                if (handler != null)
-                    handler(this, new FragmentReceivedEventArgs(sessionId, fragData));
+                // 防御性 try-catch：若某个分片触发消息处理异常（如 bogus 消息 Unpack 失败），
+                // 不能让单个坏消息杀死整个 ReceiveLoop 导致连接断开。
+                try
+                {
+                    var handler = DataReceived;
+                    if (handler != null)
+                        handler(this, new FragmentReceivedEventArgs(sessionId, fragData));
+                }
+                catch (Exception ex)
+                {
+                    Logger.Warn(ex, "FragmentReady handler threw for session {0}", sessionId);
+                }
             };
 
             try

@@ -1,35 +1,101 @@
-﻿<Window x:Class="EasyRDP.Server.Wpf.MainWindow"
+<Window x:Class="EasyRDP.Server.Wpf.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="EasyRDP Server" Height="450" Width="700"
+        Title="EasyRDP Server" Height="640" Width="820"
+        MinHeight="480" MinWidth="640"
         WindowStartupLocation="CenterScreen">
-    <Grid Margin="12">
+    <Grid>
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <!-- 状态栏 -->
-        <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,8">
-            <TextBlock Text="Status: " VerticalAlignment="Center"/>
-            <TextBlock Text="{Binding StatusText}" FontWeight="Bold" VerticalAlignment="Center" Margin="0,0,16,0"/>
-            <TextBlock Text="Sessions: " VerticalAlignment="Center"/>
-            <TextBlock Text="{Binding SessionCount}" FontWeight="Bold" VerticalAlignment="Center" Margin="0,0,16,0"/>
-            <TextBlock Text="Uptime: " VerticalAlignment="Center"/>
-            <TextBlock Text="{Binding Uptime}" FontWeight="Bold" VerticalAlignment="Center"/>
-        </StackPanel>
+        <!-- ====== 顶部：配置区 ====== -->
+        <Border Grid.Row="0" BorderBrush="#CCC" BorderThickness="0,0,0,1" Padding="12,10">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
 
-        <!-- 控制栏 -->
-        <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,8">
-            <TextBlock Text="Port:" VerticalAlignment="Center" Margin="0,0,6,0"/>
-            <TextBox Text="{Binding PortText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                     Width="80" Margin="0,0,8,0"/>
-            <Button Content="Start" Command="{Binding StartCommand}" Width="80" Margin="0,0,6,0"/>
-            <Button Content="Stop" Command="{Binding StopCommand}" Width="80"/>
-        </StackPanel>
+                <!-- Port -->
+                <TextBlock Grid.Column="0" Text="Port:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                <TextBox Grid.Column="1" Text="{Binding PortText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                         Width="80" VerticalAlignment="Center" Margin="0,0,16,0"/>
 
-        <!-- 日志列表 -->
-        <ListBox Grid.Row="2" ItemsSource="{Binding LogEntries}" FontSize="11" FontFamily="Consolas"/>
+                <!-- Username -->
+                <TextBlock Grid.Column="2" Text="User:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                <TextBox Grid.Column="3" Text="{Binding Username, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                         Width="120" VerticalAlignment="Center" Margin="0,0,16,0"/>
+
+                <!-- Password -->
+                <TextBlock Grid.Column="4" Text="Password:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                <TextBox Grid.Column="5" Text="{Binding Password, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                         Width="140" VerticalAlignment="Center" Margin="0,0,16,0"/>
+
+                <!-- 占位 -->
+                <TextBlock Grid.Column="6"/>
+
+                <!-- Start / Stop 按钮 -->
+                <StackPanel Grid.Column="7" Orientation="Horizontal">
+                    <Button Content="Start" Command="{Binding StartCommand}" Width="80" Height="28" Margin="0,0,6,0"/>
+                    <Button Content="Stop" Command="{Binding StopCommand}" Width="80" Height="28"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <!-- ====== 状态栏 ====== -->
+        <Border Grid.Row="1" Background="#F5F5F5" BorderBrush="#CCC" BorderThickness="0,0,0,1" Padding="12,6">
+            <StackPanel Orientation="Horizontal">
+                <TextBlock Text="Status: " VerticalAlignment="Center"/>
+                <TextBlock Text="{Binding StatusText}" FontWeight="Bold" VerticalAlignment="Center" Margin="0,0,16,0"/>
+                <TextBlock Text="Port: " VerticalAlignment="Center"/>
+                <TextBlock Text="{Binding DisplayPort}" FontWeight="Bold" VerticalAlignment="Center" Margin="0,0,16,0"/>
+                <TextBlock Text="Sessions: " VerticalAlignment="Center"/>
+                <TextBlock Text="{Binding SessionCount}" FontWeight="Bold" VerticalAlignment="Center" Margin="0,0,16,0"/>
+                <TextBlock Text="Uptime: " VerticalAlignment="Center"/>
+                <TextBlock Text="{Binding Uptime}" FontWeight="Bold" VerticalAlignment="Center"/>
+            </StackPanel>
+        </Border>
+
+        <!-- ====== 中间：会话列表 ====== -->
+        <Grid Grid.Row="2" Margin="12,8,12,4">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
+            <TextBlock Grid.Row="0" Text="Sessions" FontWeight="Bold" Margin="0,0,0,4"/>
+            <DataGrid Grid.Row="1" ItemsSource="{Binding Sessions}" AutoGenerateColumns="False"
+                      IsReadOnly="True" HeadersVisibility="Column" GridLinesVisibility="Horizontal"
+                      CanUserAddRows="False" CanUserDeleteRows="False" CanUserResizeRows="False"
+                      BorderBrush="#DDD" BorderThickness="1">
+                <DataGrid.Columns>
+                    <DataGridTextColumn Header="ID" Binding="{Binding Id}" Width="60"/>
+                    <DataGridTextColumn Header="Remote" Binding="{Binding Remote}" Width="160"/>
+                    <DataGridTextColumn Header="Codec" Binding="{Binding Codec}" Width="120"/>
+                    <DataGridTextColumn Header="Resolution" Binding="{Binding Resolution}" Width="120"/>
+                    <DataGridTextColumn Header="Frames" Binding="{Binding Frames}" Width="*"/>
+                </DataGrid.Columns>
+            </DataGrid>
+        </Grid>
+
+        <!-- ====== 底部：日志 ====== -->
+        <Grid Grid.Row="3" Margin="12,4,12,12" MinHeight="120">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
+            <TextBlock Grid.Row="0" Text="Log" FontWeight="Bold" Margin="0,0,0,4"/>
+            <ListBox Grid.Row="1" ItemsSource="{Binding LogEntries}" FontSize="11" FontFamily="Consolas"
+                     BorderBrush="#DDD" BorderThickness="1"/>
+        </Grid>
     </Grid>
 </Window>

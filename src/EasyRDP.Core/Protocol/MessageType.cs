@@ -3,12 +3,25 @@ namespace EasyRDP.Core.Protocol
     /// <summary>协议消息类型标识。</summary>
     public enum MessageType : byte
     {
-        HandshakeReq  = 0x01,
-        HandshakeRes  = 0x02,
-        Keepalive     = 0x03,
-        InputEvent    = 0x05,
-        CursorUpdate  = 0x06,
-        VideoFrame    = 0x50
+        HandshakeReq    = 0x01,
+        HandshakeRes    = 0x02,
+        Keepalive       = 0x03,
+        InputEvent      = 0x05,
+        CursorUpdate    = 0x06,
+        /// <summary>剪贴板同步（双向：客户端→服务端 或 服务端→客户端）。</summary>
+        ClipboardSync   = 0x07,
+        /// <summary>文件剪贴板格式广播（延迟渲染）：仅含文件元信息，不含文件内容。</summary>
+        ClipFormatList       = 0x0E,
+        /// <summary>文件内容请求（延迟渲染）：接收方按需请求文件内容分片。</summary>
+        ClipFileContentsReq  = 0x0F,
+        /// <summary>文件内容响应（延迟渲染）：发送方返回文件内容分片。</summary>
+        ClipFileContentsRes  = 0x10,
+        /// <summary>图片剪贴板传输开始：含 CF_DIB 总字节数。</summary>
+        ImageClipboardStart = 0x0B,
+        /// <summary>图片剪贴板数据块：携带 CF_DIB 内容分片。</summary>
+        ImageClipboardData  = 0x0C,
+        /// <summary>图片剪贴板传输完成：接收方可设置 CF_DIB。</summary>
+        ImageClipboardEnd   = 0x0D,
+        VideoFrame      = 0x50
     }
-
 }

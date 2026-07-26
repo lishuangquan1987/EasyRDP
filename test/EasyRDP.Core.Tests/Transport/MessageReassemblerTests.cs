@@ -156,5 +156,193 @@ namespace EasyRDP.Core.Tests.Transport
 
             Assert.False(delivered);
         }
+
+        /// <summary>
+        /// 回归测试：控制消息（ClipboardSync, frameId=0）在实时帧（VideoFrame, frameId 单调递增）
+        /// 到达后不应被丢弃。修复前，两类消息共用单一 _currentFrameId，控制帧 frameId=0 始终被判为
+        /// stale（&lt; 当前实时 frameId）而静默丢弃，导致剪贴板同步失效。
+        /// </summary>
+        [Fact]
+        public void OnFragment_ControlMessage_NotDiscarded_AfterRealtimeFramesAdvance()
+        {
+            // 1) 先发送大量实时帧（VideoFrame），让实时流的 _currentFrameId 推进到很大值
+            int realtimeFrameCount = 100;
+            var sentRealtimeFrags = new System.Collections.Generic.List<byte[]>[realtimeFrameCount];
+            for (int i = 0; i < realtimeFrameCount; i++)
+            {
+                var rtPayload = new byte[] { (byte)i, (byte)(0xA0 + i) };
+                sentRealtimeFrags[i] = new System.Collections.Generic.List<byte[]>();
+                MessageReassembler.FragAndSend((uint)(i + 1), (byte)MessageType.VideoFrame, rtPayload,
+                    (sid, data) => sentRealtimeFrags[i].Add(data), 0);
+            }
+
+            // 2) 发送控制消息（ClipboardSync, frameId=0）
+            var controlPayload = new byte[] { 0x01, 0x02, 0x03, 0x04, 0x05 };
+            var sentControlFrags = new System.Collections.Generic.List<byte[]>();
+            MessageReassembler.FragAndSend(0, (byte)MessageType.ClipboardSync, controlPayload,
+                (sid, data) => sentControlFrags.Add(data), 0);
+
+            // 3) 喂入重组器：先全部实时帧，再控制消息
+            var reassembler = new MessageReassembler();
+            System.Collections.Generic.List<MessageReceivedEventArgs> received = new System.Collections.Generic.List<MessageReceivedEventArgs>();
+            reassembler.MessageReceived += (s, e) => received.Add(e);
+
+            for (int i = 0; i < realtimeFrameCount; i++)
+            {
+                foreach (var frag in sentRealtimeFrags[i])
+                    reassembler.OnFragment(new FragmentReceivedEventArgs(0, frag));
+            }
+            foreach (var frag in sentControlFrags)
+                reassembler.OnFragment(new FragmentReceivedEventArgs(0, frag));
+
+            // 4) 断言：控制消息必须被完整送达（修复前会被判 stale 丢弃）
+            var controlMsg = received.Find(e => e.MessageType == (byte)MessageType.ClipboardSync);
+            Assert.NotNull(controlMsg);
+            Assert.Equal(controlPayload, controlMsg.Data);
+        }
+
+        /// <summary>
+        /// 回归测试：实时帧与控制消息分片交错到达时，控制消息仍应完整重组。
+        /// 模拟 47 分片的文件剪贴板传输期间夹杂数个 VideoFrame 分片。
+        /// 修复前共用状态会被实时帧 StartNewFrame 冲刷，导致控制帧永远无法凑齐。
+        /// </summary>
+        [Fact]
+        public void OnFragment_ControlMessage_Assembled_WithInterleavedRealtimeFrames()
+        {
+            // 大 payload 触发多分片（控制流）
+            int controlPayloadSize = Constants.FragmentSize * 3 + 50;
+            var controlPayload = new byte[controlPayloadSize];
+            for (int i = 0; i < controlPayloadSize; i++)
+                controlPayload[i] = (byte)(i % 256);
+
+            var sentControlFrags = new System.Collections.Generic.List<byte[]>();
+            MessageReassembler.FragAndSend(0, (byte)MessageType.ClipFormatList, controlPayload,
+                (sid, data) => sentControlFrags.Add(data), 0);
+            int controlFragCount = sentControlFrags.Count;
+            Assert.True(controlFragCount >= 4);
+
+            // 几个实时帧，用于在控制分片之间插入
+            var sentRealtimeFrags = new System.Collections.Generic.List<byte[]>();
+            for (int i = 0; i < 5; i++)
+            {
+                var rtPayload = new byte[] { (byte)i, 0x99 };
+                MessageReassembler.FragAndSend((uint)(100 + i), (byte)MessageType.VideoFrame, rtPayload,
+                    (sid, data) => sentRealtimeFrags.Add(data), 0);
+            }
+
+            var reassembler = new MessageReassembler();
+            System.Collections.Generic.List<MessageReceivedEventArgs> received = new System.Collections.Generic.List<MessageReceivedEventArgs>();
+            reassembler.MessageReceived += (s, e) => received.Add(e);
+
+            // 交错喂入：每 2 个控制分片后插 1 个实时帧
+            int rtIdx = 0;
+            for (int i = 0; i < controlFragCount; i++)
+            {
+                reassembler.OnFragment(new FragmentReceivedEventArgs(0, sentControlFrags[i]));
+                if (i % 2 == 1 && rtIdx < sentRealtimeFrags.Count)
+                {
+                    reassembler.OnFragment(new FragmentReceivedEventArgs(0, sentRealtimeFrags[rtIdx]));
+                    rtIdx++;
+                }
+            }
+
+            // 控制消息必须完整送达
+            var controlMsg = received.Find(e => e.MessageType == (byte)MessageType.ClipFormatList);
+            Assert.NotNull(controlMsg);
+            Assert.Equal(controlPayload.Length, controlMsg.Data.Length);
+            Assert.Equal(controlPayload, controlMsg.Data);
+        }
+
+        /// <summary>
+        /// 回归测试：同 frameId=0 的连续控制消息必须被独立组装，不能因 _initialized=true
+        /// 而误判为同一帧。修复前的 BUG：第一个控制消息组装完成后 _fragBuffers=null _expectedFragCount=0，
+        /// 第二个同 frameId=0 的消息分片到达时不触发 StartNewFrame，直接进入 AssembleAndDeliver，
+        /// 用旧的 messageType/payloadLen 组装出空 payload，导致 ClipFormatList 被误判为 HandshakeReq。
+        /// </summary>
+        [Fact]
+        public void ControlStream_SequentialSameFrameId_MustBeAssembledIndependently()
+        {
+            // 模拟实际场景：HandshakeReq（frameId=0）→ ClipFormatList（frameId=0）
+            var reassembler = new MessageReassembler();
+            var received = new System.Collections.Generic.List<MessageReceivedEventArgs>();
+            reassembler.MessageReceived += (s, e) => received.Add(e);
+
+            // 第一个控制消息：HandshakeReq，10 字节
+            byte[] hsPayload = new byte[] { 2, 0, 0, 0, 1, 0, 0, 0, 0, 0 };
+            var hsFrags = new System.Collections.Generic.List<byte[]>();
+            MessageReassembler.FragAndSend(0, (byte)MessageType.HandshakeReq, hsPayload,
+                (sid, data) => hsFrags.Add(data), 0);
+
+            // 第二个控制消息：ClipFormatList，frameId=0，多分片
+            byte[] clipPayload = new byte[500];
+            for (int i = 0; i < clipPayload.Length; i++) clipPayload[i] = (byte)(i & 0xFF);
+            var clipFrags = new System.Collections.Generic.List<byte[]>();
+            MessageReassembler.FragAndSend(0, (byte)MessageType.ClipFormatList, clipPayload,
+                (sid, data) => clipFrags.Add(data), 0);
+
+            // 喂入 HandshakeReq 分片
+            foreach (var frag in hsFrags)
+                reassembler.OnFragment(new FragmentReceivedEventArgs(0, frag));
+
+            // 喂入 ClipFormatList 分片
+            foreach (var frag in clipFrags)
+                reassembler.OnFragment(new FragmentReceivedEventArgs(0, frag));
+
+            // 断言两条消息都被正确组装
+            Assert.Equal(2, received.Count);
+
+            // 第一条：HandshakeReq
+            Assert.Equal((byte)MessageType.HandshakeReq, received[0].MessageType);
+            Assert.Equal(hsPayload.Length, received[0].Data.Length);
+            Assert.Equal(hsPayload, received[0].Data);
+
+            // 第二条：ClipFormatList（关键：不能被误判为 HandshakeReq）
+            Assert.Equal((byte)MessageType.ClipFormatList, received[1].MessageType);
+            Assert.Equal(clipPayload.Length, received[1].Data.Length);
+            Assert.Equal(clipPayload, received[1].Data);
+        }
+
+        /// <summary>
+        /// 回归测试：三个连续同 frameId=0 的控制消息（HandshakeRes → ClipFormatList → ClipFileContentsReq）
+        /// 都必须被独立正确组装。模拟客户端实际场景：握手响应后收到文件剪贴板广播，再发文件内容请求。
+        /// </summary>
+        [Fact]
+        public void ControlStream_ThreeSequentialSameFrameId_AllAssembledCorrectly()
+        {
+            var reassembler = new MessageReassembler();
+            var received = new System.Collections.Generic.List<MessageReceivedEventArgs>();
+            reassembler.MessageReceived += (s, e) => received.Add(e);
+
+            byte[] resPayload = new byte[] { 0, 1, 2, 3, 4, 5, 6, 7 };
+            byte[] listPayload = new byte[300];
+            for (int i = 0; i < listPayload.Length; i++) listPayload[i] = (byte)(i + 1);
+            byte[] reqPayload = new byte[] { 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF };
+
+            var resFrags = new System.Collections.Generic.List<byte[]>();
+            var listFrags = new System.Collections.Generic.List<byte[]>();
+            var reqFrags = new System.Collections.Generic.List<byte[]>();
+
+            MessageReassembler.FragAndSend(0, (byte)MessageType.HandshakeRes, resPayload,
+                (sid, data) => resFrags.Add(data), 0);
+            MessageReassembler.FragAndSend(0, (byte)MessageType.ClipFormatList, listPayload,
+                (sid, data) => listFrags.Add(data), 0);
+            MessageReassembler.FragAndSend(0, (byte)MessageType.ClipFileContentsReq, reqPayload,
+                (sid, data) => reqFrags.Add(data), 0);
+
+            foreach (var frag in resFrags)
+                reassembler.OnFragment(new FragmentReceivedEventArgs(0, frag));
+            foreach (var frag in listFrags)
+                reassembler.OnFragment(new FragmentReceivedEventArgs(0, frag));
+            foreach (var frag in reqFrags)
+                reassembler.OnFragment(new FragmentReceivedEventArgs(0, frag));
+
+            Assert.Equal(3, received.Count);
+            Assert.Equal((byte)MessageType.HandshakeRes, received[0].MessageType);
+            Assert.Equal(resPayload, received[0].Data);
+            Assert.Equal((byte)MessageType.ClipFormatList, received[1].MessageType);
+            Assert.Equal(listPayload, received[1].Data);
+            Assert.Equal((byte)MessageType.ClipFileContentsReq, received[2].MessageType);
+            Assert.Equal(reqPayload, received[2].Data);
+        }
     }
 }

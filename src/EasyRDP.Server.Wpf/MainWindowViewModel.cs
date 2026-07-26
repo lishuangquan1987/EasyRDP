@@ -32,6 +32,9 @@ namespace EasyRDP.Server.Wpf
         private string _uptime = "—";
         private string _logLine = "Ready";
         private bool _isRunning;
+        // 默认凭据 admin/admin — UI 可修改
+        private string _username = "admin";
+        private string _password = "admin";
 
         /// <summary>日志条目集合（最新在前）。</summary>
         public ObservableCollection<string> LogEntries { get; } = new ObservableCollection<string>();
@@ -90,6 +93,20 @@ namespace EasyRDP.Server.Wpf
             }
         }
 
+        /// <summary>服务端认证用户名。启动时读取，运行中修改不影响已建立会话。</summary>
+        public string Username
+        {
+            get { return _username; }
+            set { _username = value ?? ""; OnPropertyChanged(nameof(Username)); }
+        }
+
+        /// <summary>服务端认证密码。明文存储，v1 足够；后续可改为加密。</summary>
+        public string Password
+        {
+            get { return _password; }
+            set { _password = value ?? ""; OnPropertyChanged(nameof(Password)); }
+        }
+
         // ====== 命令 ======
 
         public RelayCommand StartCommand { get; }
@@ -111,12 +128,23 @@ namespace EasyRDP.Server.Wpf
             if (!int.TryParse(PortText, out int port))
                 port = 2000;
 
+            // 校验凭据非空
+            string username = Username ?? "";
+            string password = Password ?? "";
+            if (string.IsNullOrEmpty(username) || string.IsNullOrEmpty(password))
+            {
+                MessageBox.Show("Username and password must not be empty.", "Invalid credentials",
+                    MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
             try
             {
                 var factory = new WindowsDesktopFactory();
                 var capturer = factory.CreateScreenCapturer();
                 var inputSim = factory.CreateInputSimulator();
                 var cursorCapturer = factory.CreateCursorCapturer();
+                var clipboard = factory.CreateClipboardService();
 
                 _captureService = new CaptureService(capturer);
                 _captureService.Start();
@@ -124,7 +152,13 @@ namespace EasyRDP.Server.Wpf
                 _transportServer = new TcpTransportServer();
                 _transportServer.OnLog = (msg) => _dispatcher.Invoke(() => AddLog(msg));
 
-                _transportHost = new TransportHost(_captureService, _transportServer, inputSim, cursorCapturer);
+                // 构造凭据表：UI 配置的用户名/密码
+                var credentials = new System.Collections.Generic.Dictionary<string, string>
+                {
+                    { username, password }
+                };
+
+                _transportHost = new TransportHost(_captureService, _transportServer, inputSim, cursorCapturer, clipboard, credentials);
                 _transportHost.SessionAttached += OnSessionAttached;
                 _transportHost.SessionDetached += OnSessionDetached;
                 _transportHost.Start(port);
@@ -137,7 +171,7 @@ namespace EasyRDP.Server.Wpf
                 IsRunning = true;
                 StatusText = "Running";
                 DisplayPort = port.ToString();
-                AddLog("Server started on port " + port);
+                AddLog("Server started on port " + port + " (user: " + username + ")");
             }
             catch (Exception ex)
             {

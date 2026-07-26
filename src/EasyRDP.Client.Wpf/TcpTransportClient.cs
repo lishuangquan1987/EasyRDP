@@ -16,6 +16,10 @@ namespace EasyRDP.Client.Wpf
         private TcpClient _client;
         private Thread _receiveThread;
         private volatile bool _running;
+        // 发送锁：序列化所有 Send 调用，防止多线程并发 Write 导致 TCP 字节流交错。
+        // 文件剪贴板后台线程与 UI 线程（输入事件/keepalive）会并发调用 Send，
+        // 若不加锁，两个 stream.Write 的字节会在 socket 上交错，破坏 FramingBuffer 分帧。
+        private readonly object _sendLock = new object();
 
         public event EventHandler<FragmentReceivedEventArgs> DataReceived;
         public event EventHandler Disconnected;
@@ -80,16 +84,23 @@ namespace EasyRDP.Client.Wpf
         {
             if (_client == null || !_client.Connected)
                 return false;
-            try
+            // 加锁序列化 Write：确保一个分片完整写入后另一个才开始，
+            // 防止并发 Write 导致字节在 TCP 流上交错（破坏服务端 FramingBuffer 分帧）
+            lock (_sendLock)
             {
-                NetworkStream stream = _client.GetStream();
-                stream.Write(data, 0, data.Length);
-                return true;
-            }
-            catch (Exception ex)
-            {
-                Logger.Error(ex, "Send failed");
-                return false;
+                if (_client == null || !_client.Connected)
+                    return false;
+                try
+                {
+                    NetworkStream stream = _client.GetStream();
+                    stream.Write(data, 0, data.Length);
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error(ex, "Send failed");
+                    return false;
+                }
             }
         }
 
@@ -104,9 +115,17 @@ namespace EasyRDP.Client.Wpf
             var framing = new FramingBuffer();
             framing.FragmentReady += (fragData) =>
             {
-                var handler = DataReceived;
-                if (handler != null)
-                    handler(this, new FragmentReceivedEventArgs(0, fragData));
+                // 防御性 try-catch：若某个分片触发消息处理异常，不能让单个坏消息杀死 ReceiveLoop
+                try
+                {
+                    var handler = DataReceived;
+                    if (handler != null)
+                        handler(this, new FragmentReceivedEventArgs(0, fragData));
+                }
+                catch (Exception ex)
+                {
+                    Logger.Warn(ex, "FragmentReady handler threw");
+                }
             };
 
             try

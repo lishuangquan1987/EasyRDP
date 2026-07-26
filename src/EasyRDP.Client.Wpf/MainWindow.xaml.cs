@@ -1,4 +1,4 @@
-﻿using System.Windows;
+using System.Windows;
 using System.Windows.Input;
 
 namespace EasyRDP.Client.Wpf;
@@ -46,6 +46,26 @@ public partial class MainWindow : Window
     /// <summary>键盘按下 — 路由到 ViewModel。</summary>
     private void Window_KeyDown(object sender, KeyEventArgs e)
     {
+        // F11 切换全屏（业界惯例，类似浏览器全屏快捷键）
+        if (e.Key == Key.F11)
+        {
+            _vm.ToggleFullscreen();
+            e.Handled = true;
+            return;
+        }
+
+        // Esc 退出全屏（仅在已全屏时生效；非全屏时 Esc 不拦截，正常转发输入）
+        if (e.Key == Key.Escape)
+        {
+            var window = Application.Current?.MainWindow as MainWindow;
+            if (window != null && window.WindowStyle == WindowStyle.None)
+            {
+                _vm.ToggleFullscreen();
+                e.Handled = true;
+                return;
+            }
+        }
+
         // 焦点在 TextBox 上时不拦截（让用户正常输入 IP 和端口）
         if (System.Windows.Input.Keyboard.FocusedElement is System.Windows.Controls.TextBox)
             return;
@@ -66,5 +86,16 @@ public partial class MainWindow : Window
         Key key = e.Key == Key.System ? e.SystemKey : e.Key;
         _vm.HandleKeyUp(key);
         e.Handled = true;
+    }
+
+    /// <summary>
+    /// 切换全屏 UI：全屏时隐藏顶部配置区和底部状态栏，让桌面显示区填满整个窗口。
+    /// 由 MainWindowViewModel.ToggleFullscreen 调用。
+    /// </summary>
+    /// <param name="fullscreen">true=进入全屏，false=退出全屏。</param>
+    public void SetFullscreenUI(bool fullscreen)
+    {
+        TopBar.Visibility = fullscreen ? Visibility.Collapsed : Visibility.Visible;
+        BottomBar.Visibility = fullscreen ? Visibility.Collapsed : Visibility.Visible;
     }
 }

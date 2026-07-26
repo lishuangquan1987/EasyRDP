@@ -10,6 +10,13 @@ namespace EasyRDP.Core.Transport
     /// 接收侧：订阅传输层 DataReceived → 按 FrameId 重组 → CRC16 校验 → 收齐后抛 MessageReceived。
     /// 发送侧：FragAndSend 静态方法切分+发送。
     /// </summary>
+    /// <remarks>
+    /// 内部维护两路独立的重组状态，防止实时流与控制流互相冲刷：
+    /// - 实时流（VideoFrame/InputEvent/CursorUpdate）：frameId 单调递增，旧帧可丢弃以降低延迟。
+    /// - 控制流（Clipboard*/Handshake/Keepalive）：必须完整重组，不允许因实时帧到达而丢弃。
+    /// 同一 socket 上两类分片会交错到达，若共用单一状态会导致：实时帧 StartNewFrame 冲刷控制帧，
+    /// 或控制帧 frameId(=0) 被判为 stale（&lt; 当前实时 frameId）而静默丢弃。
+    /// </remarks>
     public class MessageReassembler
     {
         private static readonly Logger Logger = LogManager.GetCurrentClassLogger();
@@ -17,23 +24,27 @@ namespace EasyRDP.Core.Transport
         // CRC-16/XMODEM lookup table
         private static readonly ushort[] Crc16Table = BuildCrc16Table();
 
-        // Current reassembly state
-        private uint _currentFrameId;
-        private bool _initialized;
-        private int _expectedFragCount;
-        private int _receivedFragCount;
-        private byte[][] _fragBuffers;
-        private int _totalPayloadLen;
-        private byte _messageType;
-        private Stopwatch _reassemblyTimer = new Stopwatch();
+        // 实时流重组状态（VideoFrame/InputEvent/CursorUpdate）
+        private readonly FrameState _realtimeState = new FrameState("realtime");
+        // 控制流重组状态（Clipboard*/Handshake/Keepalive）
+        private readonly FrameState _controlState = new FrameState("control");
 
-        // 诊断计数器：跟踪各类静默拒绝
+        // 协议级诊断计数器（与分流无关，统计所有分片）
         private int _fragCountRejectCount;
         private int _fragIdxRejectCount;
-        private int _staleFrameRejectCount;
 
         /// <summary>完整消息组装完成事件。</summary>
         public event EventHandler<MessageReceivedEventArgs> MessageReceived;
+
+        /// <summary>
+        /// 判断消息类型是否属于实时流。实时流允许丢帧（旧帧无效），控制流必须完整送达。
+        /// </summary>
+        private static bool IsRealtimeType(byte messageType)
+        {
+            return messageType == (byte)MessageType.VideoFrame
+                || messageType == (byte)MessageType.InputEvent
+                || messageType == (byte)MessageType.CursorUpdate;
+        }
 
         /// <summary>
         /// 收到一个线格式分片（来自传输层 DataReceived）。非线程安全，调用方须保证串行。
@@ -115,99 +126,10 @@ namespace EasyRDP.Core.Transport
                 return; // Corrupted fragment — discard
             }
 
-            // FrameId ordering — three cases:
-            //   frameId > _currentFrameId: newer frame arrived, discard old partial (real-time semantics)
-            //   frameId == _currentFrameId: same frame, continue assembling
-            //   frameId < _currentFrameId: stale frame fragment, discard
-            //   !_initialized: very first fragment (regardless of frameId), initialize state
-            if (frameId > _currentFrameId || !_initialized)
-            {
-                StartNewFrame(frameId, messageType, totalPayloadLen, fragCount);
-            }
-            else if (frameId < _currentFrameId)
-            {
-                _staleFrameRejectCount++;
-                if (_staleFrameRejectCount <= 3 || _staleFrameRejectCount % 100 == 0)
-                    Logger.Warn("Stale fragment discarded: frameId={0} < current={1} fragIdx={2}/{3} (total stale={4})",
-                        frameId, _currentFrameId, fragIdx, fragCount, _staleFrameRejectCount);
-                return; // Old frame fragment — discard
-            }
-
-            // Timeout guard: if current frame takes too long to assemble (lost fragments),
-            // restart to prevent dead state. Real-time protocol: old incomplete frames are worthless.
-            if (_reassemblyTimer.ElapsedMilliseconds > Constants.FragmentReassembleTimeoutMs)
-            {
-                Logger.Warn("Reassembly timeout for frameId={0} after {1}ms (received {2}/{3} fragments)",
-                    _currentFrameId, _reassemblyTimer.ElapsedMilliseconds,
-                    _receivedFragCount, _expectedFragCount);
-                StartNewFrame(frameId, messageType, totalPayloadLen, fragCount);
-            }
-
-            // Store fragment
-            if (_fragBuffers != null && fragIdx < _fragBuffers.Length && _fragBuffers[fragIdx] == null)
-            {
-                _fragBuffers[fragIdx] = new byte[fragDataLen];
-                Buffer.BlockCopy(data, pos, _fragBuffers[fragIdx], 0, fragDataLen);
-                _receivedFragCount++;
-            }
-
-            // Check if complete
-            if (_receivedFragCount >= _expectedFragCount)
-            {
-                AssembleAndDeliver(frag.SessionId);
-            }
-        }
-
-        private void StartNewFrame(uint frameId, byte messageType, int totalPayloadLen, int fragCount)
-        {
-            _currentFrameId = frameId;
-            _initialized = true;
-            _messageType = messageType;
-            _totalPayloadLen = totalPayloadLen;
-            _expectedFragCount = fragCount;
-            _receivedFragCount = 0;
-            _fragBuffers = new byte[fragCount][];
-            _reassemblyTimer.Restart();
-        }
-
-        private void AssembleAndDeliver(uint sessionId)
-        {
-            // Assemble full payload from fragments
-            byte[] fullPayload = new byte[_totalPayloadLen];
-            int offset = 0;
-            for (int i = 0; i < _expectedFragCount; i++)
-            {
-                if (_fragBuffers[i] != null)
-                {
-                    int copyLen = _fragBuffers[i].Length;
-                    if (offset + copyLen > _totalPayloadLen)
-                        copyLen = _totalPayloadLen - offset;
-                    if (copyLen > 0)
-                    {
-                        Buffer.BlockCopy(_fragBuffers[i], 0, fullPayload, offset, copyLen);
-                        offset += copyLen;
-                    }
-                }
-            }
-
-            // Capture fragCount before reset for logging
-            int fragCount = _expectedFragCount;
-
-            // Reset state (keep _initialized=true to reject old frames)
-            _expectedFragCount = 0;
-            _receivedFragCount = 0;
-            _fragBuffers = null;
-            _reassemblyTimer.Reset();
-
-            Logger.Debug("Message assembled: sessionId={0} type=0x{1:X2} payloadLen={2} fragCount={3}",
-                sessionId, _messageType, fullPayload.Length, fragCount);
-
-            // Deliver
-            var handler = MessageReceived;
-            if (handler != null)
-            {
-                handler(this, new MessageReceivedEventArgs(sessionId, _messageType, fullPayload));
-            }
+            // 按消息类型分流：实时流走 stale 检测，控制流独立重组不受实时帧干扰
+            var state = IsRealtimeType(messageType) ? _realtimeState : _controlState;
+            state.ProcessFragment(frag.SessionId, messageType, frameId, fragIdx, fragCount,
+                totalPayloadLen, data, pos, fragDataLen, MessageReceived);
         }
 
         /// <summary>
@@ -319,5 +241,146 @@ namespace EasyRDP.Core.Transport
         }
 
         #endregion
+
+        /// <summary>
+        /// 单路重组状态。实时流实例启用 stale 检测；控制流实例始终接受新帧。
+        /// 两路状态独立，互不冲刷。
+        /// </summary>
+        private sealed class FrameState
+        {
+            private readonly string _tag;
+            private uint _currentFrameId;
+            private bool _initialized;
+            private int _expectedFragCount;
+            private int _receivedFragCount;
+            private byte[][] _fragBuffers;
+            private int _totalPayloadLen;
+            private byte _messageType;
+            private readonly Stopwatch _reassemblyTimer = new Stopwatch();
+
+            // 当前帧是否已完成组装（AssembleAndDeliver 已触发）。
+            // 关键作用：控制流所有消息都用 frameId=0，组装完成后若再来一个 frameId=0 的消息，
+            // 必须强制 StartNewFrame，否则会因 frameId==_currentFrameId 且 _fragBuffers=null
+            // 直接触发 AssembleAndDeliver，用旧的 messageType/payloadLen 组装出空 payload 误判。
+            private bool _frameCompleted;
+
+            // 诊断计数器：跟踪 stale 帧拒绝
+            private int _staleFrameRejectCount;
+
+            public FrameState(string tag)
+            {
+                _tag = tag;
+            }
+
+            public void ProcessFragment(uint sessionId, byte messageType, uint frameId,
+                ushort fragIdx, ushort fragCount, int totalPayloadLen,
+                byte[] data, int dataPos, int fragDataLen,
+                EventHandler<MessageReceivedEventArgs> handler)
+            {
+                // FrameId ordering — cases:
+                //   !_initialized: very first fragment (regardless of frameId), initialize state
+                //   frameId > _currentFrameId: newer frame arrived, discard old partial (real-time semantics)
+                //   frameId < _currentFrameId: stale frame fragment, discard
+                //   frameId == _currentFrameId && _frameCompleted: 上一个同 frameId 的帧已组装完成，
+                //       新分片属于新消息（如连续的控制消息都用 frameId=0），强制 StartNewFrame
+                //   frameId == _currentFrameId && !_frameCompleted: 同一帧的后续分片，继续组装
+                if (!_initialized || frameId > _currentFrameId)
+                {
+                    StartNewFrame(frameId, messageType, totalPayloadLen, fragCount);
+                }
+                else if (frameId < _currentFrameId)
+                {
+                    _staleFrameRejectCount++;
+                    if (_staleFrameRejectCount <= 3 || _staleFrameRejectCount % 100 == 0)
+                        Logger.Warn("[{0}] Stale fragment discarded: frameId={1} < current={2} fragIdx={3}/{4} (total stale={5})",
+                            _tag, frameId, _currentFrameId, fragIdx, fragCount, _staleFrameRejectCount);
+                    return; // Old frame fragment — discard
+                }
+                else if (_frameCompleted)
+                {
+                    // frameId == _currentFrameId 但上一帧已完成，说明这是新的同 frameId 消息
+                    StartNewFrame(frameId, messageType, totalPayloadLen, fragCount);
+                }
+
+                // Timeout guard: if current frame takes too long to assemble (lost fragments),
+                // restart to prevent dead state. Real-time protocol: old incomplete frames are worthless.
+                if (_reassemblyTimer.ElapsedMilliseconds > Constants.FragmentReassembleTimeoutMs)
+                {
+                    Logger.Warn("[{0}] Reassembly timeout for frameId={1} after {2}ms (received {3}/{4} fragments)",
+                        _tag, _currentFrameId, _reassemblyTimer.ElapsedMilliseconds,
+                        _receivedFragCount, _expectedFragCount);
+                    StartNewFrame(frameId, messageType, totalPayloadLen, fragCount);
+                }
+
+                // Store fragment
+                if (_fragBuffers != null && fragIdx < _fragBuffers.Length && _fragBuffers[fragIdx] == null)
+                {
+                    _fragBuffers[fragIdx] = new byte[fragDataLen];
+                    Buffer.BlockCopy(data, dataPos, _fragBuffers[fragIdx], 0, fragDataLen);
+                    _receivedFragCount++;
+                }
+
+                // Check if complete
+                if (_receivedFragCount >= _expectedFragCount)
+                {
+                    AssembleAndDeliver(sessionId, handler);
+                }
+            }
+
+            private void StartNewFrame(uint frameId, byte messageType, int totalPayloadLen, int fragCount)
+            {
+                _currentFrameId = frameId;
+                _initialized = true;
+                _frameCompleted = false;
+                _messageType = messageType;
+                _totalPayloadLen = totalPayloadLen;
+                _expectedFragCount = fragCount;
+                _receivedFragCount = 0;
+                _fragBuffers = new byte[fragCount][];
+                _reassemblyTimer.Restart();
+            }
+
+            private void AssembleAndDeliver(uint sessionId, EventHandler<MessageReceivedEventArgs> handler)
+            {
+                // Assemble full payload from fragments
+                byte[] fullPayload = new byte[_totalPayloadLen];
+                int offset = 0;
+                for (int i = 0; i < _expectedFragCount; i++)
+                {
+                    if (_fragBuffers[i] != null)
+                    {
+                        int copyLen = _fragBuffers[i].Length;
+                        if (offset + copyLen > _totalPayloadLen)
+                            copyLen = _totalPayloadLen - offset;
+                        if (copyLen > 0)
+                        {
+                            Buffer.BlockCopy(_fragBuffers[i], 0, fullPayload, offset, copyLen);
+                            offset += copyLen;
+                        }
+                    }
+                }
+
+                // Capture fragCount before reset for logging
+                int fragCount = _expectedFragCount;
+                byte messageType = _messageType;
+
+                // Reset state (keep _initialized=true to reject old frames;
+                // set _frameCompleted=true to force StartNewFrame on next fragment with same frameId)
+                _expectedFragCount = 0;
+                _receivedFragCount = 0;
+                _fragBuffers = null;
+                _reassemblyTimer.Reset();
+                _frameCompleted = true;
+
+                Logger.Debug("[{0}] Message assembled: sessionId={1} type=0x{2:X2} payloadLen={3} fragCount={4}",
+                    _tag, sessionId, messageType, fullPayload.Length, fragCount);
+
+                // Deliver
+                if (handler != null)
+                {
+                    handler(this, new MessageReceivedEventArgs(sessionId, messageType, fullPayload));
+                }
+            }
+        }
     }
 }

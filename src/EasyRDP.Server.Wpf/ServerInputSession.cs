@@ -3,6 +3,7 @@ using EasyDesk.Core;
 using EasyDesk.Core.Models;
 using EasyRDP.Core.Protocol;
 using EasyRDP.Core.Session;
+using NLog;
 
 namespace EasyRDP.Server.Wpf
 {
@@ -11,6 +12,7 @@ namespace EasyRDP.Server.Wpf
     /// </summary>
     public class ServerInputSession : IServerInputSession
     {
+        private static readonly Logger Logger = LogManager.GetCurrentClassLogger();
         private readonly IInputSimulator _inputSimulator;
         private bool _disposed;
 
@@ -50,8 +52,11 @@ namespace EasyRDP.Server.Wpf
                         return false;
                 }
             }
-            catch (Exception)
+            catch (Exception ex)
             {
+                // 输入模拟失败时记录日志，便于诊断（之前是静默吞掉，无法排查）
+                Logger.Warn(ex, "HandleInput failed: type={0} keyCode=0x{1:X2} x={2} y={3} wheel={4}",
+                    msg.Type, msg.KeyCode, msg.X, msg.Y, msg.WheelDelta);
                 return false;
             }
         }

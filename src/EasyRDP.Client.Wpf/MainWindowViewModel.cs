@@ -49,6 +49,8 @@ namespace EasyRDP.Client.Wpf
         // 属性字段
         private string _host = "172.26.66.81";
         private string _port = "2000";
+        private string _username = "admin";
+        private string _password = "admin";
         private string _statusText = "Disconnected";
         private bool _isConnectEnabled = true;
         private bool _isStartEnabled = true;
@@ -58,6 +60,23 @@ namespace EasyRDP.Client.Wpf
         private int _frameRate;
         private string _codecName = "—";
         private WriteableBitmap? _renderBitmap;
+        // 剪贴板轮询：检测本地剪贴板变化，发送到服务端
+        private DispatcherTimer? _clipboardTimer;
+        private string _lastClipboardText = "";
+        // 上次文件剪贴板签名（拼接路径），用于检测变化 + 防回环
+        private string _lastClipboardFilesSig = "";
+        // 上次图片剪贴板签名（CF_DIB 字节数 + 前 32 字节哈希），用于检测变化 + 防回环
+        private string _lastClipboardImageSig = "";
+        // 客户端文件/图片传输 ID 自增（每次剪贴板同步递增）
+        private int _fileTransferIdSeq;
+        // 图片块大小（64KB）：与服务端一致
+        private const int ImageChunkSize = 64 * 1024;
+
+        // 心跳定时器：客户端每 10 秒主动发一次 Keepalive，避免服务端 _lastActivity 超时（45s）断开。
+        // 必须由客户端主动发，因为服务端 _lastActivity 只在收到客户端应用层消息时更新；
+        // 客户端最小化时无输入事件，若不发心跳，服务端会在 45s 后判定超时主动断开。
+        // 用 System.Threading.Timer（线程池）而非 DispatcherTimer：UI 线程卡住或最小化时仍能可靠触发。
+        private Timer? _heartbeatTimer;
 
         public MainWindowViewModel()
         {
@@ -80,6 +99,20 @@ namespace EasyRDP.Client.Wpf
         {
             get { return _port; }
             set { _port = value; OnPropertyChanged(nameof(Port)); }
+        }
+
+        /// <summary>登录用户名（UI 可编辑，默认 admin）。</summary>
+        public string Username
+        {
+            get { return _username; }
+            set { _username = value; OnPropertyChanged(nameof(Username)); }
+        }
+
+        /// <summary>登录密码（UI 可编辑，默认 admin）。</summary>
+        public string Password
+        {
+            get { return _password; }
+            set { _password = value; OnPropertyChanged(nameof(Password)); }
         }
 
         public string StatusText
@@ -193,8 +226,8 @@ namespace EasyRDP.Client.Wpf
             {
                 Version = Constants.ProtocolVersion,
                 Capabilities = DecoderFactory.GetAvailableCodecs(),
-                Username = "admin",
-                Password = "admin" // 与服务端 TransportHost.cs 的默认凭据匹配
+                Username = _username ?? "admin",
+                Password = _password ?? "admin"
             };
             byte[] reqPayload = handshakeReq.Pack();
             MessageReassembler.FragAndSend(0, (byte)MessageType.HandshakeReq, reqPayload,
@@ -233,6 +266,12 @@ namespace EasyRDP.Client.Wpf
             _streamSession = new ClientStreamSession();
             _streamSession.RenderTarget = _renderTarget;
             _streamSession.InitPipeline(handshakeRes.Codec, handshakeRes.ScreenWidth, handshakeRes.ScreenHeight);
+            // 订阅服务端→客户端剪贴板同步事件：服务端用户复制 → 客户端自动设置本地剪贴板
+            _streamSession.ClipboardReceived += OnClipboardReceivedFromServer;
+            // 订阅文件剪贴板同步事件：服务端用户复制文件 → 客户端写入临时目录并设置 CF_HDROP
+            _streamSession.FileClipboardReceived += OnFileClipboardReceivedFromServer;
+            // 订阅图片剪贴板同步事件：服务端用户复制图片 → 客户端设置 CF_DIB
+            _streamSession.ImageClipboardReceived += OnImageClipboardReceivedFromServer;
 
             // 必须在 InitPipeline（调用 Resize）之后才赋值 Bitmap
             RenderBitmap = _renderTarget.Bitmap;
@@ -272,9 +311,419 @@ namespace EasyRDP.Client.Wpf
             };
             _fpsTimer.Start();
 
+            // 启动剪贴板轮询：每 800ms 检查本地剪贴板文本是否变化，变化则发送到服务端。
+            // 必须在 UI 线程（STA）调用 Clipboard.ContainsText/GetText。
+            // 检测到变化后通过 _transport.Send 发送 ClipboardSync 消息，服务端在 STA 线程设置系统剪贴板。
+            _lastClipboardText = "";
+            try
+            {
+                if (Clipboard.ContainsText())
+                {
+                    _lastClipboardText = Clipboard.GetText() ?? "";
+                    Logger.Info("Clipboard initial read: len={0}", _lastClipboardText.Length);
+                }
+                else
+                {
+                    Logger.Info("Clipboard initial: no text");
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn(ex, "Clipboard initial read failed");
+            }
+            _clipboardTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(800) };
+            int clipboardPollCount = 0;
+            _clipboardTimer.Tick += (s, ev) =>
+            {
+                if (_transport == null || !_running) return;
+                clipboardPollCount++;
+                try
+                {
+                    bool hasText = Clipboard.ContainsText();
+                    bool hasFiles = Clipboard.ContainsFileDropList();
+                    bool hasImage = Clipboard.ContainsImage();
+                    // 每 30 次轮询（约 24 秒）记录一次状态，确认 timer 在工作
+                    if (clipboardPollCount % 30 == 0)
+                        Logger.Debug("Clipboard poll #{0}: hasText={1} hasFiles={2} hasImage={3} lastTextLen={4}",
+                            clipboardPollCount, hasText, hasFiles, hasImage, _lastClipboardText.Length);
+
+                    // 优先处理文件剪贴板（CF_HDROP）：用户右键复制文件时触发
+                    if (hasFiles)
+                    {
+                        // Owner Flag 防回环：剪贴板若是客户端从服务端同步过来并打上 SideClient 标记的，
+                        // 跳过不回传，避免回环。本地用户复制时 owner=SideNone，正常发送。
+                        byte owner = EasyRDP.Core.ClipboardOwnerHelper.GetOwnerFlag();
+                        if (owner == EasyRDP.Core.ClipboardOwnerHelper.SideClient)
+                        {
+                            return; // 远程同步过来的，不回传
+                        }
+
+                        var dropList = Clipboard.GetFileDropList();
+                        string[] files = new string[dropList.Count];
+                        dropList.CopyTo(files, 0);
+                        string sig = string.Join("|", files);
+                        if (sig != _lastClipboardFilesSig)
+                        {
+                            Logger.Info("File clipboard changed: count={0}", files.Length);
+                            _lastClipboardFilesSig = sig;
+                            SendFileClipboardToServer(files);
+                        }
+                        // 文件覆盖了图片：清空图片签名，避免下次复制相同图片时误判为"没变化"
+                        _lastClipboardImageSig = "";
+                        return; // 文件和文本/图片不会同时在剪贴板上
+                    }
+                    _lastClipboardFilesSig = "";
+
+                    // 图片剪贴板（CF_DIB）：用户截图/复制图片时触发
+                    if (hasImage)
+                    {
+                        CheckImageClipboardChange();
+                        // 图片覆盖了文件：_lastClipboardFilesSig 已在上方 hasFiles=false 分支清空
+                        return; // 图片和文本不会同时在剪贴板上
+                    }
+                    _lastClipboardImageSig = "";
+
+                    if (!hasText) return;
+                    string current = Clipboard.GetText() ?? "";
+                    if (current != _lastClipboardText)
+                    {
+                        Logger.Info("Clipboard changed: oldLen={0} newLen={1}",
+                            _lastClipboardText.Length, current.Length);
+                        _lastClipboardText = current;
+                        SendClipboardSync(current);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    // 剪贴板被其他进程锁定时会抛 ExternalException — 之前是静默吞掉，导致问题无法定位
+                    Logger.Warn(ex, "Clipboard poll #{0} failed", clipboardPollCount);
+                }
+            };
+            _clipboardTimer.Start();
+            Logger.Info("Clipboard poller started (interval=800ms)");
+
+            // 启动心跳：每 10 秒发一次 Keepalive 消息。服务端 _lastActivity 收到任何客户端消息即更新，
+            // 30s 不活动服务端会发 Keepalive 探测，45s 不活动判定超时主动断开。
+            // 客户端主动 10s 一次可确保 _lastActivity 始终新鲜，避免最小化/无输入时被断开。
+            // 用 System.Threading.Timer（线程池），即使 UI 线程卡住或窗口最小化也能可靠触发。
+            _heartbeatTimer = new Timer(state =>
+            {
+                if (_transport == null || !_running) return;
+                try
+                {
+                    // Keepalive 消息 payload 为空，仅用于刷新服务端 _lastActivity
+                    MessageReassembler.FragAndSend(0, (byte)MessageType.Keepalive, new byte[0],
+                        (sid, data) => _transport.Send(data), 0);
+                }
+                catch (Exception ex)
+                {
+                    Logger.Warn(ex, "Heartbeat send failed");
+                }
+            }, null, TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(10));
+            Logger.Info("Heartbeat started (interval=10s, threadpool timer)");
+
             StatusText = string.Format("Connected — {0}x{1}",
                 handshakeRes.ScreenWidth, handshakeRes.ScreenHeight);
             UpdateCommandState();
+        }
+
+        /// <summary>
+        /// 发送剪贴板同步消息到服务端。文本通过 FragAndSend 分片发送，
+        /// 服务端 TransportHost 接收后在 STA 线程设置系统剪贴板。
+        /// </summary>
+        private void SendClipboardSync(string text)
+        {
+            if (_transport == null || string.IsNullOrEmpty(text)) return;
+            try
+            {
+                var msg = new ClipboardSyncMessage
+                {
+                    Format = ClipboardSyncMessage.FormatText,
+                    Text = text
+                };
+                byte[] payload = msg.Pack();
+                MessageReassembler.FragAndSend(0, (byte)MessageType.ClipboardSync, payload,
+                    (sid, data) => _transport.Send(data), 0);
+                Logger.Info("Clipboard sync sent: len={0}", text.Length);
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn(ex, "SendClipboardSync failed");
+            }
+        }
+
+        /// <summary>
+        /// 客户端→服务端文件剪贴板同步（延迟渲染）。
+        /// 仅发送 ClipFormatList（文件元信息），不传输文件内容。
+        /// 服务端收到后按需通过 ClipFileContentsReq 请求文件内容，客户端用 FileClipboardProvider 响应。
+        /// 接收方控制下载速率，避免灌满 TCP 连接。
+        /// </summary>
+        private void SendFileClipboardToServer(string[] filePaths)
+        {
+            if (_transport == null || filePaths == null || filePaths.Length == 0) return;
+
+            var transport = _transport;
+            try
+            {
+                uint transferId = (uint)System.Threading.Interlocked.Increment(ref _fileTransferIdSeq);
+
+                // 1) 构造元信息列表（仅文件名+大小，不含文件内容）
+                var metaList = new System.Collections.Generic.List<ClipFormatListMessage.FileMeta>(filePaths.Length);
+                foreach (var path in filePaths)
+                {
+                    try
+                    {
+                        var fi = new System.IO.FileInfo(path);
+                        metaList.Add(new ClipFormatListMessage.FileMeta
+                        {
+                            FileName = System.IO.Path.GetFileName(path),
+                            FileSize = fi.Exists ? fi.Length : 0
+                        });
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Warn(ex, "GetFileInfo failed for {0}", path);
+                        metaList.Add(new ClipFormatListMessage.FileMeta
+                        {
+                            FileName = System.IO.Path.GetFileName(path),
+                            FileSize = 0
+                        });
+                    }
+                }
+
+                // 2) 创建 FileClipboardProvider（延迟渲染发送方），响应服务端的 FileContentsReq
+                var provider = new FileClipboardProvider(transferId, filePaths,
+                    (sid, payload) =>
+                    {
+                        MessageReassembler.FragAndSend(0, (byte)MessageType.ClipFileContentsRes, payload,
+                            (s, d) => transport.Send(d), 0);
+                    });
+                _streamSession?.SetFileClipboardProvider(provider);
+
+                // 3) 发送 ClipFormatList（仅元信息，几百字节）
+                var listMsg = new ClipFormatListMessage
+                {
+                    TransferId = transferId,
+                    Files = metaList
+                };
+                byte[] listPayload = listMsg.Pack();
+                MessageReassembler.FragAndSend(0, (byte)MessageType.ClipFormatList, listPayload,
+                    (sid, data) => transport.Send(data), 0);
+                Logger.Info("ClipFormatList sent: transferId={0} fileCount={1}", transferId, metaList.Count);
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn(ex, "SendFileClipboardToServer failed");
+            }
+        }
+
+        /// <summary>
+        /// 服务端→客户端剪贴板同步回调。由 ClientStreamSession 在接收线程触发，
+        /// 必须通过 Dispatcher.Invoke 转发到 UI 线程（STA）才能调用 Clipboard.SetText。
+        /// 关键：先更新 _lastClipboardText，避免 _clipboardTimer 检测到变化又把文本发回服务端（回环）。
+        /// </summary>
+        private void OnClipboardReceivedFromServer(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return;
+            _dispatcher.Invoke(() =>
+            {
+                try
+                {
+                    // 先更新 lastClipboardText，避免 _clipboardTimer 检测到变化触发回发
+                    _lastClipboardText = text;
+                    Clipboard.SetText(text);
+                    Logger.Info("Clipboard set from server: len={0}", text.Length);
+                }
+                catch (Exception ex)
+                {
+                    Logger.Warn(ex, "Clipboard set from server failed");
+                }
+            });
+        }
+
+        /// <summary>
+        /// 服务端→客户端文件剪贴板同步回调。文件数据已由 FileClipboardConsumer 按需下载并写入临时目录，
+        /// 这里只需在 UI 线程（STA）调用 Clipboard.SetFileDropList 设置 CF_HDROP。
+        /// 防回环：设置 Owner Flag + 更新 _lastClipboardFilesSig，避免 _clipboardTimer 检测到文件变化又发回服务端。
+        /// </summary>
+        private void OnFileClipboardReceivedFromServer(string[] localFilePaths)
+        {
+            if (localFilePaths == null || localFilePaths.Length == 0) return;
+            _dispatcher.Invoke(() =>
+            {
+                try
+                {
+                    // WPF Clipboard.SetFileDropList 需要 System.Collections.Specialized.StringCollection
+                    var fileList = new System.Collections.Specialized.StringCollection();
+                    fileList.AddRange(localFilePaths);
+                    Clipboard.SetFileDropList(fileList);
+
+                    // Owner Flag 防回环：标记为 SideClient（表示"由客户端从服务端同步过来"），
+                    // _clipboardTimer 轮询看到此标记即跳过，避免回发到服务端
+                    EasyRDP.Core.ClipboardOwnerHelper.SetOwnerFlag(EasyRDP.Core.ClipboardOwnerHelper.SideClient);
+                    _lastClipboardFilesSig = string.Join("|", localFilePaths);
+
+                    Logger.Info("File clipboard set from server: count={0}", localFilePaths.Length);
+                    foreach (var p in localFilePaths)
+                        Logger.Info("  - {0}", p);
+                }
+                catch (Exception ex)
+                {
+                    Logger.Warn(ex, "File clipboard set from server failed");
+                }
+            });
+        }
+
+        /// <summary>
+        /// 检查客户端本地图片剪贴板（CF_DIB）是否变化，变化时启动后台线程异步发送到服务端。
+        /// 必须在 STA 线程调用（DispatcherTimer.Tick 内）— 只在 UI 线程读剪贴板，数据发送在后台线程。
+        /// 通过 DataFormats.Dib 直接获取 CF_DIB 原始字节，避免 WPF BitmapSource 转换损失。
+        /// </summary>
+        private void CheckImageClipboardChange()
+        {
+            try
+            {
+                // 通过 DataFormats.Dib 直接获取 CF_DIB 原始字节
+                // WPF Clipboard.ContainsImage 返回 true 时，CF_DIB 一定可用
+                var ms = Clipboard.GetData(DataFormats.Dib) as System.IO.MemoryStream;
+                if (ms == null)
+                {
+                    // 退回到 BitmapSource 转换路径（理论上不会走到，因为 ContainsImage 已为 true）
+                    _lastClipboardImageSig = "";
+                    return;
+                }
+                byte[] dibBytes = ms.ToArray();
+                if (dibBytes.Length == 0)
+                {
+                    _lastClipboardImageSig = "";
+                    return;
+                }
+
+                // 构造签名：长度 + 前 32 字节哈希
+                string sig = dibBytes.Length + ":" + ComputeSimpleHash(dibBytes, 32);
+                if (sig == _lastClipboardImageSig)
+                    return; // 没变化
+
+                _lastClipboardImageSig = sig;
+                Logger.Info("Image clipboard changed: dibSize={0}", dibBytes.Length);
+
+                // 后台线程异步发送：不阻塞 UI 线程
+                System.Threading.Tasks.Task.Run(() =>
+                {
+                    try { SendImageClipboardToServer(dibBytes); }
+                    catch (Exception ex) { Logger.Warn(ex, "SendImageClipboardToServer failed"); }
+                });
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn(ex, "CheckImageClipboardChange failed");
+            }
+        }
+
+        /// <summary>
+        /// 客户端→服务端图片剪贴板同步。发送流程：
+        /// ImageClipboardStart → 多个 ImageClipboardData（64KB 分块）→ ImageClipboardEnd
+        /// 服务端 TransportHost 接收后在 STA 线程调用 IClipboardService.SetImageDibBytes 设置 CF_DIB。
+        /// </summary>
+        private void SendImageClipboardToServer(byte[] dibBytes)
+        {
+            if (_transport == null || dibBytes == null || dibBytes.Length == 0) return;
+            try
+            {
+                uint transferId = (uint)System.Threading.Interlocked.Increment(ref _fileTransferIdSeq);
+
+                // 1) 发送 Start
+                var startMsg = new ImageClipboardStartMessage
+                {
+                    TransferId = transferId,
+                    TotalSize = dibBytes.Length
+                };
+                byte[] startPayload = startMsg.Pack();
+                MessageReassembler.FragAndSend(0, (byte)MessageType.ImageClipboardStart, startPayload,
+                    (sid, data) => _transport.Send(data), 0);
+                Logger.Info("ImageClipboardStart sent: transferId={0} dibSize={1}",
+                    transferId, dibBytes.Length);
+
+                // 2) 分块发送 Data
+                int offset = 0;
+                int chunkCount = 0;
+                while (offset < dibBytes.Length)
+                {
+                    int chunkLen = Math.Min(ImageChunkSize, dibBytes.Length - offset);
+                    byte[] chunk = new byte[chunkLen];
+                    Buffer.BlockCopy(dibBytes, offset, chunk, 0, chunkLen);
+
+                    var dataMsg = new ImageClipboardDataMessage
+                    {
+                        TransferId = transferId,
+                        Offset = offset,
+                        DataLen = chunkLen,
+                        Data = chunk
+                    };
+                    byte[] dataPayload = dataMsg.Pack();
+                    MessageReassembler.FragAndSend(0, (byte)MessageType.ImageClipboardData, dataPayload,
+                        (s, d) => _transport.Send(d), 0);
+                    offset += chunkLen;
+                    chunkCount++;
+                }
+                Logger.Info("ImageClipboardData sent: transferId={0} chunks={1} totalBytes={2}",
+                    transferId, chunkCount, dibBytes.Length);
+
+                // 3) 发送 End
+                var endMsg = new ImageClipboardEndMessage { TransferId = transferId };
+                byte[] endPayload = endMsg.Pack();
+                MessageReassembler.FragAndSend(0, (byte)MessageType.ImageClipboardEnd, endPayload,
+                    (sid, data) => _transport.Send(data), 0);
+                Logger.Info("ImageClipboardEnd sent: transferId={0}", transferId);
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn(ex, "SendImageClipboardToServer pack/send failed");
+            }
+        }
+
+        /// <summary>
+        /// 服务端→客户端图片剪贴板同步回调。CF_DIB 数据已由 ImageClipboardReceiver 组装完毕，
+        /// 这里在 UI 线程（STA）通过 DataObject 设置 CF_DIB 原始字节到本地剪贴板。
+        /// 防回环：更新 _lastClipboardImageSig，避免 _clipboardTimer 检测到图片变化又发回服务端。
+        /// </summary>
+        private void OnImageClipboardReceivedFromServer(byte[] dibBytes)
+        {
+            if (dibBytes == null || dibBytes.Length == 0) return;
+            _dispatcher.Invoke(() =>
+            {
+                try
+                {
+                    // 通过 DataObject 直接设置 CF_DIB 原始字节，避免 BitmapSource 转换损失
+                    var dataObj = new DataObject();
+                    using (var ms = new System.IO.MemoryStream(dibBytes))
+                    {
+                        dataObj.SetData(DataFormats.Dib, ms, false); // autoDispose=false：离开 using 后 ms 已被复制
+                    }
+                    Clipboard.SetDataObject(dataObj, true);
+
+                    // 防回环：更新图片签名，避免 _clipboardTimer 检测到变化又发回服务端
+                    _lastClipboardImageSig = dibBytes.Length + ":" + ComputeSimpleHash(dibBytes, 32);
+
+                    Logger.Info("Image clipboard set from server: dibSize={0}", dibBytes.Length);
+                }
+                catch (Exception ex)
+                {
+                    Logger.Warn(ex, "Image clipboard set from server failed");
+                }
+            });
+        }
+
+        /// <summary>计算字节数组的前 N 字节的简单哈希（用于图片签名，非加密用途）。</summary>
+        private static string ComputeSimpleHash(byte[] data, int sampleLen)
+        {
+            int len = Math.Min(sampleLen, data.Length);
+            long hash = 0;
+            for (int i = 0; i < len; i++)
+            {
+                hash = (hash << 3) ^ data[i];
+            }
+            return hash.ToString("X");
         }
 
         // ====== Render Test 逻辑 ======
@@ -369,6 +818,8 @@ namespace EasyRDP.Client.Wpf
             Logger.Info("Stopping client session");
 
             if (_fpsTimer != null) { _fpsTimer.Stop(); _fpsTimer = null; }
+            if (_clipboardTimer != null) { _clipboardTimer.Stop(); _clipboardTimer = null; }
+            if (_heartbeatTimer != null) { _heartbeatTimer.Dispose(); _heartbeatTimer = null; }
 
             _running = false;
             _streamSession?.Stop();
@@ -454,30 +905,16 @@ namespace EasyRDP.Client.Wpf
             _inputSession.SendInput(msg);
         }
 
-        /// <summary>将 WPF Key 枚举映射为 Windows 虚拟键码。</summary>
+        /// <summary>
+        /// 将 WPF Key 枚举映射为 Windows 虚拟键码。
+        /// 使用 KeyInterop.VirtualKeyFromKey 覆盖所有键：F1-F12、Home/End/PageUp/PageDown/Insert、
+        /// NumPad0-9、Oem 字符键（; , . / ' [ ] \ - = `）、CapsLock、NumLock、PrintScreen 等。
+        /// </summary>
         private static int KeyToVirtualKey(System.Windows.Input.Key key)
         {
-            if (key >= System.Windows.Input.Key.A && key <= System.Windows.Input.Key.Z)
-                return (int)key - (int)System.Windows.Input.Key.A + 0x41; // VK_A..VK_Z
-            if (key >= System.Windows.Input.Key.D0 && key <= System.Windows.Input.Key.D9)
-                return (int)key - (int)System.Windows.Input.Key.D0 + 0x30; // VK_0..VK_9
-            if (key == System.Windows.Input.Key.LeftShift) return 0xA0;
-            if (key == System.Windows.Input.Key.RightShift) return 0xA1;
-            if (key == System.Windows.Input.Key.LeftCtrl) return 0xA2;
-            if (key == System.Windows.Input.Key.RightCtrl) return 0xA3;
-            if (key == System.Windows.Input.Key.LeftAlt) return 0xA4;
-            if (key == System.Windows.Input.Key.RightAlt) return 0xA5;
-            if (key == System.Windows.Input.Key.Enter) return 0x0D;
-            if (key == System.Windows.Input.Key.Escape) return 0x1B;
-            if (key == System.Windows.Input.Key.Tab) return 0x09;
-            if (key == System.Windows.Input.Key.Back) return 0x08;
-            if (key == System.Windows.Input.Key.Space) return 0x20;
-            if (key == System.Windows.Input.Key.Delete) return 0x2E;
-            if (key == System.Windows.Input.Key.Up) return 0x26;
-            if (key == System.Windows.Input.Key.Down) return 0x28;
-            if (key == System.Windows.Input.Key.Left) return 0x25;
-            if (key == System.Windows.Input.Key.Right) return 0x27;
-            return 0; // 不支持
+            // KeyInterop.VirtualKeyFromKey 是 WPF 内置的 Key → VK 映射，
+            // 覆盖所有标准 Windows 虚拟键码，无需手动维护映射表
+            return System.Windows.Input.KeyInterop.VirtualKeyFromKey(key);
         }
 
         // ====== 内部辅助 ======
@@ -500,17 +937,25 @@ namespace EasyRDP.Client.Wpf
 
         public void ToggleFullscreen()
         {
-            var window = Application.Current?.MainWindow;
+            var window = Application.Current?.MainWindow as MainWindow;
             if (window == null) return;
             if (window.WindowStyle == WindowStyle.None)
             {
+                // 退出全屏：恢复边框、窗口状态、显示顶/底栏
                 window.WindowStyle = WindowStyle.SingleBorderWindow;
                 window.WindowState = WindowState.Normal;
+                window.Topmost = false;
+                window.SetFullscreenUI(false);
+                Logger.Info("Exited fullscreen");
             }
             else
             {
+                // 进入全屏：无边框 + 最大化 + 置顶（盖住任务栏）+ 隐藏顶/底栏
                 window.WindowStyle = WindowStyle.None;
                 window.WindowState = WindowState.Maximized;
+                window.Topmost = true;
+                window.SetFullscreenUI(true);
+                Logger.Info("Entered fullscreen");
             }
         }
 
