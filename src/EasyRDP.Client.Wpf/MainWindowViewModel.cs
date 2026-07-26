@@ -39,6 +39,8 @@ namespace EasyRDP.Client.Wpf
         private ClientInputSession? _inputSession;
         private TcpTransportClient? _transport;
         private volatile bool _running;
+        private volatile bool _disconnecting; // 防止 Disconnect → Disconnected 事件 → Stop 重入循环
+        private DispatcherTimer _fpsTimer;
         private int _testFrameSeq;
 
         // 属性字段
@@ -53,8 +55,6 @@ namespace EasyRDP.Client.Wpf
         private int _frameRate;
         private string _codecName = "—";
         private WriteableBitmap? _renderBitmap;
-        private DateTime _lastFrameTime;
-        private int _frameCountThisSecond;
 
         public MainWindowViewModel()
         {
@@ -148,6 +148,7 @@ namespace EasyRDP.Client.Wpf
         private async Task ConnectAsync()
         {
             if (_running) return;
+            _disconnecting = false;
             SetBusy(true, "Connecting...");
 
             string host = _host.Trim();
@@ -170,7 +171,7 @@ namespace EasyRDP.Client.Wpf
                 Version = Constants.ProtocolVersion,
                 Capabilities = DecoderFactory.GetAvailableCodecs(),
                 Username = "admin",
-                Password = ""
+                Password = "admin" // 与服务端 TransportHost.cs 的默认凭据匹配
             };
             byte[] reqPayload = handshakeReq.Pack();
             MessageReassembler.FragAndSend(0, (byte)MessageType.HandshakeReq, reqPayload,
@@ -180,8 +181,7 @@ namespace EasyRDP.Client.Wpf
             var handshakeReassembler = new MessageReassembler();
             MessageReceivedEventArgs? handshakeResponse = null;
             var waitHandle = new ManualResetEventSlim(false);
-
-            handshakeReassembler.MessageReceived += (s, args) =>
+            EventHandler<MessageReceivedEventArgs> onHandshakeMsg = (s, args) =>
             {
                 if (args.MessageType == (byte)MessageType.HandshakeRes)
                 {
@@ -189,10 +189,13 @@ namespace EasyRDP.Client.Wpf
                     waitHandle.Set();
                 }
             };
+            handshakeReassembler.MessageReceived += onHandshakeMsg;
 
-            _transport.DataReceived += (s, args) => handshakeReassembler.OnFragment(args);
+            EventHandler<FragmentReceivedEventArgs> onHandshakeData = (s, args) => handshakeReassembler.OnFragment(args);
+            _transport.DataReceived += onHandshakeData;
             bool gotResponse = await Task.Run(() => waitHandle.Wait(HandshakeTimeoutMs));
-            _transport.DataReceived -= (s, args) => handshakeReassembler.OnFragment(args);
+            _transport.DataReceived -= onHandshakeData;
+            handshakeReassembler.MessageReceived -= onHandshakeMsg;
 
             if (!gotResponse || handshakeResponse == null)
             {
@@ -228,7 +231,30 @@ namespace EasyRDP.Client.Wpf
             IsConnected = true;
             CodecName = handshakeRes.Codec.ToString();
             FrameSize = string.Format("{0}x{1}", handshakeRes.ScreenWidth, handshakeRes.ScreenHeight);
-            _lastFrameTime = DateTime.UtcNow;
+
+            // 监听断连事件：服务端断开时自动清理状态
+            EventHandler onDisconnected = null;
+            onDisconnected = (s, ev) =>
+            {
+                if (_disconnecting) return; // 防止重入
+                _transport.Disconnected -= onDisconnected;
+                _dispatcher.Invoke(() => Stop());
+            };
+            _transport.Disconnected += onDisconnected;
+
+            // 启动 FPS 监控（每秒从 FrameBuffer 读取帧计数更新 UI）
+            _fpsTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+            long lastFrameCount = 0;
+            _fpsTimer.Tick += (s, ev) =>
+            {
+                if (_frameBuffer != null)
+                {
+                    long current = _frameBuffer.FrameCount;
+                    FrameRate = (int)(current - lastFrameCount);
+                    lastFrameCount = current;
+                }
+            };
+            _fpsTimer.Start();
 
             StatusText = string.Format("Connected — {0}x{1}",
                 handshakeRes.ScreenWidth, handshakeRes.ScreenHeight);
@@ -321,6 +347,11 @@ namespace EasyRDP.Client.Wpf
 
         private void Stop()
         {
+            if (_disconnecting) return;
+            _disconnecting = true;
+
+            if (_fpsTimer != null) { _fpsTimer.Stop(); _fpsTimer = null; }
+
             _running = false;
             _streamSession?.Stop();
             _transport?.Disconnect();

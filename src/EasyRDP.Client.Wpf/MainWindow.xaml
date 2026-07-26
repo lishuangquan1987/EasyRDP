@@ -44,7 +44,9 @@
         <Border Grid.Row="2" BorderBrush="#CCC" BorderThickness="0,1,0,0" Padding="8,4">
             <StackPanel Orientation="Horizontal">
                 <TextBlock Text="{Binding StatusText}" Margin="0,0,16,0"/>
-                <TextBlock Text="{Binding FrameSize}"/>
+                <TextBlock Text="{Binding FrameSize}" Margin="0,0,16,0"/>
+                <TextBlock Text="{Binding FrameRateText}" Margin="0,0,8,0"/>
+                <TextBlock Text="{Binding CodecName}"/>
             </StackPanel>
         </Border>
     </Grid>

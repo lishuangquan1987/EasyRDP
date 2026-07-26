@@ -233,7 +233,10 @@ namespace EasyRDP.Client.Wpf
                         _frameBuffer.ReleaseReadFrame();
                     }
                 }
-                Thread.Sleep(1);
+                else
+                {
+                    Thread.Sleep(5); // 无帧时等待，降低 CPU 占用
+                }
             }
         }
     }
