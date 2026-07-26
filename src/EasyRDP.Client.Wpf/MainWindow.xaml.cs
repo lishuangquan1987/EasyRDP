@@ -46,6 +46,10 @@ public partial class MainWindow : Window
     /// <summary>键盘按下 — 路由到 ViewModel。</summary>
     private void Window_KeyDown(object sender, KeyEventArgs e)
     {
+        // 焦点在 TextBox 上时不拦截（让用户正常输入 IP 和端口）
+        if (System.Windows.Input.Keyboard.FocusedElement is System.Windows.Controls.TextBox)
+            return;
+
         // WPF 中 Alt 键通过 SystemKey 传递
         Key key = e.Key == Key.System ? e.SystemKey : e.Key;
         _vm.HandleKeyDown(key);
@@ -55,6 +59,10 @@ public partial class MainWindow : Window
     /// <summary>键盘释放 — 路由到 ViewModel。</summary>
     private void Window_KeyUp(object sender, KeyEventArgs e)
     {
+        // 焦点在 TextBox 上时不拦截
+        if (System.Windows.Input.Keyboard.FocusedElement is System.Windows.Controls.TextBox)
+            return;
+
         Key key = e.Key == Key.System ? e.SystemKey : e.Key;
         _vm.HandleKeyUp(key);
         e.Handled = true;
