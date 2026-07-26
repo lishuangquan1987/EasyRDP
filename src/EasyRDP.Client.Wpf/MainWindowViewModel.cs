@@ -62,6 +62,7 @@ namespace EasyRDP.Client.Wpf
             ConnectCommand = new RelayCommand(async () => await ConnectAsync(), () => !_running);
             StartTestCommand = new RelayCommand(StartRenderTest, () => !_running);
             StopCommand = new RelayCommand(Stop, () => _running);
+            FullscreenCommand = new RelayCommand(ToggleFullscreen);
         }
 
         // ====== 属性 ======
@@ -140,6 +141,7 @@ namespace EasyRDP.Client.Wpf
         public RelayCommand ConnectCommand { get; }
         public RelayCommand StartTestCommand { get; }
         public RelayCommand StopCommand { get; }
+        public RelayCommand FullscreenCommand { get; }
 
         // ====== Connect 逻辑 ======
 

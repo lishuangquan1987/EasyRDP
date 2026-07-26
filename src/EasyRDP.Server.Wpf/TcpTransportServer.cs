@@ -27,11 +27,13 @@ namespace EasyRDP.Server.Wpf
 
         public void Start(int port)
         {
-            _listener = new TcpListener(IPAddress.Any, port);
-            _listener.Start();
-            _running = true;
-
-            Log("Server started on port " + port);
+            lock (_lock)
+            {
+                if (_running) return; // 防重入（线程安全）
+                _listener = new TcpListener(IPAddress.Any, port);
+                _listener.Start();
+                _running = true;
+            }
 
             var acceptThread = new Thread(AcceptLoop);
             acceptThread.IsBackground = true;
@@ -56,7 +58,6 @@ namespace EasyRDP.Server.Wpf
             {
                 try { c.Close(); } catch { }
             }
-            Log("Server stopped");
         }
 
         public void SendTo(uint sessionId, byte[] data)
