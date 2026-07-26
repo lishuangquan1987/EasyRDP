@@ -4,6 +4,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Threading;
 using EasyRDP.Core.Transport;
+using NLog;
 
 namespace EasyRDP.Server.Wpf
 {
@@ -12,6 +13,8 @@ namespace EasyRDP.Server.Wpf
     /// </summary>
     public class TcpTransportServer : ITransportServer
     {
+        private static readonly Logger Logger = LogManager.GetCurrentClassLogger();
+
         private TcpListener _listener;
         private readonly Dictionary<uint, TcpClient> _clients = new Dictionary<uint, TcpClient>();
         private readonly Dictionary<uint, object> _sessionLocks = new Dictionary<uint, object>();
@@ -27,6 +30,7 @@ namespace EasyRDP.Server.Wpf
 
         public void Start(int port)
         {
+            Logger.Info("TcpTransportServer starting on port {0}", port);
             lock (_lock)
             {
                 if (_running) return; // 防重入（线程安全）
@@ -42,6 +46,7 @@ namespace EasyRDP.Server.Wpf
 
         public void Stop()
         {
+            Logger.Info("TcpTransportServer stopping, active clients: {0}", _clients.Count);
             _running = false;
             try { _listener.Stop(); } catch { }
 
@@ -79,6 +84,7 @@ namespace EasyRDP.Server.Wpf
                 }
                 catch (Exception ex)
                 {
+                    Logger.Error(ex, "SendTo session {0} failed: {1}", sessionId, ex.Message);
                     Log("SendTo " + sessionId + " failed: " + ex.Message);
                 }
             }
@@ -97,6 +103,7 @@ namespace EasyRDP.Server.Wpf
             }
             try { client.Close(); } catch { }
 
+            Logger.Info("Client {0} disconnected", sessionId);
             var handler = ClientDisconnected;
             if (handler != null)
                 handler(this, new ConnectionEventArgs(sessionId, ""));
@@ -124,6 +131,7 @@ namespace EasyRDP.Server.Wpf
                     }
 
                     string remote = client.Client.RemoteEndPoint.ToString();
+                    Logger.Info("Client {0} connected: {1}", sessionId, remote);
                     Log("Client " + sessionId + " connected: " + remote);
 
                     var handler = ClientConnected;
@@ -135,12 +143,14 @@ namespace EasyRDP.Server.Wpf
                     lock (_lock) { _receiveThreads[sessionId] = thread; }
                     thread.Start();
                 }
-                catch (SocketException)
+                catch (SocketException ex)
                 {
                     if (!_running) break;
+                    Logger.Warn("Accept socket error: {0}", ex.Message);
                 }
                 catch (Exception ex)
                 {
+                    Logger.Error(ex, "Accept error");
                     Log("Accept error: " + ex.Message);
                 }
             }
@@ -164,12 +174,17 @@ namespace EasyRDP.Server.Wpf
                 {
                     int bytesRead = stream.Read(buffer, 0, buffer.Length);
                     if (bytesRead <= 0)
+                    {
+                        Logger.Info("Session {0} receive loop: stream.Read returned {1} — client closed connection",
+                            sessionId, bytesRead);
                         break;
+                    }
                     framing.Feed(buffer, 0, bytesRead);
                 }
             }
             catch (Exception ex)
             {
+                Logger.Error(ex, "Receive error session {0}", sessionId);
                 Log("Receive error session " + sessionId + ": " + ex.Message);
             }
             finally

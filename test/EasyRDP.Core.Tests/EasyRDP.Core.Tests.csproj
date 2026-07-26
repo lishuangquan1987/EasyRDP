@@ -24,4 +24,11 @@
     <ProjectReference Include="..\..\src\EasyRDP.Core\EasyRDP.Core.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Content Include="..\..\libs\openh264\x64\openh264.dll" Link="openh264\x64\openh264.dll"
+             CopyToOutputDirectory="PreserveNewest" Visible="false"/>
+    <Content Include="..\..\libs\openh264\x86\openh264.dll" Link="openh264\x86\openh264.dll"
+             CopyToOutputDirectory="PreserveNewest" Visible="false"/>
+  </ItemGroup>
+
 </Project>

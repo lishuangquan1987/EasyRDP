@@ -2,6 +2,7 @@ using System;
 using System.Net.Sockets;
 using System.Threading;
 using EasyRDP.Core.Transport;
+using NLog;
 
 namespace EasyRDP.Client.Wpf
 {
@@ -10,6 +11,8 @@ namespace EasyRDP.Client.Wpf
     /// </summary>
     public class TcpTransportClient : ITransportClient
     {
+        private static readonly Logger Logger = LogManager.GetCurrentClassLogger();
+
         private TcpClient _client;
         private Thread _receiveThread;
         private volatile bool _running;
@@ -25,12 +28,14 @@ namespace EasyRDP.Client.Wpf
 
         public bool Connect(string host, int port, int timeoutMs)
         {
+            Logger.Info("Connecting to {0}:{1} (timeout={2}ms)", host, port, timeoutMs);
             try
             {
                 _client = new TcpClient();
                 var result = _client.BeginConnect(host, port, null, null);
                 if (!result.AsyncWaitHandle.WaitOne(timeoutMs))
                 {
+                    Logger.Warn("Connection timeout to {0}:{1} after {2}ms", host, port, timeoutMs);
                     _client.Close();
                     _client = null;
                     return false;
@@ -42,11 +47,13 @@ namespace EasyRDP.Client.Wpf
                 _receiveThread.IsBackground = true;
                 _receiveThread.Start();
 
+                Logger.Info("Connected to {0}:{1}", host, port);
                 Log("Connected to " + host + ":" + port);
                 return true;
             }
             catch (Exception ex)
             {
+                Logger.Error(ex, "Connect to {0}:{1} failed", host, port);
                 Log("Connect failed: " + ex.Message);
                 _client = null;
                 return false;
@@ -56,9 +63,13 @@ namespace EasyRDP.Client.Wpf
         public void Disconnect()
         {
             _running = false;
-            try { _client.Close(); } catch { }
-            _client = null;
+            if (_client != null)
+            {
+                try { _client.Close(); } catch { }
+                _client = null;
+            }
 
+            Logger.Info("Disconnected");
             var handler = Disconnected;
             if (handler != null)
                 handler(this, EventArgs.Empty);
@@ -75,8 +86,9 @@ namespace EasyRDP.Client.Wpf
                 stream.Write(data, 0, data.Length);
                 return true;
             }
-            catch
+            catch (Exception ex)
             {
+                Logger.Error(ex, "Send failed");
                 return false;
             }
         }
@@ -104,12 +116,16 @@ namespace EasyRDP.Client.Wpf
                 {
                     int bytesRead = stream.Read(buffer, 0, buffer.Length);
                     if (bytesRead <= 0)
+                    {
+                        Logger.Info("Receive loop: stream.Read returned {0} — server closed connection", bytesRead);
                         break;
+                    }
                     framing.Feed(buffer, 0, bytesRead);
                 }
             }
             catch (Exception ex)
             {
+                Logger.Error(ex, "Receive error");
                 Log("Receive error: " + ex.Message);
             }
             finally

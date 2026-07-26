@@ -11,8 +11,8 @@ namespace EasyRDP.Core.Protocol
         public const int MaxFrameSize = 50 * 1024 * 1024;
         /// <summary>Maximum size of a single fragment (1400 bytes).</summary>
         public const int FragmentSize = 1400;
-        /// <summary>Timeout in milliseconds for fragment reassembly.</summary>
-        public const int FragmentReassembleTimeoutMs = 100;
+        /// <summary>Timeout in milliseconds for fragment reassembly (5s for large raw frames).</summary>
+        public const int FragmentReassembleTimeoutMs = 5000;
         /// <summary>安全 payload 上限（超出拒绝，防 DoS 内存耗尽）。</summary>
         public const int MaxSafePayloadSize = 10 * 1024 * 1024;
     }

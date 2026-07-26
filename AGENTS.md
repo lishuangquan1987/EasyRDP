@@ -118,4 +118,10 @@ EasyRDP 的核心管线（`docs/` 中的规范）将在根目录下实现 — �
 
 ## 备注
 
+- H.264 硬件/软件编码是强制要求，不允许回退到原始像素绕过编码问题。OpenH264 仅支持 I420 (YUV) 输入，所有 BGRA 截屏数据必须先做 BGRA→I420 颜色空间转换再送入编码器。
+- OpenH264 v2.6.0 本地源码路径：`E:\DownloadCode\openh264`。核对结构体字节对齐、vtable 槽位映射、接口方法签名等无需到 GitHub 翻阅源码，直接本地查看。关键文件：
+  - `codec/api/wels/codec_app_def.h` — SFrameBSInfo / SLayerBSInfo / SSourcePicture / SDecodingParam / SBufferInfo 等结构体定义
+  - `codec/api/wels/codec_api.h` — ISVCEncoder / ISVCDecoder 接口声明（vtable 槽位顺序）
+  - `codec/encoder/plus/src/welsEncoderExt.cpp` — 编码器实现（验证接口方法顺序）
+  - `codec/decoder/plus/src/welsDecoderExt.cpp` — 解码器实现（验证接口方法顺序）
 - 预留，后续快速追加。

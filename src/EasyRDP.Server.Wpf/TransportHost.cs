@@ -7,6 +7,7 @@ using EasyRDP.Core.Protocol;
 using EasyRDP.Core.Services;
 using EasyRDP.Core.Session;
 using EasyRDP.Core.Transport;
+using NLog;
 
 namespace EasyRDP.Server.Wpf
 {
@@ -15,6 +16,8 @@ namespace EasyRDP.Server.Wpf
     /// </summary>
     public class TransportHost : IDisposable
     {
+        private static readonly Logger Logger = LogManager.GetCurrentClassLogger();
+
         /// <summary>会话 attached 事件（UI 绑定用），参数为 (sessionId, remoteEndPoint, codec, resolution)。</summary>
         public event Action<uint, string, string, string> SessionAttached;
 
@@ -60,6 +63,7 @@ namespace EasyRDP.Server.Wpf
 
         public void Start(int port)
         {
+            Logger.Info("TransportHost starting on port {0}", port);
             _running = true;
             _transportServer.Start(port);
 
@@ -72,6 +76,7 @@ namespace EasyRDP.Server.Wpf
 
         public void Stop()
         {
+            Logger.Info("TransportHost stopping, active sessions: {0}", _activeCount);
             _running = false;
 
             // Stop all sessions
@@ -91,6 +96,7 @@ namespace EasyRDP.Server.Wpf
                 _reassemblers.Clear();
                 _lastActivity.Clear();
             }
+            Logger.Info("TransportHost stopped");
 
             _cursorTracker.StopAll();
             _transportServer.Stop();
@@ -104,6 +110,7 @@ namespace EasyRDP.Server.Wpf
 
         private void OnClientConnected(object sender, ConnectionEventArgs e)
         {
+            Logger.Info("Client connected: sessionId={0}", e.SessionId);
             // Create reassembler for this session
             var reassembler = new MessageReassembler();
             reassembler.MessageReceived += (s, args) => OnMessageReceived(args);
@@ -154,10 +161,13 @@ namespace EasyRDP.Server.Wpf
         private void HandleHandshake(MessageReceivedEventArgs e)
         {
             var req = HandshakeReq.Unpack(e.Data);
+            Logger.Info("Handshake request from sessionId={0}: version={1} username={2}",
+                e.SessionId, req.Version, req.Username);
 
             HandshakeRes res;
             if (req.Version != Constants.ProtocolVersion)
             {
+                Logger.Warn("Version mismatch: client={0} server={1}", req.Version, Constants.ProtocolVersion);
                 res = new HandshakeRes { Result = HandshakeResult.VersionMismatch };
                 SendResponse(e.SessionId, res);
                 DisconnectSession(e.SessionId);
@@ -169,6 +179,7 @@ namespace EasyRDP.Server.Wpf
             {
                 if (_activeCount >= _maxSessions)
                 {
+                    Logger.Warn("Server busy: activeCount={0} maxSessions={1}", _activeCount, _maxSessions);
                     res = new HandshakeRes { Result = HandshakeResult.ServerBusy };
                     SendResponse(e.SessionId, res);
                     DisconnectSession(e.SessionId);
@@ -179,6 +190,7 @@ namespace EasyRDP.Server.Wpf
             // 简单认证：硬编码凭据表（后续应改为配置文件或外部凭据存储）
             if (!ValidateCredentials(req.Username, req.Password))
             {
+                Logger.Warn("Auth failed for username='{0}'", req.Username);
                 res = new HandshakeRes { Result = HandshakeResult.AuthFailed };
                 SendResponse(e.SessionId, res);
                 DisconnectSession(e.SessionId);
@@ -190,50 +202,78 @@ namespace EasyRDP.Server.Wpf
             var negotiated = CodecNegotiator.Negotiate(req.Capabilities, serverCaps);
             if (!negotiated.HasValue)
             {
-                res = new HandshakeRes { Result = HandshakeResult.NoCommonCodec };
+                // Server has no encoder (e.g. OpenH264 DLL wrong arch on Win7 32-bit).
+                // Accept anyway — ServerStreamSession falls back to raw pixels.
+                if (serverCaps == CodecCapabilities.None)
+                {
+                    Logger.Warn("No encoder available on server — falling back to raw pixels");
+                    negotiated = PickFallbackCodec(req.Capabilities);
+                }
+                else
+                {
+                    Logger.Warn("No common codec: clientCaps={0} serverCaps={1}", req.Capabilities, serverCaps);
+                    res = new HandshakeRes { Result = HandshakeResult.NoCommonCodec };
+                    SendResponse(e.SessionId, res);
+                    DisconnectSession(e.SessionId);
+                    return;
+                }
+            }
+
+            try
+            {
+                var bounds = _captureService.GetPrimaryScreen();
+
+                // Create sessions first (don't send Success until Start() passes)
+                var streamSession = new ServerStreamSession(_captureService, (sid, data) =>
+                {
+                    _transportServer.SendTo(sid, data);
+                }, _cursorTracker);
+
+                var inputSession = new ServerInputSession(_inputSimulator);
+
+                lock (_lock)
+                {
+                    _sessions[e.SessionId] = new SessionInfo
+                    {
+                        Stream = streamSession,
+                        Input = inputSession
+                    };
+                    _activeCount++;
+                }
+
+                // Start — may throw if encoder init fails
+                streamSession.Start(e.SessionId, negotiated.Value);
+
+                // Only send Success after session fully starts
+                res = new HandshakeRes
+                {
+                    Result = HandshakeResult.Success,
+                    Codec = negotiated.Value,
+                    ScreenWidth = bounds.Width,
+                    ScreenHeight = bounds.Height
+                };
+                SendResponse(e.SessionId, res);
+                Logger.Info("Handshake success: sessionId={0} codec={1} resolution={2}x{3}",
+                    e.SessionId, negotiated.Value, bounds.Width, bounds.Height);
+                Logger.Info("Session {0} stream started with codec {1}", e.SessionId, negotiated.Value);
+
+                // Fire session attached event
+                var handler = SessionAttached;
+                if (handler != null)
+                {
+                    string remote = "?";
+                    string codec = negotiated.Value.ToString();
+                    string resolution = bounds.Width + "x" + bounds.Height;
+                    handler(e.SessionId, remote, codec, resolution);
+                }
+            }
+            catch (Exception ex)
+            {
+                // Session startup failed — send error response and clean up
+                Logger.Error(ex, "Handshake session startup failed for sessionId={0}", e.SessionId);
+                res = new HandshakeRes { Result = HandshakeResult.InternalError };
                 SendResponse(e.SessionId, res);
                 DisconnectSession(e.SessionId);
-                return;
-            }
-
-            var bounds = _captureService.GetPrimaryScreen();
-            res = new HandshakeRes
-            {
-                Result = HandshakeResult.Success,
-                Codec = negotiated.Value,
-                ScreenWidth = bounds.Width,
-                ScreenHeight = bounds.Height
-            };
-            SendResponse(e.SessionId, res);
-
-            // Create sessions
-            var streamSession = new ServerStreamSession(_captureService, (sid, data) =>
-            {
-                _transportServer.SendTo(sid, data);
-            }, _cursorTracker);
-
-            var inputSession = new ServerInputSession(_inputSimulator);
-
-            lock (_lock)
-            {
-                _sessions[e.SessionId] = new SessionInfo
-                {
-                    Stream = streamSession,
-                    Input = inputSession
-                };
-                _activeCount++;
-            }
-
-            streamSession.Start(e.SessionId, negotiated.Value);
-
-            // Fire session attached event
-            var handler = SessionAttached;
-            if (handler != null)
-            {
-                string remote = "?";
-                string codec = negotiated.Value.ToString();
-                string resolution = bounds.Width + "x" + bounds.Height;
-                handler(e.SessionId, remote, codec, resolution);
             }
         }
 
@@ -255,6 +295,7 @@ namespace EasyRDP.Server.Wpf
 
         private void DisconnectSession(uint sessionId)
         {
+            Logger.Info("Disconnecting session {0}", sessionId);
             SessionInfo info;
             lock (_lock)
             {
@@ -271,6 +312,7 @@ namespace EasyRDP.Server.Wpf
             try { info.Input?.Dispose(); } catch { }
 
             _transportServer.Disconnect(sessionId);
+            Logger.Info("Session {0} disconnected", sessionId);
         }
 
         private void HeartbeatLoop()
@@ -301,9 +343,22 @@ namespace EasyRDP.Server.Wpf
 
                 foreach (var sid in timedOut)
                 {
+                    Logger.Warn("Session {0} heartbeat timeout — disconnecting", sid);
                     DisconnectSession(sid);
                 }
             }
+        }
+
+        /// <summary>
+        /// 服务端无编码器时，从客户端能力中挑选一个可用编码（ServerStreamSession 会回退到原始像素）。
+        /// </summary>
+        private static CodecId PickFallbackCodec(CodecCapabilities clientCaps)
+        {
+            if ((clientCaps & CodecCapabilities.H264Hardware) != 0)
+                return CodecId.H264Hardware;
+            if ((clientCaps & CodecCapabilities.H264Software) != 0)
+                return CodecId.H264Software;
+            return CodecId.H264Software; // 保底
         }
 
         /// <summary>

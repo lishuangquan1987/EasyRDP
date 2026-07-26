@@ -8,6 +8,7 @@ using System.Windows.Threading;
 using EasyRDP.Core.Protocol;
 using EasyRDP.Core.Rendering;
 using EasyRDP.Core.Transport;
+using NLog;
 
 namespace EasyRDP.Client.Wpf
 {
@@ -17,6 +18,8 @@ namespace EasyRDP.Client.Wpf
     /// </summary>
     public class MainWindowViewModel : INotifyPropertyChanged
     {
+        private static readonly Logger Logger = LogManager.GetCurrentClassLogger();
+
         /// <summary>默认服务端端口。</summary>
         private const int DefaultPort = 2000;
         /// <summary>连接超时（毫秒）。</summary>
@@ -44,7 +47,7 @@ namespace EasyRDP.Client.Wpf
         private int _testFrameSeq;
 
         // 属性字段
-        private string _host = "127.0.0.1";
+        private string _host = "172.26.66.81";
         private string _port = "2000";
         private string _statusText = "Disconnected";
         private bool _isConnectEnabled = true;
@@ -158,26 +161,17 @@ namespace EasyRDP.Client.Wpf
             _transport = new TcpTransportClient();
             _transport.OnLog = (msg) => _dispatcher.Invoke(() => StatusText = msg);
 
+            Logger.Info("Connecting to {0}:{1}...", host, port);
             bool connected = await Task.Run(() => _transport.Connect(host, port, ConnectTimeoutMs));
             if (!connected)
             {
+                Logger.Warn("Connection to {0}:{1} failed", host, port);
                 SetBusy(false, "Connection failed");
                 return;
             }
+            Logger.Info("TCP connected to {0}:{1}, sending handshake", host, port);
 
-            // 发送握手
-            var handshakeReq = new HandshakeReq
-            {
-                Version = Constants.ProtocolVersion,
-                Capabilities = DecoderFactory.GetAvailableCodecs(),
-                Username = "admin",
-                Password = "admin" // 与服务端 TransportHost.cs 的默认凭据匹配
-            };
-            byte[] reqPayload = handshakeReq.Pack();
-            MessageReassembler.FragAndSend(0, (byte)MessageType.HandshakeReq, reqPayload,
-                (sid, data) => _transport.Send(data), 0);
-
-            // 等待握手响应
+            // 先订阅 DataReceived，再发送握手 — 避免竞态条件导致 HandshakeRes 丢失
             var handshakeReassembler = new MessageReassembler();
             MessageReceivedEventArgs? handshakeResponse = null;
             var waitHandle = new ManualResetEventSlim(false);
@@ -193,20 +187,37 @@ namespace EasyRDP.Client.Wpf
 
             EventHandler<FragmentReceivedEventArgs> onHandshakeData = (s, args) => handshakeReassembler.OnFragment(args);
             _transport.DataReceived += onHandshakeData;
+
+            // 订阅就绪后发送握手请求
+            var handshakeReq = new HandshakeReq
+            {
+                Version = Constants.ProtocolVersion,
+                Capabilities = DecoderFactory.GetAvailableCodecs(),
+                Username = "admin",
+                Password = "admin" // 与服务端 TransportHost.cs 的默认凭据匹配
+            };
+            byte[] reqPayload = handshakeReq.Pack();
+            MessageReassembler.FragAndSend(0, (byte)MessageType.HandshakeReq, reqPayload,
+                (sid, data) => _transport.Send(data), 0);
+            Logger.Debug("HandshakeReq sent, waiting for response...");
             bool gotResponse = await Task.Run(() => waitHandle.Wait(HandshakeTimeoutMs));
             _transport.DataReceived -= onHandshakeData;
             handshakeReassembler.MessageReceived -= onHandshakeMsg;
 
             if (!gotResponse || handshakeResponse == null)
             {
+                Logger.Warn("Handshake timeout after {0}ms", HandshakeTimeoutMs);
                 SetBusy(false, "Handshake timeout");
                 _transport.Disconnect();
                 return;
             }
 
             var handshakeRes = HandshakeRes.Unpack(handshakeResponse.Data);
+            Logger.Info("Handshake response: result={0} codec={1} resolution={2}x{3}",
+                handshakeRes.Result, handshakeRes.Codec, handshakeRes.ScreenWidth, handshakeRes.ScreenHeight);
             if (handshakeRes.Result != HandshakeResult.Success)
             {
+                Logger.Warn("Handshake rejected: {0}", handshakeRes.Result);
                 SetBusy(false, "Handshake failed: " + handshakeRes.Result);
                 _transport.Disconnect();
                 return;
@@ -214,6 +225,9 @@ namespace EasyRDP.Client.Wpf
 
             // 初始化渲染管线
             _renderTarget = new WpfRenderTarget();
+            // 订阅 BitmapChanged：当 Resolution changed 触发 Resize 创建新 bitmap 时，
+            // 同步更新 RenderBitmap 绑定，避免 Image.Source 指向旧 bitmap 导致黑屏
+            _renderTarget.BitmapChanged += b => RenderBitmap = b;
             _frameBuffer = new FrameBuffer();
 
             _streamSession = new ClientStreamSession();
@@ -227,6 +241,8 @@ namespace EasyRDP.Client.Wpf
             _inputSession.Start(_transport, handshakeRes.ScreenWidth, handshakeRes.ScreenHeight);
 
             _streamSession.Start(_transport);
+            Logger.Info("Client stream session started, codec={0} resolution={1}x{2}",
+                handshakeRes.Codec, handshakeRes.ScreenWidth, handshakeRes.ScreenHeight);
             _running = true;
             IsConnected = true;
             CodecName = handshakeRes.Codec.ToString();
@@ -269,6 +285,7 @@ namespace EasyRDP.Client.Wpf
             SetBusy(true, "Running render test...");
 
             _renderTarget = new WpfRenderTarget();
+            _renderTarget.BitmapChanged += b => RenderBitmap = b;
             _frameBuffer = new FrameBuffer();
             _testFrameSeq = 0;
             _running = true;
@@ -349,6 +366,7 @@ namespace EasyRDP.Client.Wpf
         {
             if (_disconnecting) return;
             _disconnecting = true;
+            Logger.Info("Stopping client session");
 
             if (_fpsTimer != null) { _fpsTimer.Stop(); _fpsTimer = null; }
 
@@ -372,6 +390,7 @@ namespace EasyRDP.Client.Wpf
             }
             RenderBitmap = null;
 
+            Logger.Info("Client session stopped");
             IsConnected = false;
             FrameSize = "—";
             FrameRate = 0;

@@ -2,12 +2,12 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Threading;
-using EasyDesk.Core;
 using EasyDesk.Core.Models;
 using EasyRDP.Core.Protocol;
 using EasyRDP.Core.Services;
 using EasyRDP.Core.Session;
 using EasyRDP.Core.Transport;
+using NLog;
 
 namespace EasyRDP.Server.Wpf
 {
@@ -17,6 +17,8 @@ namespace EasyRDP.Server.Wpf
     /// </summary>
     public class ServerStreamSession : IServerStreamSession
     {
+        private static readonly Logger Logger = LogManager.GetCurrentClassLogger();
+
         private readonly ICaptureService _captureService;
         private readonly Action<uint, byte[]> _sendTo;
         private readonly ICursorTracker _cursorTracker;
@@ -51,6 +53,13 @@ namespace EasyRDP.Server.Wpf
 
         // D12 global load
         private int _globalLoadLevel;
+
+        // Diagnostics counters
+        private int _consecutiveEncodeFailures;
+        private int _sendQueueDrops;
+        private int _captureQueueDrops;
+        private long _framesEncoded;
+        private long _framesSent;
 
         // Cursor session
         private ICursorTrackerSession _cursorSession;
@@ -97,19 +106,25 @@ namespace EasyRDP.Server.Wpf
             if (_running) return;
             _sessionId = sessionId;
             _codec = codec;
+            Logger.Info("ServerStreamSession {0} starting with codec {1}", sessionId, codec);
 
-            // Create encoder
+            // Create encoder — H264 是唯一支持的编码方式，不再回退到原始像素
             _encoder = EncoderFactory.Create(codec);
+            if (_encoder == null)
+            {
+                var ex = new InvalidOperationException("H264 encoder unavailable: " + codec);
+                Logger.Error("Session {0}: encoder not available for codec {1} — H264 is mandatory, aborting session", sessionId, codec);
+                FatalError?.Invoke(this, new ErrorEventArgs(ex.Message, ex));
+                return;
+            }
+            Logger.Info("Session {0}: encoder created for codec {1}", sessionId, codec);
 
             // Get screen dimensions
             var bounds = _captureService.GetPrimaryScreen();
             _lastW = bounds.Width;
             _lastH = bounds.Height;
 
-            if (_encoder != null)
-            {
-                _encoder.Initialize(_lastW, _lastH, TargetBitrate);
-            }
+            _encoder.Initialize(_lastW, _lastH, TargetBitrate);
 
             // Pre-allocate double buffers
             int size = _lastW * _lastH * 4;
@@ -118,6 +133,8 @@ namespace EasyRDP.Server.Wpf
 
             _running = true;
             _stopping = false;
+            Logger.Info("Session {0}: stream started, resolution={1}x{2}, frameDelay={3}ms",
+                sessionId, _lastW, _lastH, FrameDelayMs);
 
             // Subscribe to capture events
             _captureService.FrameCaptured += OnFrameCaptured;
@@ -143,6 +160,8 @@ namespace EasyRDP.Server.Wpf
         public void Stop()
         {
             if (!_running) return;
+            Logger.Info("Session {0}: stopping stream, pendingFrames={1} encoded={2} sent={3} encodeFails={4} queueDrops={5} captureDrops={6}",
+                _sessionId, GetPendingFrames(), _framesEncoded, _framesSent, _consecutiveEncodeFailures, _sendQueueDrops, _captureQueueDrops);
             // 1. Set stopping flag FIRST — encode/send threads check this at loop top
             _stopping = true;
 
@@ -171,13 +190,16 @@ namespace EasyRDP.Server.Wpf
                 if (!_encodeThread.Join(3000))
                 {
                     // Encoder stuck — mark for deferred cleanup, don't Dispose encoder
-                    Log("Encode thread timeout — encoder deferred cleanup");
+                    Logger.Warn("Session {0}: encode thread timeout (3s) — encoder deferred cleanup", _sessionId);
                 }
                 _encodeThread = null;
             }
             if (_sendThread != null)
             {
-                _sendThread.Join(3000);
+                if (!_sendThread.Join(3000))
+                {
+                    Logger.Warn("Session {0}: send thread timeout (3s)", _sessionId);
+                }
                 _sendThread = null;
             }
 
@@ -197,6 +219,7 @@ namespace EasyRDP.Server.Wpf
             _encoder = null;
 
             _running = false;
+            Logger.Info("Session {0}: stream stopped", _sessionId);
         }
 
         public void ApplyGlobalLoadLevel(int level)
@@ -249,16 +272,27 @@ namespace EasyRDP.Server.Wpf
                     _frameQueue.Enqueue(cf);
                     Monitor.Pulse(_lock);
                 }
-                // else: queue full, drop frame
+                else
+                {
+                    // 截屏→编码队列满，丢弃此帧（编码速度跟不上截屏速度）
+                    _captureQueueDrops++;
+                    if (_captureQueueDrops == 1 || _captureQueueDrops % 60 == 0)
+                        Logger.Warn("Session {0}: capture queue full, frame dropped, total drops={1}",
+                            _sessionId, _captureQueueDrops);
+                }
             }
         }
 
         private void EncodeLoop()
         {
             long lastEncodeTimestamp = 0;
+            int encodeLoopIter = 0;
+
+            Logger.Info("Session {0}: EncodeLoop thread started", _sessionId);
 
             while (!_stopping)
             {
+                encodeLoopIter++;
                 CapturedFrame frame;
                 lock (_lock)
                 {
@@ -271,6 +305,10 @@ namespace EasyRDP.Server.Wpf
                     frame = _frameQueue.Dequeue();
                     if (frame.Pixels == null) break; // sentinel
                 }
+
+                if (encodeLoopIter == 1 || encodeLoopIter % 100 == 0)
+                    Logger.Info("Session {0}: EncodeLoop iter={1} dequeued frame res={2}x{3} bgraLen={4}",
+                        _sessionId, encodeLoopIter, frame.Width, frame.Height, frame.Pixels.Length);
 
                 // Throttle
                 if (FrameDelayMs > 0)
@@ -288,46 +326,81 @@ namespace EasyRDP.Server.Wpf
                 bool resolutionChanged = false;
                 if (frame.Width != _lastW || frame.Height != _lastH)
                 {
+                    Logger.Info("Session {0}: resolution changed {1}x{2} -> {3}x{4}",
+                        _sessionId, _lastW, _lastH, frame.Width, frame.Height);
                     _lastW = frame.Width;
                     _lastH = frame.Height;
                     resolutionChanged = true;
                 }
 
-                // Encode
-                EncodedFrame? encoded = null;
-                if (_encoder != null && _encoder.IsAvailable)
+                // Encode — H264 only, no raw pixel fallback
+                if (resolutionChanged)
                 {
-                    if (resolutionChanged)
-                    {
-                        _encoder.Reset();
-                        _encoder.Initialize(_lastW, _lastH, TargetBitrate);
-                    }
-
-                    bool forceKey = resolutionChanged
-                        || (_sequenceNumber % KeyframeInterval == 0);
-
-                    long encodeStart = Stopwatch.GetTimestamp();
-                    EncodedFrame result = _encoder.Encode(frame.Pixels, forceKey);
-                    encoded = result;
-                    long encodeEnd = Stopwatch.GetTimestamp();
-
-                    // D11: track encode time
-                    lock (_lock)
-                    {
-                        _encodeTimes.Enqueue(encodeEnd - encodeStart);
-                        if (_encodeTimes.Count > AdaptiveWindow)
-                            _encodeTimes.Dequeue();
-                    }
+                    _encoder.Reset();
+                    _encoder.Initialize(_lastW, _lastH, TargetBitrate);
                 }
 
-                // Build VideoFrameMessage (fallback to raw pixels if no encoder)
+                bool forceKey = resolutionChanged
+                    || (_sequenceNumber % KeyframeInterval == 0);
+
+                Logger.Info("Session {0}: calling Encode seq={1} forceKey={2} res={3}x{4} bgraLen={5}",
+                    _sessionId, _sequenceNumber, forceKey, frame.Width, frame.Height, frame.Pixels.Length);
+
+                long encodeStart = Stopwatch.GetTimestamp();
+                EncodedFrame result;
+                try
+                {
+                    result = _encoder.Encode(frame.Pixels, forceKey);
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error(ex, "Session {0}: Encode threw exception seq={1} — frame skipped",
+                        _sessionId, _sequenceNumber);
+                    _consecutiveEncodeFailures++;
+                    continue;
+                }
+                long encodeEnd = Stopwatch.GetTimestamp();
+                double encodeMs = (encodeEnd - encodeStart) * 1000.0 / Stopwatch.Frequency;
+
+                Logger.Info("Session {0}: Encode returned seq={1} dataLen={2} keyframe={3} encodeMs={4:F1}",
+                    _sessionId, _sequenceNumber,
+                    result.Data?.Length ?? 0, result.IsKeyframe, encodeMs);
+
+                // D11: track encode time
+                lock (_lock)
+                {
+                    _encodeTimes.Enqueue(encodeEnd - encodeStart);
+                    if (_encodeTimes.Count > AdaptiveWindow)
+                        _encodeTimes.Dequeue();
+                }
+
+                // 编码失败：丢弃此帧，不发送任何数据（不再回退到原始像素）
+                if (result.Data == null || result.Data.Length == 0)
+                {
+                    _consecutiveEncodeFailures++;
+                    if (_consecutiveEncodeFailures == 1 || _consecutiveEncodeFailures % 30 == 0)
+                        Logger.Warn("Session {0}: encode failed (seq={1}), frame dropped. Consecutive failures={2}, encodeMs={3:F1}",
+                            _sessionId, _sequenceNumber, _consecutiveEncodeFailures, encodeMs);
+                    continue;
+                }
+
+                _consecutiveEncodeFailures = 0;
+                _framesEncoded++;
+                if (_framesEncoded == 1)
+                    Logger.Info("Session {0}: FIRST frame encoded ok, seq={1} size={2} keyframe={3} encodeMs={4:F1}",
+                        _sessionId, _sequenceNumber, result.Data.Length, result.IsKeyframe, encodeMs);
+                else if (_framesEncoded % 100 == 0)
+                    Logger.Debug("Session {0}: encoded {1} frames, last seq={2} size={3} keyframe={4} encodeMs={5:F1}",
+                        _sessionId, _framesEncoded, _sequenceNumber, result.Data.Length, result.IsKeyframe, encodeMs);
+
+                // Build VideoFrameMessage with H264 data only
                 var vfm = new VideoFrameMessage
                 {
                     Width = frame.Width,
                     Height = frame.Height,
-                    IsKeyframe = encoded.HasValue && encoded.Value.IsKeyframe,
+                    IsKeyframe = result.IsKeyframe,
                     SequenceNumber = _sequenceNumber++,
-                    Data = encoded.HasValue ? encoded.Value.Data : frame.Pixels
+                    Data = result.Data
                 };
                 byte[] payload = vfm.Pack();
 
@@ -347,7 +420,13 @@ namespace EasyRDP.Server.Wpf
                         _sendQueue.Enqueue(fts);
                         Monitor.Pulse(_lock);
                     }
-                    // else: skip frame
+                    else
+                    {
+                        _sendQueueDrops++;
+                        if (_sendQueueDrops == 1 || _sendQueueDrops % 30 == 0)
+                            Logger.Warn("Session {0}: send queue full, frame dropped (seq={1}), total drops={2}",
+                                _sessionId, vfm.SequenceNumber, _sendQueueDrops);
+                    }
                 }
             }
         }
@@ -371,15 +450,28 @@ namespace EasyRDP.Server.Wpf
                 }
 
                 // Fragment and send
+                int fragCount = (fts.Data.Length + Constants.FragmentSize - 1) / Constants.FragmentSize;
+                if (fragCount == 0) fragCount = 1;
+
                 MessageReassembler.FragAndSend(
-                    sendFrameId++, (byte)MessageType.VideoFrame, fts.Data,
+                    sendFrameId, (byte)MessageType.VideoFrame, fts.Data,
                     _sendTo, _sessionId);
+
+                _framesSent++;
+                if (_framesSent == 1)
+                    Logger.Info("Session {0}: FIRST frame sent, frameId={1} payloadLen={2} fragCount={3} keyframe={4}",
+                        _sessionId, sendFrameId, fts.Data.Length, fragCount, fts.IsKeyframe);
+                else if (_framesSent % 100 == 0)
+                    Logger.Debug("Session {0}: sent {1} frames, last frameId={2} payloadLen={3} fragCount={4}",
+                        _sessionId, _framesSent, sendFrameId, fts.Data.Length, fragCount);
+
+                sendFrameId++;
             }
         }
 
-        private void Log(string message)
+        private int GetPendingFrames()
         {
-            System.Diagnostics.Debug.WriteLine("[ServerStreamSession " + _sessionId + "] " + message);
+            lock (_lock) return _sendQueue.Count;
         }
     }
 }

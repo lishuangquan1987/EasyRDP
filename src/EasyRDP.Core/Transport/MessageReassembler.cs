@@ -4,6 +4,7 @@ namespace EasyRDP.Core.Transport
     using System.Collections.Generic;
     using System.Diagnostics;
     using EasyRDP.Core.Protocol;
+    using NLog;
     /// <summary>
     /// 消息分片重组器。每个 Session 独立一个实例。
     /// 接收侧：订阅传输层 DataReceived → 按 FrameId 重组 → CRC16 校验 → 收齐后抛 MessageReceived。
@@ -11,6 +12,8 @@ namespace EasyRDP.Core.Transport
     /// </summary>
     public class MessageReassembler
     {
+        private static readonly Logger Logger = LogManager.GetCurrentClassLogger();
+
         // CRC-16/XMODEM lookup table
         private static readonly ushort[] Crc16Table = BuildCrc16Table();
 
@@ -23,6 +26,11 @@ namespace EasyRDP.Core.Transport
         private int _totalPayloadLen;
         private byte _messageType;
         private Stopwatch _reassemblyTimer = new Stopwatch();
+
+        // 诊断计数器：跟踪各类静默拒绝
+        private int _fragCountRejectCount;
+        private int _fragIdxRejectCount;
+        private int _staleFrameRejectCount;
 
         /// <summary>完整消息组装完成事件。</summary>
         public event EventHandler<MessageReceivedEventArgs> MessageReceived;
@@ -52,7 +60,11 @@ namespace EasyRDP.Core.Transport
 
             // Reject oversized payloads (DoS protection)
             if (rawPayloadLen > (uint)Constants.MaxSafePayloadSize)
+            {
+                Logger.Warn("Oversized payload rejected: {0} bytes (max {1})",
+                    rawPayloadLen, Constants.MaxSafePayloadSize);
                 return;
+            }
             int totalPayloadLen = (int)rawPayloadLen;
 
             // Parse fragment header
@@ -70,11 +82,24 @@ namespace EasyRDP.Core.Transport
             pos += 2;
 
             // Reject excessive fragment counts (DoS protection)
+            // 注意：H264 编码帧通常 < 100 分片。如果触发此限制，说明 payload 异常大。
             if (fragCount > 4096 || fragCount == 0)
+            {
+                _fragCountRejectCount++;
+                if (_fragCountRejectCount <= 3 || _fragCountRejectCount % 100 == 0)
+                    Logger.Warn("Fragment rejected: fragCount={0} fragIdx={1} frameId={2} type=0x{3:X2} payloadLen={4} (total rejects={5})",
+                        fragCount, fragIdx, frameId, messageType, totalPayloadLen, _fragCountRejectCount);
                 return;
+            }
             // Validate fragIdx
             if (fragIdx >= fragCount)
+            {
+                _fragIdxRejectCount++;
+                if (_fragIdxRejectCount <= 3 || _fragIdxRejectCount % 100 == 0)
+                    Logger.Warn("Fragment rejected: fragIdx={0} >= fragCount={1} frameId={2} (total rejects={3})",
+                        fragIdx, fragCount, frameId, _fragIdxRejectCount);
                 return;
+            }
 
             // Extract fragment data
             int fragDataLen = data.Length - pos;
@@ -84,7 +109,11 @@ namespace EasyRDP.Core.Transport
             // Verify CRC16
             ushort actualCrc = ComputeCrc16(data, pos, fragDataLen);
             if (actualCrc != expectedCrc)
+            {
+                Logger.Warn("CRC16 mismatch on frameId={0} fragIdx={1}/{2} — fragment discarded",
+                    frameId, fragIdx, fragCount);
                 return; // Corrupted fragment — discard
+            }
 
             // FrameId ordering — three cases:
             //   frameId > _currentFrameId: newer frame arrived, discard old partial (real-time semantics)
@@ -97,6 +126,10 @@ namespace EasyRDP.Core.Transport
             }
             else if (frameId < _currentFrameId)
             {
+                _staleFrameRejectCount++;
+                if (_staleFrameRejectCount <= 3 || _staleFrameRejectCount % 100 == 0)
+                    Logger.Warn("Stale fragment discarded: frameId={0} < current={1} fragIdx={2}/{3} (total stale={4})",
+                        frameId, _currentFrameId, fragIdx, fragCount, _staleFrameRejectCount);
                 return; // Old frame fragment — discard
             }
 
@@ -104,6 +137,9 @@ namespace EasyRDP.Core.Transport
             // restart to prevent dead state. Real-time protocol: old incomplete frames are worthless.
             if (_reassemblyTimer.ElapsedMilliseconds > Constants.FragmentReassembleTimeoutMs)
             {
+                Logger.Warn("Reassembly timeout for frameId={0} after {1}ms (received {2}/{3} fragments)",
+                    _currentFrameId, _reassemblyTimer.ElapsedMilliseconds,
+                    _receivedFragCount, _expectedFragCount);
                 StartNewFrame(frameId, messageType, totalPayloadLen, fragCount);
             }
 
@@ -154,11 +190,17 @@ namespace EasyRDP.Core.Transport
                 }
             }
 
+            // Capture fragCount before reset for logging
+            int fragCount = _expectedFragCount;
+
             // Reset state (keep _initialized=true to reject old frames)
             _expectedFragCount = 0;
             _receivedFragCount = 0;
             _fragBuffers = null;
             _reassemblyTimer.Reset();
+
+            Logger.Debug("Message assembled: sessionId={0} type=0x{1:X2} payloadLen={2} fragCount={3}",
+                sessionId, _messageType, fullPayload.Length, fragCount);
 
             // Deliver
             var handler = MessageReceived;

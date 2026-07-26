@@ -2,11 +2,14 @@ namespace EasyRDP.Core.Transport
 {
     using System;
     using EasyRDP.Core.Protocol;
+    using NLog;
     /// <summary>
     /// Framing 缓冲区。把 TCP 字节流按 Magic+Type+PayloadLen 切分为完整的线格式分片。
     /// </summary>
     public class FramingBuffer
     {
+        private static readonly Logger Logger = LogManager.GetCurrentClassLogger();
+
         private byte[] _buffer = new byte[65536];
         private int _bufferPos;
 
@@ -53,6 +56,14 @@ namespace EasyRDP.Core.Transport
 
             if (start < 0)
             {
+                if (_bufferPos > 0)
+                {
+                    // 流失步：缓冲区内无有效帧头。附加首 16 字节 hex 帮助诊断协议错位。
+                    int dumpLen = _bufferPos < 16 ? _bufferPos : 16;
+                    string hex = BitConverter.ToString(_buffer, 0, dumpLen);
+                    Logger.Warn("FramingBuffer: discarding {0} bytes — no valid frame magic found, first {1} bytes: {2}",
+                        _bufferPos, dumpLen, hex);
+                }
                 _bufferPos = 0; // No valid frame start found, discard all
                 return false;
             }
@@ -81,6 +92,8 @@ namespace EasyRDP.Core.Transport
             if (totalPayloadLen > Constants.MaxSafePayloadSize)
             {
                 // Payload too large — possible DoS, discard
+                Logger.Warn("FramingBuffer: oversized payload rejected ({0} bytes, max {1})",
+                    totalPayloadLen, Constants.MaxSafePayloadSize);
                 Buffer.BlockCopy(_buffer, 1, _buffer, 0, _bufferPos - 1);
                 _bufferPos--;
                 return true;

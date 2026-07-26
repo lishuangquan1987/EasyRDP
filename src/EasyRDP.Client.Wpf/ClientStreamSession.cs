@@ -4,6 +4,7 @@ using EasyRDP.Core.Protocol;
 using EasyRDP.Core.Rendering;
 using EasyRDP.Core.Session;
 using EasyRDP.Core.Transport;
+using NLog;
 
 namespace EasyRDP.Client.Wpf
 {
@@ -12,6 +13,8 @@ namespace EasyRDP.Client.Wpf
     /// </summary>
     public class ClientStreamSession : IClientStreamSession
     {
+        private static readonly Logger Logger = LogManager.GetCurrentClassLogger();
+
         private ITransportClient _transport;
         private IVideoDecoder _decoder;
         private FrameBuffer _frameBuffer;
@@ -21,6 +24,7 @@ namespace EasyRDP.Client.Wpf
         private Thread _receiveThread;
         private Thread _renderThread;
         private long _frameCount;
+        private int _decodeFailures;
 
         /// <summary>Gets the negotiated video codec used for decoding.</summary>
         public CodecId Codec { get; private set; }
@@ -45,9 +49,12 @@ namespace EasyRDP.Client.Wpf
         public void InitPipeline(CodecId codec, int width, int height)
         {
             Codec = codec;
+            Logger.Info("InitPipeline: codec={0} resolution={1}x{2}", codec, width, height);
             _decoder = DecoderFactory.Create(codec);
             if (_decoder != null)
                 _decoder.Initialize(width, height);
+            else
+                Logger.Error("InitPipeline: decoder not available for codec {0} — H264 decoding is mandatory", codec);
             _frameBuffer = new FrameBuffer();
             if (_renderTarget != null)
                 _renderTarget.Resize(width, height);
@@ -76,6 +83,7 @@ namespace EasyRDP.Client.Wpf
         /// <summary>Stops the stream session, terminates background threads, and cleans up resources.</summary>
         public void Stop()
         {
+            Logger.Info("ClientStreamSession stopping, frames received: {0} decodeFailures: {1}", _frameCount, _decodeFailures);
             _running = false;
             if (_transport != null)
                 _transport.DataReceived -= OnDataReceived;
@@ -87,6 +95,7 @@ namespace EasyRDP.Client.Wpf
             _decoder = null;
             _frameBuffer?.Reset();
             _frameBuffer = null;
+            Logger.Info("ClientStreamSession stopped");
         }
 
         /// <summary>Disposes the session by stopping all activity and releasing resources.</summary>
@@ -162,10 +171,17 @@ namespace EasyRDP.Client.Wpf
         private void ProcessVideoFrame(VideoFrameMessage msg)
         {
             if (_frameBuffer == null) return;
+            if (msg.Data == null || msg.Data.Length == 0)
+            {
+                Logger.Warn("VideoFrame empty data: seq={0} size={1}x{2} — skipped", msg.SequenceNumber, msg.Width, msg.Height);
+                return;
+            }
 
             // Resolution change
             if (_decoder != null && (msg.Width != FrameWidth || msg.Height != FrameHeight))
             {
+                Logger.Info("Resolution changed: {0}x{1} -> {2}x{3}",
+                    FrameWidth, FrameHeight, msg.Width, msg.Height);
                 _decoder.Reset();
                 _decoder.Initialize(msg.Width, msg.Height);
                 _renderTarget?.Resize(msg.Width, msg.Height);
@@ -175,21 +191,32 @@ namespace EasyRDP.Client.Wpf
             byte[] writeSlot = _frameBuffer.BorrowWriteBuffer(frameSize);
             if (writeSlot == null) return;
 
-            if (_decoder != null)
+            if (_decoder == null)
             {
-                var result = _decoder.Decode(msg.Data, writeSlot);
-                if (result.Status != DecodeStatus.Ok)
-                    return;
+                // 解码器不可用 — 无法处理 H264 数据，丢弃此帧
+                if (_frameCount == 0)
+                    Logger.Error("No decoder available, cannot decode H264 frame seq={0}", msg.SequenceNumber);
+                return;
             }
-            else
+
+            var result = _decoder.Decode(msg.Data, writeSlot);
+            if (result.Status != DecodeStatus.Ok)
             {
-                // Fallback: raw pixels
-                int copyLen = Math.Min(msg.Data.Length, writeSlot.Length);
-                Buffer.BlockCopy(msg.Data, 0, writeSlot, 0, copyLen);
+                _decodeFailures++;
+                if (_decodeFailures <= 3 || _decodeFailures % 50 == 0)
+                    Logger.Warn("Decode failed: status={0} seq={1} keyframe={2} dataLen={3} (total failures={4})",
+                        result.Status, msg.SequenceNumber, msg.IsKeyframe, msg.Data.Length, _decodeFailures);
+                return;
             }
 
             _frameBuffer.CommitFrame(msg.Width, msg.Height);
             Interlocked.Increment(ref _frameCount);
+
+            if (_frameCount == 1)
+                Logger.Info("FIRST frame decoded: seq={0} size={1}x{2} keyframe={3} dataLen={4}",
+                    msg.SequenceNumber, msg.Width, msg.Height, msg.IsKeyframe, msg.Data.Length);
+            else if (_frameCount % 100 == 0)
+                Logger.Debug("Frames decoded: {0}, last seq={1} dataLen={2}", _frameCount, msg.SequenceNumber, msg.Data.Length);
         }
 
         private void ProcessCursorUpdate(CursorUpdateMessage msg)
