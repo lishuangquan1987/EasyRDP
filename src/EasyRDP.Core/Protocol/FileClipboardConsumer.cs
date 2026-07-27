@@ -10,9 +10,10 @@ namespace EasyRDP.Core.Protocol
 
     /// <summary>
     /// 文件剪贴板延迟渲染 — 接收方。收到 ClipFormatList 后启动后台下载线程，
-    /// 通过 ClipFileContentsReq/Res 按需拉取文件内容（64KB/块），写入临时文件。
+    /// 通过 ClipFileContentsReq/Res 按需拉取文件内容，写入临时文件。
     /// 下载完成后调用 onFinish 回调，参数为本地文件路径数组。
     /// 接收方控制下载速率，避免灌满 TCP 连接。
+    /// 并发流水线：同时维护 Concurrency 个 in-flight 请求，减少 RTT 串行等待。
     /// </summary>
     public class FileClipboardConsumer
     {
@@ -20,18 +21,22 @@ namespace EasyRDP.Core.Protocol
 
         /// <summary>
         /// 单次请求的块大小（1MB）。
-        /// 之前为 64KB，6GB 文件需要 98304 次请求-响应往返，速度仅 0.6 MB/s。
-        /// 增大到 1MB 后请求数降至 6144，结合 Provider 的 FileStream 缓存，
-        /// 速度预计提升约 50 倍（6GB 文件约 2-5 分钟，取决于网络和磁盘）。
         /// 1MB 块会被 MessageReassembler 分片为约 744 个 1400 字节 TCP 包连续发送，
         /// 利用 TCP 流水线，无需额外并发控制。
         /// </summary>
         private const int ChunkSize = 1024 * 1024;
 
         /// <summary>
+        /// 并发请求数（滑动窗口大小）。
+        /// Consumer 同时发 Concurrency 个 FileContentsReq，收到响应后立即发下一个。
+        /// 相比串行模式，减少 RTT 串行等待，6GB 文件预计从 184 秒降到约 52 秒。
+        /// 8 路是经验值：太少(1-2)提升有限，太多(16+)会争抢 _sendLock 并占用内存。
+        /// </summary>
+        private const int Concurrency = 8;
+
+        /// <summary>
         /// 单次请求超时（30秒）。
-        /// 之前为 10 秒，但 1MB 块在低速网络下传输可能超过 10 秒
-        /// （1MB / 1Mbps = 8 秒，加上磁盘 I/O 和分片开销）。
+        /// 1MB 块在低速网络下传输可能较慢（1MB / 1Mbps = 8 秒），
         /// 30 秒超时对局域网和广域网都足够。
         /// </summary>
         private const int RequestTimeoutMs = 30000;
@@ -46,6 +51,13 @@ namespace EasyRDP.Core.Protocol
             = new ConcurrentDictionary<uint, TaskCompletionSource<byte[]>>();
         private int _streamIdSeq;
         private volatile bool _cancelled;
+
+        /// <summary>
+        /// 进度变化事件：(downloadedBytes, totalBytes)。
+        /// 每个块下载完成后触发，调用方可用于更新 UI 进度条。
+        /// 在下载线程触发，调用方需自行 marshal 到 UI 线程。
+        /// </summary>
+        public event Action<long, long> ProgressChanged;
 
         /// <summary>
         /// 构造文件剪贴板延迟渲染接收方。
@@ -108,8 +120,9 @@ namespace EasyRDP.Core.Protocol
         }
 
         /// <summary>
-        /// 后台线程：逐文件、逐块下载。每块 64KB，通过 TaskCompletionSource
-        /// 等待接收线程的响应，实现接收方控速。
+        /// 后台线程：逐文件下载，每个文件内部用 Concurrency 路并发流水线拉取块。
+        /// 滑动窗口模式：同时发 Concurrency 个请求，每收到一个响应就发下一个。
+        /// 相比串行模式，减少 RTT 串行等待，大幅提升吞吐量。
         /// </summary>
         private void DownloadFiles()
         {
@@ -117,6 +130,13 @@ namespace EasyRDP.Core.Protocol
             {
                 Directory.CreateDirectory(_tempDir);
                 var localPaths = new List<string>();
+
+                // 计算总大小（用于进度报告）
+                long totalSize = 0;
+                foreach (var f in _files) totalSize += f.FileSize > 0 ? f.FileSize : 0;
+                long totalDownloaded = 0;
+                int lastReportedPercent = -1;
+                object progressLock = new object();
 
                 for (int fileIdx = 0; fileIdx < _files.Count; fileIdx++)
                 {
@@ -135,95 +155,44 @@ namespace EasyRDP.Core.Protocol
                         continue;
                     }
 
-                    bool downloadSuccess = false;
-                    try
-                    {
-                        long position = 0;
-                        using (var fs = new FileStream(localPath, FileMode.Create, FileAccess.Write, FileShare.Read))
+                    bool downloadSuccess = DownloadFileConcurrent(fileIdx, meta, localPath,
+                        delta =>
                         {
-                            while (position < meta.FileSize && !_cancelled)
+                            // 线程安全的进度累加
+                            long downloaded = Interlocked.Add(ref totalDownloaded, delta);
+                            // lock 保护 lastReportedPercent 读写（多 Task 并发回调）
+                            lock (progressLock)
                             {
-                                uint streamId = (uint)Interlocked.Increment(ref _streamIdSeq);
-                                var tcs = new TaskCompletionSource<byte[]>();
-                                _pendingRequests[streamId] = tcs;
-
-                                var req = new ClipFileContentsReqMessage
+                                int percent = totalSize > 0 ? (int)((downloaded * 100) / totalSize) : 0;
+                                if (percent != lastReportedPercent)
                                 {
-                                    TransferId = _transferId,
-                                    StreamId = streamId,
-                                    FileIndex = fileIdx,
-                                    Flags = ClipFileContentsReqMessage.FlagRange,
-                                    Position = position,
-                                    RequestedSize = ChunkSize
-                                };
-
-                                try
-                                {
-                                    byte[] reqPayload = req.Pack();
-                                    _sendAction(0, reqPayload);
-                                }
-                                catch (Exception ex)
-                                {
-                                    Logger.Warn(ex, "Send FileContentsReq failed: streamId={0} fileIdx={1}", streamId, fileIdx);
-                                    _pendingRequests.TryRemove(streamId, out tcs);
-                                    break;
-                                }
-
-                                byte[] data;
-                                try
-                                {
-                                    Task waitTask = tcs.Task;
-                                    if (!waitTask.Wait(RequestTimeoutMs))
+                                    lastReportedPercent = percent;
+                                    try
                                     {
-                                        Logger.Warn("FileContentsReq timeout: streamId={0} fileIdx={1} pos={2}",
-                                            streamId, fileIdx, position);
-                                        _pendingRequests.TryRemove(streamId, out tcs);
-                                        break;
+                                        var handler = ProgressChanged;
+                                        if (handler != null) handler(downloaded, totalSize);
                                     }
-                                    data = tcs.Task.Result;
+                                    catch (Exception ex) { Logger.Warn(ex, "ProgressChanged callback failed"); }
                                 }
-                                catch (Exception ex)
-                                {
-                                    Logger.Warn(ex, "FileContentsReq response error: streamId={0} fileIdx={1}", streamId, fileIdx);
-                                    break;
-                                }
-
-                                if (data == null || data.Length == 0)
-                                {
-                                    Logger.Warn("FileContentsReq returned empty data: fileIdx={0} pos={1}", fileIdx, position);
-                                    break;
-                                }
-
-                                fs.Write(data, 0, data.Length);
-                                position += data.Length;
                             }
-                        }
+                        });
 
-                        // 下载完整（position == meta.FileSize）或被取消但已写入部分数据时，视为成功
-                        // 否则视为失败：从 localPaths 移除并删除部分文件
-                        if (position == meta.FileSize)
-                        {
-                            downloadSuccess = true;
-                            Logger.Info("File {0}/{1}: '{2}' downloaded {3}/{4} bytes",
-                                fileIdx + 1, _files.Count, meta.FileName, position, meta.FileSize);
-                        }
-                        else
-                        {
-                            Logger.Warn("File {0}/{1}: '{2}' incomplete download {3}/{4} bytes — removed from results",
-                                fileIdx + 1, _files.Count, meta.FileName, position, meta.FileSize);
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        Logger.Warn(ex, "Download file failed: fileIdx={0} name={1}", fileIdx, meta.FileName);
-                    }
-
-                    // 下载失败：从 localPaths 移除并删除部分文件
                     if (!downloadSuccess)
                     {
                         localPaths.RemoveAt(localPaths.Count - 1);
                         try { if (File.Exists(localPath)) File.Delete(localPath); } catch { }
                     }
+                }
+
+                // 最终进度报告（100%）
+                if (!_cancelled && totalSize > 0)
+                {
+                    try
+                    {
+                        var handler = ProgressChanged;
+                        if (handler != null) handler(totalSize, totalSize);
+                    }
+                    catch { }
                 }
 
                 if (!_cancelled && localPaths.Count > 0)
@@ -241,6 +210,165 @@ namespace EasyRDP.Core.Protocol
             {
                 Logger.Warn(ex, "FileClipboardConsumer DownloadFiles failed: transferId={0}", _transferId);
             }
+        }
+
+        /// <summary>
+        /// 并发下载单个文件：用 SemaphoreSlim 控制最多 Concurrency 个 in-flight 请求。
+        /// 每个块在独立 Task 中等待响应，收到后按 position 写入文件（lock 保护 FileStream）。
+        /// 所有块发完后，Task.WaitAll 等待全部完成。
+        /// </summary>
+        /// <param name="fileIdx">文件索引。</param>
+        /// <param name="meta">文件元信息。</param>
+        /// <param name="localPath">本地保存路径。</param>
+        /// <param name="onChunkCompleted">块下载完成回调，参数为本块字节数。</param>
+        /// <returns>true 表示下载完整；false 表示失败或不完整。</returns>
+        private bool DownloadFileConcurrent(int fileIdx, ClipFormatListMessage.FileMeta meta,
+            string localPath, Action<long> onChunkCompleted)
+        {
+            long fileSize = meta.FileSize;
+            int totalChunks = (int)((fileSize + ChunkSize - 1) / ChunkSize);
+            var semaphore = new SemaphoreSlim(Concurrency);
+            object writeLock = new object();
+            int failedFlag = 0; // 0=ok, 1=failed (Volatile 读写)
+            int completedChunks = 0;
+
+            using (var fs = new FileStream(localPath, FileMode.Create, FileAccess.Write, FileShare.Read))
+            {
+                var tasks = new List<Task>();
+
+                for (int chunkIdx = 0; chunkIdx < totalChunks; chunkIdx++)
+                {
+                    if (_cancelled || Volatile.Read(ref failedFlag) == 1) break;
+
+                    // 等待窗口空位：最多 Concurrency 个 in-flight
+                    semaphore.Wait();
+
+                    long reqPos = (long)chunkIdx * ChunkSize;
+                    int toRead = (int)Math.Min(ChunkSize, fileSize - reqPos);
+
+                    // 捕获局部变量供 lambda 使用
+                    long capturedPos = reqPos;
+                    int capturedRead = toRead;
+                    int capturedChunkIdx = chunkIdx;
+
+                    var task = Task.Run(async () =>
+                    {
+                        try
+                        {
+                            uint streamId = (uint)Interlocked.Increment(ref _streamIdSeq);
+                            var tcs = new TaskCompletionSource<byte[]>();
+                            _pendingRequests[streamId] = tcs;
+
+                            var req = new ClipFileContentsReqMessage
+                            {
+                                TransferId = _transferId,
+                                StreamId = streamId,
+                                FileIndex = fileIdx,
+                                Flags = ClipFileContentsReqMessage.FlagRange,
+                                Position = capturedPos,
+                                RequestedSize = capturedRead
+                            };
+
+                            try
+                            {
+                                byte[] reqPayload = req.Pack();
+                                _sendAction(0, reqPayload);
+                            }
+                            catch (Exception ex)
+                            {
+                                Logger.Warn(ex, "Send FileContentsReq failed: streamId={0} chunkIdx={1}",
+                                    streamId, capturedChunkIdx);
+                                _pendingRequests.TryRemove(streamId, out tcs);
+                                Volatile.Write(ref failedFlag, 1);
+                                return;
+                            }
+
+                            // 等待响应或超时
+                            var winner = await Task.WhenAny(tcs.Task, Task.Delay(RequestTimeoutMs));
+                            if (winner != tcs.Task)
+                            {
+                                _pendingRequests.TryRemove(streamId, out tcs);
+                                Logger.Warn("FileContentsReq timeout: streamId={0} chunkIdx={1} pos={2}",
+                                    streamId, capturedChunkIdx, capturedPos);
+                                Volatile.Write(ref failedFlag, 1);
+                                return;
+                            }
+
+                            byte[] data;
+                            try
+                            {
+                                data = await tcs.Task;
+                            }
+                            catch (Exception ex)
+                            {
+                                Logger.Warn(ex, "FileContentsReq response error: streamId={0} chunkIdx={1}",
+                                    streamId, capturedChunkIdx);
+                                Volatile.Write(ref failedFlag, 1);
+                                return;
+                            }
+
+                            if (data == null || data.Length == 0)
+                            {
+                                Logger.Warn("FileContentsReq returned empty data: chunkIdx={0} pos={1}",
+                                    capturedChunkIdx, capturedPos);
+                                Volatile.Write(ref failedFlag, 1);
+                                return;
+                            }
+
+                            // 按 position 写入文件（lock 保护 FileStream 线程安全）
+                            lock (writeLock)
+                            {
+                                fs.Seek(capturedPos, SeekOrigin.Begin);
+                                fs.Write(data, 0, data.Length);
+                            }
+
+                            Interlocked.Increment(ref completedChunks);
+                            var chunkHandler = onChunkCompleted;
+                            if (chunkHandler != null) chunkHandler(data.Length);
+                        }
+                        catch (Exception ex)
+                        {
+                            Logger.Warn(ex, "DownloadChunk failed: chunkIdx={0} pos={1}",
+                                capturedChunkIdx, capturedPos);
+                            Volatile.Write(ref failedFlag, 1);
+                        }
+                        finally
+                        {
+                            // 必须释放 semaphore 许可，否则窗口耗尽后死锁
+                            // （所有 return 分支和异常都必须执行此操作）
+                            semaphore.Release();
+                        }
+                    });
+
+                    tasks.Add(task);
+                }
+
+                // 等待所有 in-flight 请求完成
+                try { Task.WaitAll(tasks.ToArray()); }
+                catch (Exception ex) { Logger.Warn(ex, "Task.WaitAll failed during download"); }
+
+                // 确保数据刷到磁盘
+                try { fs.Flush(true); } catch { }
+            }
+
+            bool success = Volatile.Read(ref failedFlag) == 0
+                && completedChunks == totalChunks
+                && !_cancelled;
+
+            if (success)
+            {
+                Logger.Info("File {0}/{1}: '{2}' downloaded {3}/{4} bytes (chunks={5}, concurrency={6})",
+                    fileIdx + 1, _files.Count, meta.FileName, fileSize, fileSize,
+                    completedChunks, Concurrency);
+            }
+            else
+            {
+                Logger.Warn("File {0}/{1}: '{2}' incomplete download {3}/{4} bytes (chunks={5}/{6})",
+                    fileIdx + 1, _files.Count, meta.FileName,
+                    (long)completedChunks * ChunkSize, fileSize, completedChunks, totalChunks);
+            }
+
+            return success;
         }
 
         /// <summary>把文件名转换为本地安全的文件名。</summary>

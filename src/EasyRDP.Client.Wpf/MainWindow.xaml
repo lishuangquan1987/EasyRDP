@@ -5,6 +5,10 @@
         MinHeight="480" MinWidth="640"
         WindowStartupLocation="CenterScreen"
         KeyDown="Window_KeyDown" KeyUp="Window_KeyUp">
+    <Window.Resources>
+        <!-- WPF 内置转换器：bool → Visibility（IsClipboardTransferring 控制进度条可见性） -->
+        <BooleanToVisibilityConverter x:Key="BoolToVis"/>
+    </Window.Resources>
     <Grid>
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -75,7 +79,26 @@
                 MouseUp="RenderImage_MouseUp"
                 MouseWheel="RenderImage_MouseWheel"
                 Focusable="True">
-            <Image x:Name="RenderImage" Source="{Binding RenderBitmap}" Stretch="Uniform"/>
+            <Grid>
+                <Image x:Name="RenderImage" Source="{Binding RenderBitmap}" Stretch="Uniform"/>
+
+                <!-- 文件剪贴板传输进度条：叠加在桌面显示区顶部，半透明黑色背景 -->
+                <!-- IsHitTestVisible=False 让鼠标穿透，不拦截远程桌面点击 -->
+                <Border HorizontalAlignment="Center" VerticalAlignment="Top"
+                        Margin="0,12,0,0" Padding="20,10"
+                        Background="#E0000000" CornerRadius="6"
+                        IsHitTestVisible="False"
+                        Visibility="{Binding IsClipboardTransferring, Converter={StaticResource BoolToVis}}">
+                    <StackPanel Orientation="Vertical">
+                        <TextBlock Text="{Binding ClipboardProgressText}"
+                                   Foreground="White" HorizontalAlignment="Center" Margin="0,0,0,6"
+                                   FontSize="13"/>
+                        <ProgressBar Value="{Binding ClipboardProgressValue}"
+                                     Maximum="100" Width="320" Height="8"
+                                     Foreground="#4CAF50" Background="#40000000"/>
+                    </StackPanel>
+                </Border>
+            </Grid>
         </Border>
 
         <!-- ====== 底部：状态栏 ====== -->

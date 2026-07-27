@@ -72,6 +72,11 @@ namespace EasyRDP.Client.Wpf
         // 图片块大小（64KB）：与服务端一致
         private const int ImageChunkSize = 64 * 1024;
 
+        // 文件剪贴板下载进度：用于 UI 进度条显示
+        private bool _isClipboardTransferring;
+        private double _clipboardProgressValue;
+        private string _clipboardProgressText = "";
+
         // 心跳定时器：客户端每 10 秒主动发一次 Keepalive，避免服务端 _lastActivity 超时（45s）断开。
         // 必须由客户端主动发，因为服务端 _lastActivity 只在收到客户端应用层消息时更新；
         // 客户端最小化时无输入事件，若不发心跳，服务端会在 45s 后判定超时主动断开。
@@ -174,6 +179,27 @@ namespace EasyRDP.Client.Wpf
             get { return _frameRate > 0 ? string.Format("{0} FPS", _frameRate) : "—"; }
         }
 
+        /// <summary>文件剪贴板是否正在传输，控制进度条可见性。</summary>
+        public bool IsClipboardTransferring
+        {
+            get { return _isClipboardTransferring; }
+            set { _isClipboardTransferring = value; OnPropertyChanged(nameof(IsClipboardTransferring)); }
+        }
+
+        /// <summary>文件剪贴板下载进度值（0-100）。</summary>
+        public double ClipboardProgressValue
+        {
+            get { return _clipboardProgressValue; }
+            set { _clipboardProgressValue = value; OnPropertyChanged(nameof(ClipboardProgressValue)); }
+        }
+
+        /// <summary>文件剪贴板下载进度文本，如 "传输中: 45% (2.7GB / 6GB)"。</summary>
+        public string ClipboardProgressText
+        {
+            get { return _clipboardProgressText; }
+            set { _clipboardProgressText = value; OnPropertyChanged(nameof(ClipboardProgressText)); }
+        }
+
         public RelayCommand ConnectCommand { get; }
         public RelayCommand StartTestCommand { get; }
         public RelayCommand StopCommand { get; }
@@ -270,6 +296,8 @@ namespace EasyRDP.Client.Wpf
             _streamSession.ClipboardReceived += OnClipboardReceivedFromServer;
             // 订阅文件剪贴板同步事件：服务端用户复制文件 → 客户端写入临时目录并设置 CF_HDROP
             _streamSession.FileClipboardReceived += OnFileClipboardReceivedFromServer;
+            // 订阅文件剪贴板下载进度事件：更新 UI 进度条
+            _streamSession.FileClipboardProgress += OnFileClipboardProgress;
             // 订阅图片剪贴板同步事件：服务端用户复制图片 → 客户端设置 CF_DIB
             _streamSession.ImageClipboardReceived += OnImageClipboardReceivedFromServer;
 
@@ -549,6 +577,7 @@ namespace EasyRDP.Client.Wpf
         private void OnFileClipboardReceivedFromServer(string[] localFilePaths)
         {
             if (localFilePaths == null || localFilePaths.Length == 0) return;
+            if (!_running) return; // 断连后忽略，避免设置剪贴板
             _dispatcher.Invoke(() =>
             {
                 try
@@ -566,12 +595,44 @@ namespace EasyRDP.Client.Wpf
                     Logger.Info("File clipboard set from server: count={0}", localFilePaths.Length);
                     foreach (var p in localFilePaths)
                         Logger.Info("  - {0}", p);
+
+                    // 文件已设置到剪贴板，隐藏进度条
+                    IsClipboardTransferring = false;
                 }
                 catch (Exception ex)
                 {
                     Logger.Warn(ex, "File clipboard set from server failed");
+                    IsClipboardTransferring = false;
                 }
             });
+        }
+
+        /// <summary>
+        /// 文件剪贴板下载进度回调。在下载线程触发，需 marshal 到 UI 线程更新进度条属性。
+        /// 参数：(downloadedBytes, totalBytes)。
+        /// 断连后(_running=false)忽略回调，避免进度条闪现。
+        /// </summary>
+        private void OnFileClipboardProgress(long downloaded, long total)
+        {
+            if (total <= 0 || !_running) return;
+            _dispatcher.BeginInvoke(new Action(() =>
+            {
+                if (!_running) return;
+                IsClipboardTransferring = true;
+                double percent = (double)downloaded * 100.0 / total;
+                ClipboardProgressValue = percent;
+                ClipboardProgressText = string.Format("传输中: {0:F1}% ({1} / {2})",
+                    percent, FormatBytes(downloaded), FormatBytes(total));
+            }));
+        }
+
+        /// <summary>把字节数格式化为可读字符串（如 "2.7GB"）。</summary>
+        private static string FormatBytes(long bytes)
+        {
+            if (bytes < 1024) return bytes + " B";
+            if (bytes < 1024 * 1024) return string.Format("{0:F1} KB", bytes / 1024.0);
+            if (bytes < 1024L * 1024 * 1024) return string.Format("{0:F1} MB", bytes / (1024.0 * 1024));
+            return string.Format("{0:F2} GB", bytes / (1024.0 * 1024 * 1024));
         }
 
         /// <summary>
@@ -846,6 +907,10 @@ namespace EasyRDP.Client.Wpf
             FrameSize = "—";
             FrameRate = 0;
             CodecName = "—";
+            // 重置剪贴板进度条状态（断开连接时隐藏）
+            IsClipboardTransferring = false;
+            ClipboardProgressValue = 0;
+            ClipboardProgressText = "";
             SetBusy(false, "Disconnected");
         }
 

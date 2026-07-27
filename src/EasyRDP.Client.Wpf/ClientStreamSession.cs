@@ -88,6 +88,14 @@ namespace EasyRDP.Client.Wpf
             if (_transport != null)
                 _transport.DataReceived -= OnDataReceived;
 
+            // 取消所有正在进行的文件剪贴板下载，避免断连后后台线程继续向已关闭的 transport 发送请求
+            // Cancel 只设置标志位，in-flight 的请求仍会等超时退出，但不会发新请求
+            foreach (var kv in _clipConsumers)
+            {
+                try { kv.Value.Cancel(); } catch { }
+            }
+            _clipConsumers.Clear();
+
             _receiveThread?.Join(3000);
             _renderThread?.Join(3000);
 
@@ -170,6 +178,13 @@ namespace EasyRDP.Client.Wpf
         /// 参数为客户端本地临时文件的路径数组。
         /// </summary>
         public event Action<string[]> FileClipboardReceived;
+
+        /// <summary>
+        /// 文件剪贴板下载进度事件：(downloadedBytes, totalBytes)。
+        /// 在下载线程触发，订阅者需自行 marshal 到 UI 线程。
+        /// 用于 UI 进度条显示。
+        /// </summary>
+        public event Action<long, long> FileClipboardProgress;
 
         /// <summary>
         /// 收到服务端发来的图片剪贴板传输完成事件。订阅者必须在 UI 线程（STA）调用 Clipboard.SetImage。
@@ -313,6 +328,16 @@ namespace EasyRDP.Client.Wpf
                     });
 
                 _clipConsumers[msg.TransferId] = consumer;
+
+                // 转发 Consumer 进度事件到本 Session 的 FileClipboardProgress 事件
+                // 订阅者（如 MainWindowViewModel）用于更新 UI 进度条
+                consumer.ProgressChanged += (downloaded, total) =>
+                {
+                    var handler = FileClipboardProgress;
+                    if (handler != null)
+                        handler(downloaded, total);
+                };
+
                 consumer.StartDownload();
             }
             catch (Exception ex)

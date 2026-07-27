@@ -830,6 +830,22 @@ namespace EasyRDP.Server.Wpf
                     });
 
                 _serverClipConsumers[key] = consumer;
+
+                // 里程碑式进度日志：每 10% 记录一次，避免日志过多
+                int lastMilestone = -1;
+                consumer.ProgressChanged += (downloaded, total) =>
+                {
+                    if (total <= 0) return;
+                    int percent = (int)((downloaded * 100) / total);
+                    int milestone = percent / 10 * 10; // 0, 10, 20, ..., 100
+                    if (milestone > lastMilestone)
+                    {
+                        lastMilestone = milestone;
+                        Logger.Info("Server clipboard download progress: session={0} transferId={1} {2}% ({3} / {4} bytes)",
+                            e.SessionId, msg.TransferId, milestone, downloaded, total);
+                    }
+                };
+
                 consumer.StartDownload();
                 Logger.Info("Server received ClipFormatList: session={0} transferId={1} fileCount={2}",
                     e.SessionId, msg.TransferId, msg.Files.Count);
