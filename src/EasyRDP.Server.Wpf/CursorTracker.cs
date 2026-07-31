@@ -17,6 +17,7 @@ namespace EasyRDP.Server.Wpf
     /// </summary>
     public class CursorTracker : ICursorTracker
     {
+        private static readonly NLog.Logger Logger = NLog.LogManager.GetCurrentClassLogger();
         private readonly ICursorCapturer _capturer;
         private Thread _pollThread;
         private volatile bool _running;
@@ -30,6 +31,7 @@ namespace EasyRDP.Server.Wpf
         private int _lastX, _lastY;
         private byte[] _lastShapeData;
         private bool _hasLastState;
+        private long _logCount;
 
         public int IntervalMs
         {
@@ -115,9 +117,12 @@ namespace EasyRDP.Server.Wpf
                 {
                     PollOnce();
                 }
-                catch
+                catch (Exception ex)
                 {
-                    // 单次轮询失败，跳过
+                    // 单次轮询失败，记录日志后跳过（不刷屏）
+                    _logCount++;
+                    if (_logCount == 1 || _logCount % 60 == 0)
+                        Logger.Warn(ex, "CursorTracker PollOnce failed (total={0})", _logCount);
                 }
                 Thread.Sleep(_intervalMs);
             }
@@ -195,6 +200,7 @@ namespace EasyRDP.Server.Wpf
     /// </summary>
     public class CursorTrackerSession : ICursorTrackerSession
     {
+        private readonly object _sendLock = new object();
         private readonly CursorTracker _owner;
         private Action<uint, byte[]> _sendTo;
         private uint _sessionId;
@@ -209,8 +215,11 @@ namespace EasyRDP.Server.Wpf
         /// <summary>注入本会话的发送回调。</summary>
         public void AttachSendTo(Action<uint, byte[]> sendTo, uint sessionId)
         {
-            _sendTo = sendTo;
-            _sessionId = sessionId;
+            lock (_sendLock)
+            {
+                _sendTo = sendTo;
+                _sessionId = sessionId;
+            }
         }
 
         /// <summary>启动本会话的光标追踪。</summary>
@@ -234,11 +243,18 @@ namespace EasyRDP.Server.Wpf
         /// <summary>由 CursorTracker 调用，发送光标更新。</summary>
         internal void SendCursorUpdate(byte[] payload)
         {
-            if (!_running || _sendTo == null) return;
+            Action<uint, byte[]> sendTo;
+            uint sessionId;
+            lock (_sendLock)
+            {
+                if (!_running || _sendTo == null) return;
+                sendTo = _sendTo;
+                sessionId = _sessionId;
+            }
             // 光标消息始终单分片，直接构建线格式发送，不经过 FragAndSend
             // 使用 frameId=0 避免与视频流的 FrameId 命名空间碰撞
             byte[] wire = BuildCursorWire(payload);
-            _sendTo(_sessionId, wire);
+            sendTo(sessionId, wire);
         }
 
         private static byte[] BuildCursorWire(byte[] payload)

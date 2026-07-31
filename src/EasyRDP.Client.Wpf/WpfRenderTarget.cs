@@ -21,6 +21,13 @@ namespace EasyRDP.Client.Wpf
         private bool _disposed;
         // 捕获构造时（UI 线程）的 Dispatcher，后续 RenderFrame/Resize 通过它转发到 UI 线程
         private readonly Dispatcher _uiDispatcher;
+        // 双缓冲拷贝槽：RenderFrame 先把像素从 FrameBuffer 读槽拷出再异步送 UI，
+        // 避免 (a) 同步 Invoke 与 UI 线程 Stop/Join 死锁；(b) BeginInvoke 异步执行时
+        // 写槽复用同一数组导致画面撕裂。最多缓存 2 帧，超出即丢旧帧（直播语义）。
+        private readonly object _renderLock = new object();
+        private byte[]? _pendingCopyA;
+        private byte[]? _pendingCopyB;
+        private int _pendingCount;
 
         /// <summary>渲染目标位图，WPF 窗口通过 Image.Source 绑定此属性。
         /// 必须在 UI 线程访问。</summary>
@@ -44,42 +51,74 @@ namespace EasyRDP.Client.Wpf
         }
 
         /// <summary>渲染一帧 BGRA 像素到 WriteableBitmap。
-        /// 可在任意线程调用 — 内部通过 Dispatcher 转发到 UI 线程执行 Lock/WritePixels/Unlock。</summary>
+        /// 可在任意线程调用 — 内部先拷贝像素，再通过 BeginInvoke 异步转发到 UI 线程执行
+        /// Lock/WritePixels/Unlock。异步转发不会阻塞渲染线程，杜绝 Stop/Join 死锁。</summary>
         public void RenderFrame(byte[] bgraPixels, int w, int h)
         {
+            // 已释放时静默忽略而非抛 ObjectDisposedException：
+            // 抛异常会杀死渲染线程，且 Stop 竞态下这是正常路径。
             if (_disposed)
-                throw new ObjectDisposedException("WpfRenderTarget");
+                return;
+            if (bgraPixels == null || w <= 0 || h <= 0)
+                return;
 
-            // 尺寸不匹配时先同步 Resize（必须完成才能继续渲染）
             if (_bitmap == null || w != _width || h != _height)
             {
-                Resize(w, h);
+                if (_uiDispatcher.CheckAccess())
+                {
+                    DoResize(w, h);
+                }
+                else
+                {
+                    // 跨线程尺寸变更（如分辨率切换）：异步创建新 bitmap，本帧丢弃。
+                    // 分辨率切换罕见，短暂丢帧远好于同步 Invoke 造成 UI/渲染线程互相等待。
+                    _uiDispatcher.BeginInvoke(new Action(() => DoResize(w, h)), DispatcherPriority.Render);
+                    return;
+                }
             }
 
-            // 同步转发到 UI 线程执行 WritePixels。
-            // 必须同步：渲染线程（RenderLoop）在 RenderFrame 返回后立即 ReleaseReadFrame，
-            // 若用 BeginInvoke 异步执行，解码线程可能在下一次 BorrowWriteBuffer 时复用同一块
-            // 像素缓冲，导致 WritePixels 读到被覆盖的数据（撕裂/花屏）。
-            // 注意：bitmap 可能在 Dispose 后被置 null，需在 delegate 内再次检查
-            var bitmap = _bitmap;
-            if (bitmap == null) return;
-
-            _uiDispatcher.Invoke(new Action(() =>
+            // 拷贝像素到私有槽位（在 ReleaseReadFrame 之前完成，读槽内容仍然有效）
+            byte[] slot = null;
+            lock (_renderLock)
             {
-                if (_disposed || bitmap != _bitmap) return;
-                bitmap.Lock();
+                if (_pendingCount < 2)
+                {
+                    slot = _pendingCount == 0 ? _pendingCopyA : _pendingCopyB;
+                    if (slot == null || slot.Length < bgraPixels.Length)
+                        slot = new byte[bgraPixels.Length];
+                    Buffer.BlockCopy(bgraPixels, 0, slot, 0, bgraPixels.Length);
+                    _pendingCount++;
+                }
+            }
+            if (slot == null)
+                return; // 双缓冲满：UI 线程繁忙，丢弃本帧（直播语义，不积压）
+
+            byte[] posted = slot;
+            _uiDispatcher.BeginInvoke(new Action(() =>
+            {
+                lock (_renderLock)
+                {
+                    if (_pendingCount > 0)
+                        _pendingCount--;
+                }
+                if (_disposed)
+                    return;
+                var bmp = _bitmap;
+                if (bmp == null || w != _width || h != _height)
+                    return;
+                bmp.Lock();
                 try
                 {
                     int stride = w * 4;
-                    bitmap.WritePixels(
+                    bmp.WritePixels(
                         new Int32Rect(0, 0, w, h),
-                        bgraPixels,
+                        posted,
                         stride,
                         0);
                 }
                 finally
                 {
-                    bitmap.Unlock();
+                    bmp.Unlock();
                 }
             }), DispatcherPriority.Render);
         }
@@ -98,7 +137,9 @@ namespace EasyRDP.Client.Wpf
         public void Resize(int w, int h)
         {
             if (_disposed)
-                throw new ObjectDisposedException("WpfRenderTarget");
+                return;
+            if (w <= 0 || h <= 0)
+                return;
 
             if (_uiDispatcher.CheckAccess())
             {
@@ -107,8 +148,9 @@ namespace EasyRDP.Client.Wpf
             }
             else
             {
-                // 跨线程调用 — 同步转发，确保返回后 bitmap 已就绪
-                _uiDispatcher.Invoke(new Action(() => DoResize(w, h)), DispatcherPriority.Normal);
+                // 跨线程调用 — 异步转发，避免同步 Invoke 阻塞调用线程
+                // （如接收线程在 Stop 期间调用 Resize 时与 UI 线程互相等待）。
+                _uiDispatcher.BeginInvoke(new Action(() => DoResize(w, h)), DispatcherPriority.Normal);
             }
         }
 

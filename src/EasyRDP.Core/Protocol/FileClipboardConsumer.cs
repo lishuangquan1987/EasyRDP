@@ -68,7 +68,9 @@ namespace EasyRDP.Core.Protocol
 
             public void Dispose()
             {
-                Done.Dispose();
+                // 不能 Dispose 事件：接收线程可能在 Cancel/超时路径同时调用 Done.Set()，
+                // Dispose 与 Set 并发会抛 ObjectDisposedException 杀死接收线程。
+                // 该对象生命周期短，等待者用完即释放引用，交给 GC 回收即可。
             }
         }
 #endif

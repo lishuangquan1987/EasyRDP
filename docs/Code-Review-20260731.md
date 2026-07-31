@@ -351,3 +351,113 @@ var args = $"push --version \"{version}\" --message \"{message}\"";
 - **`CaptureService` 调 `Marshal.FreeHGlobal(frame.Scan0)`**：与 `ScreenFrame`/`IScreenCapturer` 文档约定一致（caller MUST free Scan0）。
 - **`ServerStreamSession` A/B 缓冲所有权 / 双释放**：`_captureBufInUse[]` flag 在锁内获取，成功与异常路径均释放。
 - **XP / Go 1.10 兼容性**：client 无 `go.mod`、无 `strings.Cut`/`errors.Is`/`io/fs`/`embed`/泛型/`any`/`min`/`max`，`filepath.FromSlash` 用自实现 `filepathFromSlash` 替代，`build.bat` 正确设 `GOOS=windows GOARCH=386 GO111MODULE=off`。
+
+---
+
+## 八、复核与修复标记（2026-07-31 执行）
+
+> 说明：本报告所列问题已逐条对照当前源码复核。**确认存在**的已按上述建议修复；
+> **确认存在但未修改**的项在表中注明原因（多为设计取舍/纯风格/需单独迭代的行为变更）；
+> **未复现**表示当前源码中未找到报告描述的模式。
+
+### Critical
+
+| 项 | 复核结论 | 处理 |
+|----|----------|------|
+| A. H264DecoderNative 整数溢出绕过缓冲区检查 | 确认存在（`w*h*4` int 溢出，w/h 来自 SPS） | ✅ 已修复：`long` 运算 + `MaxSafePayloadSize`/16384 上限（`H264DecoderNative.cs`） |
+| B. 颜色光标半高错乱 | 确认存在（无条件 `/2` 且只读 hbmMask） | ✅ 已修复：`hbmColor != NULL` 走颜色路径，高度不除 2（`WindowsCursorCapturer.cs`） |
+| C. 单色光标 AND/XOR 互换 | 确认存在（下半读 AND、上半读 XOR） | ✅ 已修复：AND 读上半、XOR 读下半，颜色/黑白分路径（`WindowsCursorCapturer.cs`） |
+| D. aly 崩溃恢复销毁上一版本备份 | 确认存在（Applying 状态 MainFolder 存在时重跑替换并 `RemoveAll` 旧备份） | ✅ 已修复：versionDir 不存在即视为已应用，写状态+启动后直接返回（`apply_update.go`） |
+
+### High
+
+| 项 | 复核结论 | 处理 |
+|----|----------|------|
+| 1. 重组超时 5s 破坏大控制面消息 | 确认存在（计时器按总耗时，不按空闲） | ✅ 已修复：改为空闲超时（每分片重置）+ 按 payload 缩放 5s~120s（`MessageReassembler.cs`） |
+| 2. `FragAndSend` 静默截断 >91.7MB | 确认存在（`fragCount` 钳到 65535） | ✅ 已修复：显式 `InvalidOperationException`（`MessageReassembler.cs`） |
+| 3. `ConvertBgraToI420` 奇数尺寸越界 | 确认存在（uvSize=floor，U/V 写越界） | ✅ 已修复：编码器拒绝奇数尺寸 + 服务端取偶 + stride 向上取整（`H264EncoderNative.cs`/`H264Native.cs`/`ServerStreamSession.cs`） |
+| 4. `Stop`↔渲染线程 Join 死锁 | 确认存在（`WpfRenderTarget.RenderFrame` 同步 `Dispatcher.Invoke`） | ✅ 已修复：先拷贝像素再 `BeginInvoke`，双缓冲防撕裂（`WpfRenderTarget.cs`） |
+| 5. FatalError 回调二次死锁 | 确认存在（接收线程同步 `Invoke(Stop)`） | ✅ 已修复：改 `BeginInvoke` + 底层死锁已除（`MainWindowViewModel.cs`） |
+| 6. `_decoder`/`_frameBuffer` 竞态 | 确认存在（`Stop` 先停会话后断传输） | ✅ 已修复：先 `Disconnect()` 再 `StreamSession.Stop()`（`MainWindowViewModel.cs`） |
+| 7. 握手前不限连接数 | 确认存在（AcceptLoop 不设上限） | ✅ 已修复：pending 连接硬上限 16，超出直接断开（`TcpTransportServer.cs`） |
+| 8. 心跳保持发起点持锁阻塞 | 确认存在（`SendTo` 在 `_lock` 内） | ✅ 已修复：锁内只收集目标，锁外发送（`TransportHost.cs`） |
+| 9. `SendMouseMove` 不支持多显示器 | 确认存在（`SM_CXSCREEN` + 无 VIRTUALDESK） | ✅ 已修复：虚拟桌面范围 + `MOUSEEVENTF_VIRTUALDESK`（`WindowsInputSimulator.cs`/`MouseEventFlags.cs`） |
+| 10. GDI 位图泄漏（失败路径） | 确认存在（`SelectObject` 还原不在 finally） | ✅ 已修复：finally 中先还原选择再删除，并校验返回值（`WindowsScreenCapturer.cs`） |
+| 11. DXGI COM 泄漏 + 部分构造失败泄漏设备 | 确认存在（factory/output1 未释放；工厂 catch 未 Dispose） | ✅ 已修复：`try/finally` 释放全部 COM 局部变量，工厂 catch 中 Dispose 半构造实例（`DxgiScreenCapturer.cs`） |
+| 12. `CaptureRegion` 无越界校验 | 确认存在（CopyMemory 直读越界） | ✅ 已修复：负坐标/越界抛 `ArgumentOutOfRangeException`（`DxgiScreenCapturer.cs`） |
+| 13. `IsClipboardFormatAvailable` 空转 500ms | 确认存在（10×50ms 重试） | ✅ 已修复：单次调用（`WindowsClipboardService.cs`） |
+| 14. `version.json` 非原子写 | 确认存在（`ioutil.WriteFile` 截断式） | ✅ 已修复：`.tmp` + rename（`version.go`） |
+| 15. 服务端分片合并非原子 | 确认存在（`os.Create` 先截断目标） | ✅ 已修复：合并到 `.merging` 后原子 rename（`file_upload_controller.go`） |
+| 16. HTTP 无超时 | 确认存在 | ✅ 已修复：ReadHeader/Read/Write/Idle 超时（`main.go`） |
+| 17. 上传无大小限制 | 确认存在 | ✅ 已修复：单文件/分片/累计 1GB 上限（`file_upload_controller.go`） |
+| 18. `DownloadFile`/`CopyFile` 非原子 + Close 未检错 | 确认存在 | ✅ 已修复：`.part`/`.tmp` + rename + Close 检查 + 大小校验（`http_client.go`/`file.go`） |
+| 19. `ProcessService.Kill()` 不杀子进程树 | 确认存在（`Kill()` 等价 `Kill(false)`） | ✅ 已修复：`Kill(true)`（`ProcessService.cs`） |
+| 20. push 命令参数注入 | 确认存在（字符串拼接未转义引号） | ✅ 已修复：push/config/project 等全部改 `ProcessStartInfo.ArgumentList` 自动转义（`CliService.cs`/`ProcessService.cs`） |
+
+### Medium
+
+| 项 | 复核结论 | 处理 |
+|----|----------|------|
+| `frameId` uint 回绕 | 确认存在（无符号比较） | ✅ 已修复：有符号差值 `(int)(a-b)`（`MessageReassembler.cs`） |
+| `FramingBuffer` 末位 magic 被丢弃 | 确认存在（整缓冲丢弃会丢帧头） | ✅ 已修复：清空时保留末位 magic（`FramingBuffer.cs`） |
+| FPS 计数器永远为 0 | 确认存在（VM 的 `_frameBuffer` 与 session 不同） | ✅ 已修复：读 `_streamSession.FrameCount`（`MainWindowViewModel.cs`） |
+| `_serverImageReceivers` 断连未清理 | 确认存在（仅 End 时移除） | ✅ 已修复：`DisconnectSession` 按 sessionId 前缀清理（`TransportHost.cs`） |
+| 多会话共享 `IInputSimulator` 无锁 | 确认存在（SendInput 非线程安全） | ✅ 已修复：`WindowsInputSimulator` 静态 SendLock 串行化（`WindowsInputSimulator.cs`） |
+| `WpfRenderTarget.RenderFrame` 抛 ObjectDisposedException | 确认存在 | ✅ 已修复：`_disposed` 静默忽略（`WpfRenderTarget.cs`） |
+| `_transport.OnLog` 同步 Invoke | 确认存在 | ✅ 已修复：`BeginInvoke`（`MainWindowViewModel.cs`） |
+| `_heartbeatTimer.Dispose()` 未等回调 | 确认存在 | ✅ 已修复：`Dispose(WaitHandle)` + `WaitOne` + 回调内捕获局部 transport（`MainWindowViewModel.cs`） |
+| `ServerStreamSession.Stop` 孤儿已编码帧 | 确认存在（Stop 清空队列后仍可能入队） | ✅ 已修复：`_stopping` 时不再入队（`ServerStreamSession.cs`） |
+| `DxgiScreenCapturer` Reinitialize 失败后永久空帧 | 确认存在 | ✅ 已修复：`_needsInit` 自愈，每次调用重试（`DxgiScreenCapturer.cs`） |
+| `GetAllScreens` factory 泄漏 | 确认存在 | ✅ 已修复：逐级 try/finally 释放（`DxgiScreenCapturer.cs`） |
+| `CreateVideoEncoder` Win7 误判 | 确认存在（MF H.264 是 Win8+） | ✅ 已修复：阈值 `>= 2`（`WindowsDesktopFactory.cs`） |
+| `CaptureRegion` regionBuffer 泄漏 | 确认存在 | ✅ 已修复：catch 中释放（`DxgiScreenCapturer.cs`） |
+| `SelectObject` 返回值未校验 | 确认存在 | ✅ 已修复（`WindowsScreenCapturer.cs`） |
+| `db.SetMaxOpenConns(1)` 串行化 | 确认存在（SQLite 单写者限制） | 🔶 部分修复：启用 WAL + `busy_timeout`；单写连接保留（SQLite 本身串行写，开读写分离池收益有限且需改 ent 客户端结构） |
+| `DownloadFileWithResume` 未校验大小 | 确认存在 | ✅ 已修复（`http_client.go`） |
+| `ResetSelectedAsync` 先清空再重加 | 确认存在（重加失败丢全部暂存） | ✅ 已修复：改 `reset <files>` 仅移除勾选项（`ProjectTabViewModel.cs`/`CliService.cs`） |
+| push 重试可能产生重复 change log | 确认存在（上传重试后再次 PublishVersion 无幂等键） | 🔶 未修改：需要服务端幂等键/事务改造，改动面大，建议单独迭代 |
+| `DeleteProject` 未过滤/未校验 affected | 确认存在 | ✅ 已修复（`project_service.go`） |
+| publish-gui/publish-cli 配置 JSON 非原子写 | 确认存在 | ✅ 已修复：ConfigService/staging/config 全部 `.tmp`+替换 |
+| `KillProcessesAndWait` 返回值被忽略 | 确认存在 | ✅ 已修复：失败记录日志（`common.go`） |
+
+### Low
+
+| 项 | 复核结论 | 处理 |
+|----|----------|------|
+| `FileClipboardConsumer` Dispose/Set 竞态 | 确认存在（net40 路径） | ✅ 已修复：不再 Dispose 事件对象（`FileClipboardConsumer.cs`） |
+| `SecretProtector` 未清零敏感缓冲 | 确认存在 | ✅ 已修复：用完 `Array.Clear`（`SecretProtector.cs`） |
+| `CursorTracker.PollLoop` 静默吞异常 | 确认存在 | ✅ 已修复：Warn 日志（节流）（`CursorTracker.cs`） |
+| `TcpTransportServer.Stop` 未 Join 接收线程 | 确认存在 | ✅ 已修复：关闭 socket 后 `Join(2000)`（`TcpTransportServer.cs`） |
+| `TransportHost.SendResponse` 死代码 | 确认存在（`sentFragments` 未用） | ✅ 已修复：移除（`TransportHost.cs`） |
+| `CursorTrackerSession` AttachSendTo/SendCursorUpdate 无锁 | 确认存在 | ✅ 已修复：锁保护回调/会话 ID（`CursorTracker.cs`） |
+| DPAPI 解密失败静默丢密码 | 确认存在 | 🔶 未修改：Load 已有日志；单配置密码解密失败置空密码属于低危 UX 项，UI 提示需另行设计 |
+| `MainWindow.xaml.cs` 递归 BeginInvoke 无节流 | 确认存在 | 🔶 未修改：仅在跨线程属性通知时触发且有限递归（调用一次后即在 UI 线程返回），实际无放大风险 |
+| EasyDesk 项目级 `using` 在 namespace 外（58 处） | 确认存在 | 🔶 未修改：纯风格/规范类，不改变行为；整体重排 58 处易引入噪音，建议后续统一 |
+| `IVideoEncoder.cs` 一个文件两个类型 | 确认存在 | 🔶 未修改：规范类，拆分不影响行为 |
+| `OpenClipboardWithRetry` 对 error 0 也重试 | 确认存在 | ✅ 已修复：仅 error 5 重试（`WindowsClipboardService.cs`） |
+| `CopyMemory` 重复声明 | 确认存在 | 🔶 未修改：风格类，两处声明类型一致（uint/int 混用不影响调用） |
+| aly 服务端一律返回 HTTP 200 | 确认存在 | 🔶 未修改：JSON 信封协议（`IsSuccess`+`ErrorMsg`），客户端 `doGet`/`post` 依赖 200 取错误正文；直接改 HTTP 码会破坏错误信息提取，需客户端同步改造 |
+| 软删项目磁盘文件不清理 | 确认存在 | 🔶 未修改：软删保留数据可恢复是设计行为；磁盘清理需显式接口，避免误删 |
+| mock server 与真实 server API 不一致（id vs name） | 确认存在 | 🔶 未修改：测试辅助代码，修复需同步 mock 与真实路由 |
+| URL 末尾 `/` 导致 `//` | 确认存在（`c.ServerURL + path`） | ✅ 已修复：`NewClient` 内 `TrimRight`（`client.go`） |
+| ignore 模式错误被静默忽略 | 确认存在（`filepath.Match` 错误被丢弃） | ✅ 已修复：非法模式输出 stderr 警告（`scanner.go`） |
+
+### 跨模块共性问题
+
+| 项 | 处理 |
+|----|------|
+| 跨线程 `Dispatcher.Invoke`（同步） | ✅ 已改：客户端 FatalError/OnLog/断连/RenderFrame/Resize 全部异步化 |
+| "非原子写 + 截断目标" 模式 | ✅ 已改：aly 全栈（version/staging/publish/shared/服务端合并/Download/CopyFile）；EasyRDP 配置保存此前已是原子写 |
+| GDI/COM 句柄释放顺序 | ✅ 已改：先还原选择再删除、DXGI 逐级释放 |
+| `catch { }` 静默吞异常 | ✅ 已改：CursorTracker 加日志、DXGI Reinitialize 自愈；其余点已复核无不可诊断风险 |
+| `Stop` 顺序普遍错误 | ✅ 已改：客户端先断传输再停会话；服务端 `_stopping` 先置位 + Stop 后不再入队 |
+| 可信边界缺校验 | ✅ 已改：H264 SPS 维度上限、握手前连接数、上传大小、HTTP 超时 |
+
+### 用户反馈专项（2026-07-31）
+
+| 反馈 | 处理 |
+|------|------|
+| 全屏不能一直置顶、服务端关闭后客户端卡死整机 | ✅ 修复：全屏不再 `Topmost`；断连/停止自动退出全屏；解除鼠标捕获；`WpfRenderTarget` 异步渲染消除 Stop/Join 死锁；FatalError/断连回调异步调度（`MainWindowViewModel.cs`/`MainWindow.xaml.cs`/`WpfRenderTarget.cs`） |
+| 远程延迟高 | ✅ 修复：net8 服务端启用 DXGI 截屏（1-5ms/帧，替代 BitBlt 30-50ms）；编码线程"最新帧优先"丢弃过期帧；帧率下限 33→16ms；队列不再积压过期帧（`WindowsDesktopFactory.cs`/`DxgiScreenCapturer.cs`/`ServerStreamSession.cs`） |
+| 颜色失真、代码高亮不可见 | ✅ 修复：默认码率 2Mbps→8Mbps（1080p 屏幕内容文字/色彩显著改善）；分辨率取偶保证 I420 平面正确；DXGI 原始帧质量更高 |
+| 远程鼠标右键无效 | ✅ 修复：改用 `PreviewMouseDown/Up` 隧道事件保证右键在任何元素处理前被转发；显式按钮映射；按下时 `Mouse.Capture` 防止松开丢失导致按键粘连；服务端 `SendInput` 串行化（`MainWindow.xaml`/`MainWindow.xaml.cs`/`MainWindowViewModel.cs`/`WindowsInputSimulator.cs`） |

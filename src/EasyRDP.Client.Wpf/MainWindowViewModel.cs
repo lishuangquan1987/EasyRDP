@@ -381,7 +381,9 @@ namespace EasyRDP.Client.Wpf
             }
 
             _transport = new TcpTransportClient();
-            _transport.OnLog = (msg) => _dispatcher.Invoke(() => StatusText = msg);
+            // 异步更新状态栏：OnLog 可能在接收线程触发，同步 Invoke 会阻塞接收线程
+            // （TCP 接收缓冲可能被填满反压服务端），且 UI 繁忙时造成额外等待。
+            _transport.OnLog = (msg) => _dispatcher.BeginInvoke(() => StatusText = msg);
 
             Logger.Info("Connecting to {0}:{1}...", host, port);
             bool connected = await Task.Run(() => _transport.Connect(host, port, ConnectTimeoutMs));
@@ -421,7 +423,9 @@ namespace EasyRDP.Client.Wpf
                 if (_disconnecting) return;
                 string message = args != null ? args.Message : "Unknown stream error";
                 Logger.Error("Stream FatalError: {0}", message);
-                _dispatcher.Invoke(() =>
+                // BeginInvoke：同步 Invoke 会让接收线程阻塞等 UI，UI 若正在 Stop/Join
+                // 渲染线程则互相等待（死锁），异步调度即可避免。
+                _dispatcher.BeginInvoke(() =>
                 {
                     if (_disconnecting) return;
                     SetBusy(false, "Stream error: " + message);
@@ -504,7 +508,8 @@ namespace EasyRDP.Client.Wpf
             {
                 if (_disconnecting) return; // 防止重入
                 _transport.Disconnected -= onDisconnected;
-                _dispatcher.Invoke(() => Stop());
+                // BeginInvoke：不阻塞传输接收线程，避免 Stop 期间 Join 与接收线程互等
+                _dispatcher.BeginInvoke(() => Stop());
             };
             _transport.Disconnected += onDisconnected;
 
@@ -513,9 +518,11 @@ namespace EasyRDP.Client.Wpf
             long lastFrameCount = 0;
             _fpsTimer.Tick += (s, ev) =>
             {
-                if (_frameBuffer != null)
+                // 读会话的真实帧计数：VM 自己的 _frameBuffer 在连接流程中从不被写入，
+                // 旧实现 FPS 恒为 0。
+                if (_streamSession != null)
                 {
-                    long current = _frameBuffer.FrameCount;
+                    long current = _streamSession.FrameCount;
                     FrameRate = (int)(current - lastFrameCount);
                     lastFrameCount = current;
                 }
@@ -619,12 +626,15 @@ namespace EasyRDP.Client.Wpf
             // 用 System.Threading.Timer（线程池），即使 UI 线程卡住或窗口最小化也能可靠触发。
             _heartbeatTimer = new Timer(state =>
             {
-                if (_transport == null || !_running) return;
+                // 捕获局部变量：Stop() 会把 _transport 置 null，定时器回调可能在
+                // Stop 返回后仍触发，局部引用避免 NullReferenceException。
+                var transport = _transport;
+                if (transport == null || !_running) return;
                 try
                 {
                     // Keepalive 消息 payload 为空，仅用于刷新服务端 _lastActivity
                     MessageReassembler.FragAndSend(0, (byte)MessageType.Keepalive, new byte[0],
-                        (sid, data) => _transport.Send(data), 0);
+                        (sid, data) => transport.Send(data), 0);
                 }
                 catch (Exception ex)
                 {
@@ -1063,14 +1073,36 @@ namespace EasyRDP.Client.Wpf
 
             if (_fpsTimer != null) { _fpsTimer.Stop(); _fpsTimer = null; }
             if (_clipboardTimer != null) { _clipboardTimer.Stop(); _clipboardTimer = null; }
-            if (_heartbeatTimer != null) { _heartbeatTimer.Dispose(); _heartbeatTimer = null; }
+            if (_heartbeatTimer != null)
+            {
+                // 等待在途回调结束再置空，避免回调与 Stop 竞态访问 _transport
+                var waitHandle = new ManualResetEvent(false);
+                try
+                {
+                    _heartbeatTimer.Dispose(waitHandle);
+                    waitHandle.WaitOne(1000);
+                }
+                catch { }
+                finally { waitHandle.Dispose(); }
+                _heartbeatTimer = null;
+            }
 
             _running = false;
-            _streamSession?.Stop();
+            // 顺序修复：先断开传输（停止接收线程产生新消息），再停止会话。
+            // 旧顺序反过来：会话 Stop 时接收线程仍可能在 ProcessVideoFrame 中调用
+            // _decoder.Decode，而 Stop 已把 _decoder 置 null → AccessViolation。
             _transport?.Disconnect();
+            _streamSession?.Stop();
             _transport = null;
             _streamSession = null;
             _inputSession = null;
+
+            // 释放鼠标捕获（右键按下期间断开时可能仍持有捕获）
+            try { System.Windows.Input.Mouse.Capture(null); } catch { }
+
+            // 断连/停止时强制退出全屏：全屏置顶窗口在断开后若保持全屏，
+            // 会盖住整个桌面且用户无法把其他窗口切到前台（历史上只能重启电脑）。
+            ExitFullscreen();
 
             // 清理渲染资源
             if (_renderTarget != null)
@@ -1113,9 +1145,10 @@ namespace EasyRDP.Client.Wpf
             if (_inputSession == null || !_running) return;
             // WPF MouseButton: Left=0 Right=1 Middle=2 XButton1=3 XButton2=4，
             // EasyDesk MouseButton: Left=1 Right=2 Middle=3 XButton1=4 XButton2=5，
-            // 直接 +1 即可一一对应。旧实现把中键映射成 4（XButton1），属于映射 bug。
+            // 显式映射避免依赖枚举值相邻性（+1 脆弱）。
             _inputSession.FlushPendingMouse(); // 先落地最新光标位置，保证点击位置准确
-            int btn = (int)changedButton + 1;
+            int btn = MapMouseButton(changedButton);
+            if (btn == 0) return;
             var msg = new InputEventMessage { Type = InputEventType.MouseDown, KeyCode = btn };
             _inputSession.SendInput(msg);
         }
@@ -1124,9 +1157,24 @@ namespace EasyRDP.Client.Wpf
         {
             if (_inputSession == null || !_running) return;
             _inputSession.FlushPendingMouse();
-            int btn = (int)changedButton + 1;
+            int btn = MapMouseButton(changedButton);
+            if (btn == 0) return;
             var msg = new InputEventMessage { Type = InputEventType.MouseUp, KeyCode = btn };
             _inputSession.SendInput(msg);
+        }
+
+        /// <summary>WPF MouseButton → EasyDesk MouseButton 显式映射（左=1 右=2 中=3 X1=4 X2=5）。</summary>
+        private static int MapMouseButton(System.Windows.Input.MouseButton button)
+        {
+            switch (button)
+            {
+                case System.Windows.Input.MouseButton.Left: return 1;
+                case System.Windows.Input.MouseButton.Right: return 2;
+                case System.Windows.Input.MouseButton.Middle: return 3;
+                case System.Windows.Input.MouseButton.XButton1: return 4;
+                case System.Windows.Input.MouseButton.XButton2: return 5;
+                default: return 0;
+            }
         }
 
         public void HandleMouseWheel(int delta)
@@ -1229,22 +1277,31 @@ namespace EasyRDP.Client.Wpf
             if (window == null) return;
             if (window.WindowStyle == WindowStyle.None)
             {
-                // 退出全屏：恢复边框、窗口状态、显示顶/底栏
-                window.WindowStyle = WindowStyle.SingleBorderWindow;
-                window.WindowState = WindowState.Normal;
-                window.Topmost = false;
-                window.SetFullscreenUI(false);
-                Logger.Info("Exited fullscreen");
+                ExitFullscreen();
             }
             else
             {
-                // 进入全屏：无边框 + 最大化 + 置顶（盖住任务栏）+ 隐藏顶/底栏
+                // 进入全屏：无边框 + 最大化（盖住任务栏）+ 隐藏顶/底栏。
+                // 不用 Topmost=true：置顶窗口会把用户锁死在客户端（其他窗口永远无法
+                // 切到前台，服务端断开后尤其危险）。无边框最大化本身已覆盖任务栏。
                 window.WindowStyle = WindowStyle.None;
                 window.WindowState = WindowState.Maximized;
-                window.Topmost = true;
                 window.SetFullscreenUI(true);
                 Logger.Info("Entered fullscreen");
             }
+        }
+
+        /// <summary>退出全屏并恢复普通窗口（断开连接时也会调用，保证用户始终能切走）。</summary>
+        public void ExitFullscreen()
+        {
+            var window = Application.Current?.MainWindow as MainWindow;
+            if (window == null || window.WindowStyle != WindowStyle.None)
+                return;
+            window.WindowStyle = WindowStyle.SingleBorderWindow;
+            window.WindowState = WindowState.Normal;
+            window.Topmost = false;
+            window.SetFullscreenUI(false);
+            Logger.Info("Exited fullscreen");
         }
 
         // ====== INotifyPropertyChanged ======

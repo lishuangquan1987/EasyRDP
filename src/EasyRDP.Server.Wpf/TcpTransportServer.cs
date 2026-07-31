@@ -16,6 +16,9 @@ namespace EasyRDP.Server.Wpf
     {
         private static readonly Logger Logger = LogManager.GetCurrentClassLogger();
 
+        /// <summary>未完成握手的连接硬上限：防止恶意客户端只建连不发握手耗尽 FD/线程/内存。</summary>
+        private const int MaxPendingConnections = 16;
+
         private TcpListener _listener;
         private readonly Dictionary<uint, TcpClient> _clients = new Dictionary<uint, TcpClient>();
         private readonly Dictionary<uint, object> _sessionLocks = new Dictionary<uint, object>();
@@ -63,6 +66,17 @@ namespace EasyRDP.Server.Wpf
             foreach (var c in clients)
             {
                 try { c.Close(); } catch { }
+            }
+            // 等待接收线程退出（socket 已关闭，Read 立即返回/抛异常，Join 应很快完成）
+            Thread[] threads;
+            lock (_lock)
+            {
+                threads = new Thread[_receiveThreads.Count];
+                _receiveThreads.Values.CopyTo(threads, 0);
+            }
+            foreach (var t in threads)
+            {
+                try { t.Join(2000); } catch { }
             }
         }
 
@@ -132,6 +146,21 @@ namespace EasyRDP.Server.Wpf
                     TcpClient client = _listener.AcceptTcpClient();
                     // 禁用 Nagle：远程输入事件是小包，需要低延迟而不是吞吐量
                     client.NoDelay = true;
+                    // 握手前限流：TransportHost 的 _maxSessions 只在握手成功后计数，
+                    // 恶意客户端可无限建立 TCP 连接并停留在握手阶段。这里在分配
+                    // sessionId/接收线程之前就设硬上限，超出直接断开。
+                    int pendingCount;
+                    lock (_lock)
+                    {
+                        pendingCount = _clients.Count;
+                    }
+                    if (pendingCount >= MaxPendingConnections)
+                    {
+                        Logger.Warn("Connection rejected: pending connections {0} >= max {1}",
+                            pendingCount, MaxPendingConnections);
+                        try { client.Close(); } catch { }
+                        continue;
+                    }
                     uint sessionId;
                     lock (_lock)
                     {

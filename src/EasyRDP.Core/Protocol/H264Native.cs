@@ -116,8 +116,9 @@ namespace EasyRDP.Core.Protocol
             {
                 iColorFormat = ENCODER_FORMAT_I420; // videoFormatI420 = 23
                 iStride0 = w;         // Y stride
-                iStride1 = w / 2;     // U stride
-                iStride2 = w / 2;     // V stride
+                // 用向上取整，奇数宽度时 U/V 平面 stride 仍覆盖 ceil(w/2) 列
+                iStride1 = (w + 1) / 2;     // U stride
+                iStride2 = (w + 1) / 2;     // V stride
                 iStride3 = 0;
                 pData0 = yData;
                 pData1 = uData;

@@ -143,8 +143,8 @@
         <!-- ====== 中间：桌面显示区 ====== -->
         <Border Grid.Row="2" Background="Black"
                 MouseMove="RenderImage_MouseMove"
-                MouseDown="RenderImage_MouseDown"
-                MouseUp="RenderImage_MouseUp"
+                PreviewMouseDown="RenderImage_PreviewMouseDown"
+                PreviewMouseUp="RenderImage_PreviewMouseUp"
                 MouseWheel="RenderImage_MouseWheel"
                 Focusable="True">
             <Grid>

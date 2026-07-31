@@ -61,6 +61,16 @@ namespace EasyRDP.Core.Protocol
         public void Initialize(int width, int height, int targetBitrate)
         {
             if (_disposed) throw new ObjectDisposedException("H264EncoderNative");
+            // OpenH264 的 4:2:0 平面按偶数尺寸布局：奇数宽/高会导致 U/V 平面分配不足，
+            // ConvertBgraToI420 写越界破坏相邻平面。调用方（ServerStreamSession）负责
+            // 先把分辨率向上取偶，这里直接拒绝奇数尺寸（宁可明确失败，不静默写坏内存）。
+            if (width <= 0 || height <= 0)
+                throw new ArgumentOutOfRangeException("width/height must be positive");
+            if ((width & 1) != 0 || (height & 1) != 0)
+                throw new ArgumentOutOfRangeException("width/height must be even for OpenH264 I420");
+            // 维度上限（覆盖 8K）：防止 SPS/握手伪造超大分辨率导致 OOM
+            if (width > 8192 || height > 8192)
+                throw new ArgumentOutOfRangeException("width/height too large (max 8192)");
             if (_encoder == IntPtr.Zero)
             {
                 if (!TryCreateEncoder())
@@ -147,7 +157,7 @@ namespace EasyRDP.Core.Protocol
             }
 
             int ySize = _width * _height;
-            int uvSize = ySize / 4;
+            int uvSize = ((_width + 1) / 2) * ((_height + 1) / 2);
             int i420Size = ySize + uvSize + uvSize;
             if (_i420Buffer == null || _i420Buffer.Length < i420Size)
                 _i420Buffer = new byte[i420Size];

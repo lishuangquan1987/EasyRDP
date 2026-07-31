@@ -159,7 +159,13 @@ namespace EasyRDP.Core.Transport
             if (fragCount == 0)
                 fragCount = 1;
             if (fragCount > ushort.MaxValue)
-                fragCount = ushort.MaxValue; // Safety clamp
+            {
+                // 静默截断会丢尾部数据，接收方按头部长度分配缓冲后只填头部 → 静默损坏。
+                // 显式拒绝，由调用方决定如何处理超大载荷。
+                throw new InvalidOperationException(
+                    "payload too large to fragment: " + totalLen + " bytes exceeds " +
+                    ((long)ushort.MaxValue * Constants.FragmentSize) + " bytes");
+            }
 
             for (int i = 0; i < fragCount; i++)
             {
@@ -273,6 +279,8 @@ namespace EasyRDP.Core.Transport
             private int _totalPayloadLen;
             private byte _messageType;
             private readonly Stopwatch _reassemblyTimer = new Stopwatch();
+            // 超时阈值（毫秒）：按 payload 大小缩放，空闲超时判定（每次收到分片重置计时）。
+            private long _timeoutMs = Constants.FragmentReassembleTimeoutMs;
 
             // 当前帧是否已完成组装（AssembleAndDeliver 已触发）。
             // 关键作用：控制流所有消息都用 frameId=0，组装完成后若再来一个 frameId=0 的消息，
@@ -295,16 +303,17 @@ namespace EasyRDP.Core.Transport
             {
                 // FrameId ordering — cases:
                 //   !_initialized: very first fragment (regardless of frameId), initialize state
-                //   frameId > _currentFrameId: newer frame arrived, discard old partial (real-time semantics)
-                //   frameId < _currentFrameId: stale frame fragment, discard
+                //   IsNewer(frameId): newer frame arrived, discard old partial (real-time semantics)
+                //   IsOlder(frameId): stale frame fragment, discard
                 //   frameId == _currentFrameId && _frameCompleted: 上一个同 frameId 的帧已组装完成，
                 //       新分片属于新消息（如连续的控制消息都用 frameId=0），强制 StartNewFrame
                 //   frameId == _currentFrameId && !_frameCompleted: 同一帧的后续分片，继续组装
-                if (!_initialized || frameId > _currentFrameId)
+                // uint 回绕安全：用有符号差值判断新旧，避免 uint.MaxValue 之后所有新帧被判为 stale。
+                if (!_initialized || IsNewer(frameId, _currentFrameId))
                 {
                     StartNewFrame(frameId, messageType, totalPayloadLen, fragCount);
                 }
-                else if (frameId < _currentFrameId)
+                else if (IsOlder(frameId, _currentFrameId))
                 {
                     _staleFrameRejectCount++;
                     if (_staleFrameRejectCount <= 3 || _staleFrameRejectCount % 100 == 0)
@@ -320,7 +329,9 @@ namespace EasyRDP.Core.Transport
 
                 // Timeout guard: if current frame takes too long to assemble (lost fragments),
                 // restart to prevent dead state. Real-time protocol: old incomplete frames are worthless.
-                if (_reassemblyTimer.ElapsedMilliseconds > Constants.FragmentReassembleTimeoutMs)
+                // 按"空闲时间"判定：每收到一个分片都重置计时器，避免大控制面消息（如 1MB 文件
+                // 剪贴板分片）因总耗时超过固定 5s 被误杀；阈值按 payload 大小缩放。
+                if (_reassemblyTimer.ElapsedMilliseconds > _timeoutMs)
                 {
                     Logger.Warn("[{0}] Reassembly timeout for frameId={1} after {2}ms (received {3}/{4} fragments)",
                         _tag, _currentFrameId, _reassemblyTimer.ElapsedMilliseconds,
@@ -335,6 +346,8 @@ namespace EasyRDP.Core.Transport
                     Buffer.BlockCopy(data, dataPos, _fragBuffers[fragIdx], 0, fragDataLen);
                     _receivedFragCount++;
                 }
+                // 空闲超时：分片正常到达即视为连接活跃，重新计时
+                _reassemblyTimer.Restart();
 
                 // Check if complete
                 if (_receivedFragCount >= _expectedFragCount)
@@ -353,7 +366,23 @@ namespace EasyRDP.Core.Transport
                 _expectedFragCount = fragCount;
                 _receivedFragCount = 0;
                 _fragBuffers = new byte[fragCount][];
+                // 阈值：5s ~ 120s，按 payload 大小线性缩放（1MB 控制消息 ≥5s，10MB ≥50s）
+                long scaled = totalPayloadLen / 200L;
+                _timeoutMs = Math.Max(Constants.FragmentReassembleTimeoutMs,
+                    Math.Min(120000L, scaled));
                 _reassemblyTimer.Restart();
+            }
+
+            private static bool IsNewer(uint a, uint b)
+            {
+                int delta = (int)(a - b);
+                return delta > 0;
+            }
+
+            private static bool IsOlder(uint a, uint b)
+            {
+                int delta = (int)(a - b);
+                return delta < 0;
             }
 
             private void AssembleAndDeliver(uint sessionId, EventHandler<MessageReceivedEventArgs> handler)

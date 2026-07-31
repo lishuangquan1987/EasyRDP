@@ -66,16 +66,29 @@ public partial class MainWindow : Window
         _vm.HandleMouseMove(pos.X, pos.Y, RenderImage.ActualWidth, RenderImage.ActualHeight);
     }
 
-    /// <summary>将鼠标按下事件路由到 ViewModel。</summary>
-    private void RenderImage_MouseDown(object sender, MouseButtonEventArgs e)
+    /// <summary>
+    /// 将鼠标按下事件路由到 ViewModel（Preview 隧道阶段捕获，保证右键等所有按键
+    /// 在元素级处理/ContextMenu 服务介入之前就被转发，右键不再被吞）。
+    /// 按下时捕获鼠标，确保拖出窗口也能收到 MouseUp，避免远端按键卡在"按下"状态。
+    /// </summary>
+    private void RenderImage_PreviewMouseDown(object sender, MouseButtonEventArgs e)
     {
+        if (e.LeftButton == MouseButtonState.Pressed
+            || e.RightButton == MouseButtonState.Pressed
+            || e.MiddleButton == MouseButtonState.Pressed
+            || e.XButton1 == MouseButtonState.Pressed
+            || e.XButton2 == MouseButtonState.Pressed)
+        {
+            Mouse.Capture((IInputElement)sender);
+        }
         _vm.HandleMouseDown(e.ChangedButton);
     }
 
-    /// <summary>将鼠标释放事件路由到 ViewModel。</summary>
-    private void RenderImage_MouseUp(object sender, MouseButtonEventArgs e)
+    /// <summary>将鼠标释放事件路由到 ViewModel，并释放鼠标捕获。</summary>
+    private void RenderImage_PreviewMouseUp(object sender, MouseButtonEventArgs e)
     {
         _vm.HandleMouseUp(e.ChangedButton);
+        Mouse.Capture(null);
     }
 
     /// <summary>将滚轮事件路由到 ViewModel。</summary>

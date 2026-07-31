@@ -1171,7 +1171,6 @@ namespace EasyRDP.Server.Wpf
         private void SendResponse(uint sessionId, HandshakeRes res)
         {
             byte[] payload = res.Pack();
-            var sentFragments = new List<byte[]>();
             MessageReassembler.FragAndSend(0, (byte)MessageType.HandshakeRes, payload,
                 (sid, data) => _transportServer.SendTo(sid, data), sessionId);
         }
@@ -1222,6 +1221,15 @@ namespace EasyRDP.Server.Wpf
                     }
                 }
             }
+            // 清理 per-session 图片剪贴板接收器：未收到 End 就断连的会话会残留大 DIB 缓冲
+            foreach (var kv in _serverImageReceivers)
+            {
+                if (kv.Key.StartsWith(sessionPrefix))
+                {
+                    ImageClipboardReceiver removed;
+                    _serverImageReceivers.TryRemove(kv.Key, out removed);
+                }
+            }
 
             try { info.Stream?.Stop(); } catch { }
             try { info.Stream?.Dispose(); } catch { }
@@ -1238,6 +1246,7 @@ namespace EasyRDP.Server.Wpf
                 Thread.Sleep(10000); // 10s interval
 
                 List<uint> timedOut = new List<uint>();
+                List<uint> keepaliveTargets = new List<uint>();
                 lock (_lock)
                 {
                     var now = DateTime.UtcNow;
@@ -1249,11 +1258,23 @@ namespace EasyRDP.Server.Wpf
                         }
                         else if ((now - kv.Value).TotalSeconds > 30)
                         {
-                            // Send keepalive
-                            var empty = new byte[0];
-                            MessageReassembler.FragAndSend(0, (byte)MessageType.Keepalive, empty,
-                                (sid, data) => _transportServer.SendTo(sid, data), kv.Key);
+                            keepaliveTargets.Add(kv.Key);
                         }
+                    }
+                }
+
+                // 锁外发送 keepalive：SendTo 是阻塞网络 I/O，慢客户端会冻结锁保护的所有会话管理。
+                foreach (var sid in keepaliveTargets)
+                {
+                    try
+                    {
+                        var empty = new byte[0];
+                        MessageReassembler.FragAndSend(0, (byte)MessageType.Keepalive, empty,
+                            (s2, data) => _transportServer.SendTo(s2, data), sid);
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Warn(ex, "Keepalive send failed for session {0}", sid);
                     }
                 }
 

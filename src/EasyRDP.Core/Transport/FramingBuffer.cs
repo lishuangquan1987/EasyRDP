@@ -64,7 +64,18 @@ namespace EasyRDP.Core.Transport
                     Logger.Warn("FramingBuffer: discarding {0} bytes — no valid frame magic found, first {1} bytes: {2}",
                         _bufferPos, dumpLen, hex);
                 }
-                _bufferPos = 0; // No valid frame start found, discard all
+                // 保留末位 magic 字节：TCP 分片边界可能把帧头拆开，末位 0xE5 可能是下一帧的
+                // Magic 起始。整段丢弃会把帧头永久丢失（下一 Feed 从 Type 字节开始，永远拼不回帧）。
+                if (_bufferPos > 0 && _buffer[_bufferPos - 1] == Constants.FrameMagic)
+                {
+                    if (_bufferPos > 1)
+                        _buffer[0] = _buffer[_bufferPos - 1];
+                    _bufferPos = 1;
+                }
+                else
+                {
+                    _bufferPos = 0; // No valid frame start found, discard all
+                }
                 return false;
             }
 
