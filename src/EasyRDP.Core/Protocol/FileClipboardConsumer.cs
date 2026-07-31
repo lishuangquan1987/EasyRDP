@@ -49,8 +49,28 @@ namespace EasyRDP.Core.Protocol
         private readonly string _tempDir;
         private readonly ConcurrentDictionary<uint, TaskCompletionSource<byte[]>> _pendingRequests
             = new ConcurrentDictionary<uint, TaskCompletionSource<byte[]>>();
+#if NET40
+        // net40 兼容路径的等待句柄表（不使用 Microsoft.Bcl.Async，避免破坏 net40 项目引用解析）
+        private readonly ConcurrentDictionary<uint, Net40ChunkWait> _net40Pending
+            = new ConcurrentDictionary<uint, Net40ChunkWait>();
+#endif
         private int _streamIdSeq;
         private volatile bool _cancelled;
+
+#if NET40
+        /// <summary>net40 单块请求的等待状态：响应数据 + 完成信号。</summary>
+        private sealed class Net40ChunkWait : IDisposable
+        {
+            public readonly ManualResetEventSlim Done = new ManualResetEventSlim(false);
+            public byte[] Data;
+            public bool Failed;
+
+            public void Dispose()
+            {
+                Done.Dispose();
+            }
+        }
+#endif
 
         /// <summary>
         /// 进度变化事件：(downloadedBytes, totalBytes)。
@@ -97,6 +117,17 @@ namespace EasyRDP.Core.Protocol
         public void HandleFileContentsRes(ClipFileContentsResMessage res)
         {
             if (res == null) return;
+#if NET40
+            Net40ChunkWait wait;
+            if (_net40Pending.TryRemove(res.StreamId, out wait))
+            {
+                if (res.Status == ClipFileContentsResMessage.StatusOk)
+                    wait.Data = res.Data != null ? res.Data : new byte[0];
+                else
+                    wait.Failed = true;
+                wait.Done.Set();
+            }
+#else
             TaskCompletionSource<byte[]> tcs;
             if (_pendingRequests.TryRemove(res.StreamId, out tcs))
             {
@@ -109,6 +140,7 @@ namespace EasyRDP.Core.Protocol
                     tcs.SetException(new IOException("FileContentsReq failed with status " + res.Status));
                 }
             }
+#endif
         }
 
         /// <summary>
@@ -117,6 +149,15 @@ namespace EasyRDP.Core.Protocol
         public void Cancel()
         {
             _cancelled = true;
+#if NET40
+            // 唤醒所有等待中的 worker，让其尽快退出
+            foreach (var kv in _net40Pending)
+            {
+                kv.Value.Failed = true;
+                kv.Value.Done.Set();
+            }
+            _net40Pending.Clear();
+#endif
         }
 
         /// <summary>
@@ -225,6 +266,11 @@ namespace EasyRDP.Core.Protocol
         private bool DownloadFileConcurrent(int fileIdx, ClipFormatListMessage.FileMeta meta,
             string localPath, Action<long> onChunkCompleted)
         {
+#if NET40
+            // net40 无 async/await 运行时支持；不使用 Microsoft.Bcl.Async（它会破坏
+            // net40 项目的项目引用解析），改用线程 + ManualResetEventSlim 实现等价并发。
+            return DownloadFileConcurrentNet40(fileIdx, meta, localPath, onChunkCompleted);
+#else
             long fileSize = meta.FileSize;
             int totalChunks = (int)((fileSize + ChunkSize - 1) / ChunkSize);
             var semaphore = new SemaphoreSlim(Concurrency);
@@ -238,7 +284,7 @@ namespace EasyRDP.Core.Protocol
 
                 for (int chunkIdx = 0; chunkIdx < totalChunks; chunkIdx++)
                 {
-                    if (_cancelled || Volatile.Read(ref failedFlag) == 1) break;
+                    if (_cancelled || Thread.VolatileRead(ref failedFlag) == 1) break;
 
                     // 等待窗口空位：最多 Concurrency 个 in-flight
                     semaphore.Wait();
@@ -251,6 +297,7 @@ namespace EasyRDP.Core.Protocol
                     int capturedRead = toRead;
                     int capturedChunkIdx = chunkIdx;
 
+                    // 非 net40 路径（netstandard2.0/net8）可直接使用 Task.Run
                     var task = Task.Run(async () =>
                     {
                         try
@@ -279,7 +326,7 @@ namespace EasyRDP.Core.Protocol
                                 Logger.Warn(ex, "Send FileContentsReq failed: streamId={0} chunkIdx={1}",
                                     streamId, capturedChunkIdx);
                                 _pendingRequests.TryRemove(streamId, out tcs);
-                                Volatile.Write(ref failedFlag, 1);
+                                Thread.VolatileWrite(ref failedFlag, 1);
                                 return;
                             }
 
@@ -290,7 +337,7 @@ namespace EasyRDP.Core.Protocol
                                 _pendingRequests.TryRemove(streamId, out tcs);
                                 Logger.Warn("FileContentsReq timeout: streamId={0} chunkIdx={1} pos={2}",
                                     streamId, capturedChunkIdx, capturedPos);
-                                Volatile.Write(ref failedFlag, 1);
+                                Thread.VolatileWrite(ref failedFlag, 1);
                                 return;
                             }
 
@@ -303,7 +350,7 @@ namespace EasyRDP.Core.Protocol
                             {
                                 Logger.Warn(ex, "FileContentsReq response error: streamId={0} chunkIdx={1}",
                                     streamId, capturedChunkIdx);
-                                Volatile.Write(ref failedFlag, 1);
+                                Thread.VolatileWrite(ref failedFlag, 1);
                                 return;
                             }
 
@@ -311,7 +358,7 @@ namespace EasyRDP.Core.Protocol
                             {
                                 Logger.Warn("FileContentsReq returned empty data: chunkIdx={0} pos={1}",
                                     capturedChunkIdx, capturedPos);
-                                Volatile.Write(ref failedFlag, 1);
+                                Thread.VolatileWrite(ref failedFlag, 1);
                                 return;
                             }
 
@@ -330,7 +377,7 @@ namespace EasyRDP.Core.Protocol
                         {
                             Logger.Warn(ex, "DownloadChunk failed: chunkIdx={0} pos={1}",
                                 capturedChunkIdx, capturedPos);
-                            Volatile.Write(ref failedFlag, 1);
+                            Thread.VolatileWrite(ref failedFlag, 1);
                         }
                         finally
                         {
@@ -346,12 +393,13 @@ namespace EasyRDP.Core.Protocol
                 // 等待所有 in-flight 请求完成
                 try { Task.WaitAll(tasks.ToArray()); }
                 catch (Exception ex) { Logger.Warn(ex, "Task.WaitAll failed during download"); }
+                semaphore.Dispose();
 
                 // 确保数据刷到磁盘
                 try { fs.Flush(true); } catch { }
             }
 
-            bool success = Volatile.Read(ref failedFlag) == 0
+            bool success = Thread.VolatileRead(ref failedFlag) == 0
                 && completedChunks == totalChunks
                 && !_cancelled;
 
@@ -369,7 +417,178 @@ namespace EasyRDP.Core.Protocol
             }
 
             return success;
+#endif
         }
+
+#if NET40
+        /// <summary>
+        /// net40 兼容的并发下载：Concurrency 个后台 worker 线程构成滑动窗口，
+        /// 每线程领取下一个块号 → 发送 FileContentsReq → 等待响应（超时 30s）→ 按位置写文件。
+        /// </summary>
+        private bool DownloadFileConcurrentNet40(int fileIdx, ClipFormatListMessage.FileMeta meta,
+            string localPath, Action<long> onChunkCompleted)
+        {
+            long fileSize = meta.FileSize;
+            int totalChunks = (int)((fileSize + ChunkSize - 1) / ChunkSize);
+            var st = new Net40DownloadState
+            {
+                FileIdx = fileIdx,
+                FileSize = fileSize,
+                TotalChunks = totalChunks,
+                Semaphore = new SemaphoreSlim(Concurrency),
+                WriteLock = new object(),
+                OnChunkCompleted = onChunkCompleted
+            };
+
+            using (var fs = new FileStream(localPath, FileMode.Create, FileAccess.Write, FileShare.Read))
+            {
+                st.Fs = fs;
+                var workers = new List<Thread>();
+                for (int w = 0; w < Concurrency; w++)
+                {
+                    var t = new Thread(() => DownloadChunkWorkerNet40(meta, st));
+                    t.IsBackground = true;
+                    t.Start();
+                    workers.Add(t);
+                }
+                foreach (var t in workers)
+                {
+                    try { t.Join(); } catch { }
+                }
+                st.Semaphore.Dispose();
+                try { fs.Flush(true); } catch { }
+            }
+
+            bool success = Thread.VolatileRead(ref st.FailedFlag) == 0
+                && st.CompletedChunks == totalChunks
+                && !_cancelled;
+
+            if (success)
+            {
+                Logger.Info("File {0}/{1}: '{2}' downloaded {3}/{4} bytes (chunks={5}, concurrency={6})",
+                    fileIdx + 1, _files.Count, meta.FileName, fileSize, fileSize,
+                    st.CompletedChunks, Concurrency);
+            }
+            else
+            {
+                Logger.Warn("File {0}/{1}: '{2}' incomplete download {3}/{4} bytes (chunks={5}/{6})",
+                    fileIdx + 1, _files.Count, meta.FileName,
+                    (long)st.CompletedChunks * ChunkSize, fileSize, st.CompletedChunks, totalChunks);
+            }
+
+            return success;
+        }
+
+        /// <summary>net40 下载状态（线程间共享，C#5 匿名方法无法捕获 ref 参数，故用容器类）。</summary>
+        private sealed class Net40DownloadState
+        {
+            public int FileIdx;
+            public long FileSize;
+            public int TotalChunks;
+            public FileStream Fs;
+            public object WriteLock;
+            public SemaphoreSlim Semaphore;
+            public Action<long> OnChunkCompleted;
+            public int FailedFlag;
+            public int CompletedChunks;
+            public int NextChunkIdx;
+        }
+
+        /// <summary>net40 单块下载 worker：领取块号 → 发送请求 → 等待响应/超时 → 写文件。</summary>
+        private void DownloadChunkWorkerNet40(ClipFormatListMessage.FileMeta meta, Net40DownloadState st)
+        {
+            try
+            {
+                while (!_cancelled && Thread.VolatileRead(ref st.FailedFlag) == 0)
+                {
+                    int chunkIdx = Interlocked.Increment(ref st.NextChunkIdx) - 1;
+                    if (chunkIdx >= st.TotalChunks) return;
+
+                    // 限流：最多 Concurrency 个 in-flight 请求
+                    st.Semaphore.Wait();
+                    Net40ChunkWait wait = null;
+                    try
+                    {
+                        long reqPos = (long)chunkIdx * ChunkSize;
+                        int toRead = (int)Math.Min(ChunkSize, st.FileSize - reqPos);
+                        uint streamId = (uint)Interlocked.Increment(ref _streamIdSeq);
+                        wait = new Net40ChunkWait();
+                        _net40Pending[streamId] = wait;
+
+                        var req = new ClipFileContentsReqMessage
+                        {
+                            TransferId = _transferId,
+                            StreamId = streamId,
+                            FileIndex = st.FileIdx,
+                            Flags = ClipFileContentsReqMessage.FlagRange,
+                            Position = reqPos,
+                            RequestedSize = toRead
+                        };
+
+                        try
+                        {
+                            byte[] reqPayload = req.Pack();
+                            _sendAction(0, reqPayload);
+                        }
+                        catch (Exception ex)
+                        {
+                            Net40ChunkWait removed;
+                            _net40Pending.TryRemove(streamId, out removed);
+                            Logger.Warn(ex, "Send FileContentsReq failed: streamId={0} chunkIdx={1}",
+                                streamId, chunkIdx);
+                            Thread.VolatileWrite(ref st.FailedFlag, 1);
+                            return;
+                        }
+
+                        // 等待响应或超时（30s）
+                        if (!wait.Done.Wait(RequestTimeoutMs))
+                        {
+                            Net40ChunkWait removed;
+                            _net40Pending.TryRemove(streamId, out removed);
+                            Logger.Warn("FileContentsReq timeout: streamId={0} chunkIdx={1} pos={2}",
+                                streamId, chunkIdx, reqPos);
+                            Thread.VolatileWrite(ref st.FailedFlag, 1);
+                            return;
+                        }
+
+                        if (wait.Failed || wait.Data == null || wait.Data.Length == 0)
+                        {
+                            Logger.Warn("FileContentsReq failed or empty: chunkIdx={0} pos={1}",
+                                chunkIdx, reqPos);
+                            Thread.VolatileWrite(ref st.FailedFlag, 1);
+                            return;
+                        }
+
+                        // 按 position 写入文件（lock 保护 FileStream 线程安全）
+                        lock (st.WriteLock)
+                        {
+                            st.Fs.Seek(reqPos, SeekOrigin.Begin);
+                            st.Fs.Write(wait.Data, 0, wait.Data.Length);
+                        }
+
+                        Interlocked.Increment(ref st.CompletedChunks);
+                        var chunkHandler = st.OnChunkCompleted;
+                        if (chunkHandler != null) chunkHandler(wait.Data.Length);
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Warn(ex, "DownloadChunk failed: chunkIdx={0}", chunkIdx);
+                        Thread.VolatileWrite(ref st.FailedFlag, 1);
+                    }
+                    finally
+                    {
+                        st.Semaphore.Release();
+                        if (wait != null) wait.Dispose();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn(ex, "Download worker failed");
+                Thread.VolatileWrite(ref st.FailedFlag, 1);
+            }
+        }
+#endif
 
         /// <summary>把文件名转换为本地安全的文件名。</summary>
         private static string MakeSafeFileName(string fileName, int index)

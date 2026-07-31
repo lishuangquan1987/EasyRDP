@@ -129,12 +129,12 @@ namespace EasyRDP.Core.Protocol
             // 旧实现错误地通过 SSourcePicture.iFrameType 设置（该字段不存在），forceKeyframe 实际无效。
             if (forceKeyframe && _forceIntraFrame != null)
             {
-                Logger.Info("ForceIntraFrame calling: encoder=0x{0:X} bIdr=true iLayerId=-1",
+                Logger.Debug("ForceIntraFrame calling: encoder=0x{0:X} bIdr=true iLayerId=-1",
                     _encoder.ToInt64());
                 try
                 {
                     int forceRet = _forceIntraFrame(_encoder, true, -1);
-                    Logger.Info("ForceIntraFrame returned {0}", forceRet);
+                    Logger.Debug("ForceIntraFrame returned {0}", forceRet);
                     if (forceRet != 0)
                         Logger.Warn("ForceIntraFrame(true, iLayerId=-1) returned {0} (non-fatal)", forceRet);
                 }
@@ -177,7 +177,7 @@ namespace EasyRDP.Core.Protocol
                     i420Handle.AddrOfPinnedObject() + ySize + uvSize,
                     _width, _height);
 
-                Logger.Info("EncodeFrame calling: encoder=0x{0:X} res={1}x{2} bgraLen={3} i420Len={4} forceKey={5} picAddr=0x{6:X}",
+                Logger.Debug("EncodeFrame calling: encoder=0x{0:X} res={1}x{2} bgraLen={3} i420Len={4} forceKey={5} picAddr=0x{6:X}",
                     _encoder.ToInt64(), _width, _height, bgraPixels.Length, i420Size, forceKeyframe,
                     i420Handle.AddrOfPinnedObject().ToInt64());
 
@@ -194,7 +194,7 @@ namespace EasyRDP.Core.Protocol
                     return new EncodedFrame();
                 }
 
-                Logger.Info("EncodeFrame returned {0}", ret);
+                Logger.Debug("EncodeFrame returned {0}", ret);
 
                 if (ret != 0)
                 {
@@ -251,7 +251,7 @@ namespace EasyRDP.Core.Protocol
                 byte[] data = new byte[iFrameSizeInBytes];
                 Marshal.Copy(pBsBuf, data, 0, data.Length);
 
-                Logger.Info("EncodeFrame ok: outLen={0} keyframe={1} layerNum={2} layer0Type={3} bsBufLayer={4} bgraIn={5} ratio={6:F1}%",
+                Logger.Debug("EncodeFrame ok: outLen={0} keyframe={1} layerNum={2} layer0Type={3} bsBufLayer={4} bgraIn={5} ratio={6:F1}%",
                     data.Length, isKeyframe, iLayerNum, eLayerFrameType, bsBufLayer, bgraPixels.Length,
                     100.0 * data.Length / bgraPixels.Length);
                 return new EncodedFrame { Data = data, IsKeyframe = isKeyframe, Width = _width, Height = _height };
@@ -305,6 +305,18 @@ namespace EasyRDP.Core.Protocol
         }
 
         public void Dispose()
+        {
+            Dispose(true);
+            GC.SuppressFinalize(this);
+        }
+
+        /// <summary>终结器：编码线程卡死导致无法安全 Dispose 时，仍可在 GC 时回收原生句柄。</summary>
+        ~H264EncoderNative()
+        {
+            Dispose(false);
+        }
+
+        private void Dispose(bool disposing)
         {
             if (_disposed) return;
             _disposed = true;

@@ -247,6 +247,18 @@ namespace EasyRDP.Core.Protocol
         /// <summary>释放解码器资源。</summary>
         public void Dispose()
         {
+            Dispose(true);
+            GC.SuppressFinalize(this);
+        }
+
+        /// <summary>终结器：异常路径未显式 Dispose 时仍能回收原生句柄。</summary>
+        ~H264DecoderNative()
+        {
+            Dispose(false);
+        }
+
+        private void Dispose(bool disposing)
+        {
             if (_disposed) return;
             _disposed = true;
             if (_decoder != IntPtr.Zero)

@@ -129,6 +129,8 @@ namespace EasyRDP.Server.Wpf
                 try
                 {
                     TcpClient client = _listener.AcceptTcpClient();
+                    // 禁用 Nagle：远程输入事件是小包，需要低延迟而不是吞吐量
+                    client.NoDelay = true;
                     uint sessionId;
                     lock (_lock)
                     {

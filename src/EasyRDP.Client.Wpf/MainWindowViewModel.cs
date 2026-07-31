@@ -47,7 +47,7 @@ namespace EasyRDP.Client.Wpf
         private int _testFrameSeq;
 
         // 属性字段
-        private string _host = "172.26.66.81";
+        private string _host = "";
         private string _port = "2000";
         private string _username = "admin";
         private string _password = "admin";
@@ -216,6 +216,11 @@ namespace EasyRDP.Client.Wpf
             string host = _host.Trim();
             if (!int.TryParse(_port, out int port))
                 port = DefaultPort;
+            if (string.IsNullOrEmpty(host))
+            {
+                SetBusy(false, "Host is empty");
+                return;
+            }
 
             _transport = new TcpTransportClient();
             _transport.OnLog = (msg) => _dispatcher.Invoke(() => StatusText = msg);
@@ -247,6 +252,12 @@ namespace EasyRDP.Client.Wpf
             EventHandler<FragmentReceivedEventArgs> onHandshakeData = (s, args) => handshakeReassembler.OnFragment(args);
             _transport.DataReceived += onHandshakeData;
 
+            // 提前创建流会话并订阅数据事件：服务端在 HandshakeRes 之后会立即发送视频帧，
+            // 若等握手完成后再订阅，首个关键帧（seq=0）会丢失，解码器只能等下一个 IDR，
+            // 连接后最长约 1 秒黑屏。BeginReceive 会把管线就绪前的消息缓冲起来。
+            _streamSession = new ClientStreamSession();
+            _streamSession.BeginReceive(_transport);
+
             // 订阅就绪后发送握手请求
             var handshakeReq = new HandshakeReq
             {
@@ -267,6 +278,7 @@ namespace EasyRDP.Client.Wpf
             {
                 Logger.Warn("Handshake timeout after {0}ms", HandshakeTimeoutMs);
                 SetBusy(false, "Handshake timeout");
+                _streamSession?.Stop();
                 _transport.Disconnect();
                 return;
             }
@@ -278,6 +290,7 @@ namespace EasyRDP.Client.Wpf
             {
                 Logger.Warn("Handshake rejected: {0}", handshakeRes.Result);
                 SetBusy(false, "Handshake failed: " + handshakeRes.Result);
+                _streamSession?.Stop();
                 _transport.Disconnect();
                 return;
             }
@@ -289,7 +302,6 @@ namespace EasyRDP.Client.Wpf
             _renderTarget.BitmapChanged += b => RenderBitmap = b;
             _frameBuffer = new FrameBuffer();
 
-            _streamSession = new ClientStreamSession();
             _streamSession.RenderTarget = _renderTarget;
             _streamSession.InitPipeline(handshakeRes.Codec, handshakeRes.ScreenWidth, handshakeRes.ScreenHeight);
             // 订阅服务端→客户端剪贴板同步事件：服务端用户复制 → 客户端自动设置本地剪贴板
@@ -921,15 +933,18 @@ namespace EasyRDP.Client.Wpf
             if (_inputSession == null || !_running) return;
             int sx, sy;
             _inputSession.MapCoordinates(imageX, imageY, imageW, imageH, out sx, out sy);
-            var msg = new InputEventMessage { Type = InputEventType.MouseMove, X = sx, Y = sy };
-            _inputSession.SendInput(msg);
+            // 节流合并：高频 MouseMove 只更新最新坐标，由 ClientInputSession 按 ~60Hz 发送
+            _inputSession.QueueMouseMove(sx, sy);
         }
 
         public void HandleMouseDown(System.Windows.Input.MouseButton changedButton)
         {
             if (_inputSession == null || !_running) return;
-            int btn = changedButton == System.Windows.Input.MouseButton.Left ? 1
-                : changedButton == System.Windows.Input.MouseButton.Right ? 2 : 4;
+            // WPF MouseButton: Left=0 Right=1 Middle=2 XButton1=3 XButton2=4，
+            // EasyDesk MouseButton: Left=1 Right=2 Middle=3 XButton1=4 XButton2=5，
+            // 直接 +1 即可一一对应。旧实现把中键映射成 4（XButton1），属于映射 bug。
+            _inputSession.FlushPendingMouse(); // 先落地最新光标位置，保证点击位置准确
+            int btn = (int)changedButton + 1;
             var msg = new InputEventMessage { Type = InputEventType.MouseDown, KeyCode = btn };
             _inputSession.SendInput(msg);
         }
@@ -937,8 +952,8 @@ namespace EasyRDP.Client.Wpf
         public void HandleMouseUp(System.Windows.Input.MouseButton changedButton)
         {
             if (_inputSession == null || !_running) return;
-            int btn = changedButton == System.Windows.Input.MouseButton.Left ? 1
-                : changedButton == System.Windows.Input.MouseButton.Right ? 2 : 4;
+            _inputSession.FlushPendingMouse();
+            int btn = (int)changedButton + 1;
             var msg = new InputEventMessage { Type = InputEventType.MouseUp, KeyCode = btn };
             _inputSession.SendInput(msg);
         }

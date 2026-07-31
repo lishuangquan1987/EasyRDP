@@ -50,8 +50,8 @@
 
                 <!-- Password -->
                 <TextBlock Grid.Column="6" Text="Password:" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                <TextBox Grid.Column="7" Text="{Binding Password, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                         Width="120" VerticalAlignment="Center" Margin="0,0,12,0"/>
+                <PasswordBox x:Name="PasswordBox" Grid.Column="7" PasswordChanged="PasswordBox_PasswordChanged"
+                             Width="120" VerticalAlignment="Center" Margin="0,0,12,0"/>
 
                 <!-- 主操作按钮 -->
                 <StackPanel Grid.Column="8" Orientation="Horizontal" Margin="0,0,12,0">

@@ -30,6 +30,8 @@ namespace EasyRDP.Server.Wpf
 
         // Session tracking
         private readonly Dictionary<uint, SessionInfo> _sessions = new Dictionary<uint, SessionInfo>();
+        // 客户端远端地址（连接时记录，握手完成后用于 UI 展示）
+        private readonly Dictionary<uint, string> _remoteEndpoints = new Dictionary<uint, string>();
         private readonly object _lock = new object();
         private int _maxSessions = 2; // D12 default for XP dual-core
         private int _activeCount;
@@ -158,6 +160,7 @@ namespace EasyRDP.Server.Wpf
                 _sessions.Clear();
                 _reassemblers.Clear();
                 _lastActivity.Clear();
+                _remoteEndpoints.Clear();
             }
 
             // 清理所有 per-session 延迟渲染状态
@@ -720,6 +723,18 @@ namespace EasyRDP.Server.Wpf
             Stop();
         }
 
+        /// <summary>获取指定会话已发送帧数（-1 表示会话不存在），供 UI 定期刷新。</summary>
+        public long GetSessionFrames(uint sessionId)
+        {
+            lock (_lock)
+            {
+                SessionInfo info;
+                if (_sessions.TryGetValue(sessionId, out info) && info.Stream != null)
+                    return info.Stream.FramesSent;
+                return -1;
+            }
+        }
+
         private void OnClientConnected(object sender, ConnectionEventArgs e)
         {
             Logger.Info("Client connected: sessionId={0}", e.SessionId);
@@ -731,6 +746,7 @@ namespace EasyRDP.Server.Wpf
             {
                 _reassemblers[e.SessionId] = reassembler;
                 _lastActivity[e.SessionId] = DateTime.UtcNow;
+                _remoteEndpoints[e.SessionId] = e.RemoteEndPoint ?? "";
             }
         }
 
@@ -1055,21 +1071,13 @@ namespace EasyRDP.Server.Wpf
             var negotiated = CodecNegotiator.Negotiate(req.Capabilities, serverCaps);
             if (!negotiated.HasValue)
             {
-                // Server has no encoder (e.g. OpenH264 DLL wrong arch on Win7 32-bit).
-                // Accept anyway — ServerStreamSession falls back to raw pixels.
-                if (serverCaps == CodecCapabilities.None)
-                {
-                    Logger.Warn("No encoder available on server — falling back to raw pixels");
-                    negotiated = PickFallbackCodec(req.Capabilities);
-                }
-                else
-                {
-                    Logger.Warn("No common codec: clientCaps={0} serverCaps={1}", req.Capabilities, serverCaps);
-                    res = new HandshakeRes { Result = HandshakeResult.NoCommonCodec };
-                    SendResponse(e.SessionId, res);
-                    DisconnectSession(e.SessionId);
-                    return;
-                }
+                // H.264 是唯一编码方式（设计文档 D1 禁止回退原始像素）。
+                // 无公共编码器（含服务端无编码器）直接拒绝，避免客户端拿到 Success 后黑屏。
+                Logger.Warn("No common codec: clientCaps={0} serverCaps={1}", req.Capabilities, serverCaps);
+                res = new HandshakeRes { Result = HandshakeResult.NoCommonCodec };
+                SendResponse(e.SessionId, res);
+                DisconnectSession(e.SessionId);
+                return;
             }
 
             try
@@ -1114,7 +1122,12 @@ namespace EasyRDP.Server.Wpf
                 var handler = SessionAttached;
                 if (handler != null)
                 {
-                    string remote = "?";
+                    string remote;
+                    lock (_lock)
+                    {
+                        if (!_remoteEndpoints.TryGetValue(e.SessionId, out remote))
+                            remote = "?";
+                    }
                     string codec = negotiated.Value.ToString();
                     string resolution = bounds.Width + "x" + bounds.Height;
                     handler(e.SessionId, remote, codec, resolution);
@@ -1157,6 +1170,7 @@ namespace EasyRDP.Server.Wpf
                 _sessions.Remove(sessionId);
                 _reassemblers.Remove(sessionId);
                 _lastActivity.Remove(sessionId);
+                _remoteEndpoints.Remove(sessionId);
                 _activeCount--;
             }
 
@@ -1224,18 +1238,6 @@ namespace EasyRDP.Server.Wpf
                     DisconnectSession(sid);
                 }
             }
-        }
-
-        /// <summary>
-        /// 服务端无编码器时，从客户端能力中挑选一个可用编码（ServerStreamSession 会回退到原始像素）。
-        /// </summary>
-        private static CodecId PickFallbackCodec(CodecCapabilities clientCaps)
-        {
-            if ((clientCaps & CodecCapabilities.H264Hardware) != 0)
-                return CodecId.H264Hardware;
-            if ((clientCaps & CodecCapabilities.H264Software) != 0)
-                return CodecId.H264Software;
-            return CodecId.H264Software; // 保底
         }
 
         /// <summary>

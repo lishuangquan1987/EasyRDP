@@ -56,12 +56,15 @@ namespace EasyRDP.Client.Wpf
                 Resize(w, h);
             }
 
-            // 异步转发到 UI 线程执行 WritePixels — 不阻塞渲染线程
+            // 同步转发到 UI 线程执行 WritePixels。
+            // 必须同步：渲染线程（RenderLoop）在 RenderFrame 返回后立即 ReleaseReadFrame，
+            // 若用 BeginInvoke 异步执行，解码线程可能在下一次 BorrowWriteBuffer 时复用同一块
+            // 像素缓冲，导致 WritePixels 读到被覆盖的数据（撕裂/花屏）。
             // 注意：bitmap 可能在 Dispose 后被置 null，需在 delegate 内再次检查
             var bitmap = _bitmap;
             if (bitmap == null) return;
 
-            _uiDispatcher.BeginInvoke(new Action(() =>
+            _uiDispatcher.Invoke(new Action(() =>
             {
                 if (_disposed || bitmap != _bitmap) return;
                 bitmap.Lock();

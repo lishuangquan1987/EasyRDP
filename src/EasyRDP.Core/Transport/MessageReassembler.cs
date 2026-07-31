@@ -26,8 +26,11 @@ namespace EasyRDP.Core.Transport
 
         // 实时流重组状态（VideoFrame/InputEvent/CursorUpdate）
         private readonly FrameState _realtimeState = new FrameState("realtime");
-        // 控制流重组状态（Clipboard*/Handshake/Keepalive）
-        private readonly FrameState _controlState = new FrameState("control");
+        // 控制流重组状态：每种控制消息类型独立一个状态。
+        // 若不按类型拆分，多分片的 ClipFileContentsRes（1MB≈744片，frameId=0）传输途中，
+        // 任何其他 frameId=0 的单分片控制消息（ClipboardSync/ImageClipboard* 等）会被当作
+        // 同一帧的分片而静默丢弃。OnFragment 由单个接收线程串行调用，无需加锁。
+        private readonly Dictionary<byte, FrameState> _controlStates = new Dictionary<byte, FrameState>();
 
         // 协议级诊断计数器（与分流无关，统计所有分片）
         private int _fragCountRejectCount;
@@ -126,8 +129,21 @@ namespace EasyRDP.Core.Transport
                 return; // Corrupted fragment — discard
             }
 
-            // 按消息类型分流：实时流走 stale 检测，控制流独立重组不受实时帧干扰
-            var state = IsRealtimeType(messageType) ? _realtimeState : _controlState;
+            // 按消息类型分流：实时流走 stale 检测（允许丢旧帧），控制流按类型独立重组，
+            // 既不受实时帧干扰，同帧命名的不同控制消息之间也不会互相覆盖。
+            FrameState state;
+            if (IsRealtimeType(messageType))
+            {
+                state = _realtimeState;
+            }
+            else
+            {
+                if (!_controlStates.TryGetValue(messageType, out state))
+                {
+                    state = new FrameState("control-0x" + messageType.ToString("X2"));
+                    _controlStates[messageType] = state;
+                }
+            }
             state.ProcessFragment(frag.SessionId, messageType, frameId, fragIdx, fragCount,
                 totalPayloadLen, data, pos, fragDataLen, MessageReceived);
         }

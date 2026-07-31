@@ -66,15 +66,25 @@ namespace EasyRDP.Core.Protocol
         /// <summary>序列化为 payload。</summary>
         public byte[] Pack()
         {
-            int dataLen = Data != null ? Data.Length : 0;
+            // Serialize exactly DataLen bytes: the sender may reuse a larger
+            // buffer (e.g. the whole DIB array) as Data, so Data.Length must
+            // not be used here, otherwise 64KB chunking degenerates into a
+            // single full-image message (wasted bandwidth + >10MB failures).
+            // 先把 Data 捕获到局部变量，避免验证与写入之间被并发置空
+            byte[] data = Data;
+            int dataLen = DataLen;
+            uint transferId = TransferId;
+            long offset = Offset;
+            if (dataLen < 0 || (dataLen > 0 && (data == null || dataLen > data.Length)))
+                throw new ArgumentException("ImageClipboardData DataLen out of range: " + dataLen);
             using (var ms = new MemoryStream(16 + dataLen))
             using (var bw = new BinaryWriter(ms))
             {
-                bw.Write(TransferId);
-                bw.Write(Offset);
+                bw.Write(transferId);
+                bw.Write(offset);
                 bw.Write(dataLen);
                 if (dataLen > 0)
-                    bw.Write(Data, 0, dataLen);
+                    bw.Write(data, 0, dataLen);
                 return ms.ToArray();
             }
         }
@@ -146,6 +156,9 @@ namespace EasyRDP.Core.Protocol
     /// </summary>
     public class ImageClipboardReceiver
     {
+        /// <summary>Upper bound for a single clipboard image (256MB) - prevents OOM on bogus TotalSize.</summary>
+        private const long MaxImageClipboardSize = 256L * 1024 * 1024;
+
         /// <summary>传输完成回调，参数为完整的 CF_DIB 字节数组。</summary>
         public event Action<byte[]> Completed;
 
@@ -161,6 +174,9 @@ namespace EasyRDP.Core.Protocol
         /// <param name="onCompleted">完成回调（可选，也可用 Completed 事件订阅）。</param>
         public ImageClipboardReceiver(uint transferId, long totalSize, Action<byte[]> onCompleted = null)
         {
+            if (totalSize <= 0 || totalSize > MaxImageClipboardSize)
+                throw new ArgumentOutOfRangeException("totalSize",
+                    "Image clipboard size out of bounds: " + totalSize);
             _transferId = transferId;
             _totalSize = totalSize;
             _buffer = new byte[totalSize];

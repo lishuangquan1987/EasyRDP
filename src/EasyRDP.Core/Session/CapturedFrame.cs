@@ -8,6 +8,8 @@ namespace EasyRDP.Core.Session
     public struct CapturedFrame
     {
         public byte[] Pixels;
+        /// <summary>像素缓冲在会话捕获缓冲数组中的下标（编码完成后用于归还缓冲所有权）。</summary>
+        public int BufferIndex;
         public int Width;
         public int Height;
         public long CaptureTimestamp;

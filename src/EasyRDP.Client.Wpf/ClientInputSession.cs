@@ -1,4 +1,5 @@
 using System;
+using System.Threading;
 using EasyRDP.Core.Protocol;
 using EasyRDP.Core.Session;
 using EasyRDP.Core.Transport;
@@ -14,13 +15,32 @@ namespace EasyRDP.Client.Wpf
         private int _screenWidth;
         private int _screenHeight;
         private bool _disposed;
-        private uint _sendFrameId = 1000; // Separate from stream frame IDs
+        // 与流帧 ID 命名空间分离；用 int + Interlocked 保证线程安全
+        // （SendInput 会被 UI 线程与鼠标节流定时器线程并发调用，uint 的 ++ 不是原子的）
+        private int _sendFrameId = 1000;
+
+        // 鼠标移动节流：WPF MouseMove 频率可达 100Hz+，每个事件都发一个分片会打满链路。
+        // 这里只保留最新坐标，由定时器按 ~60Hz 合并发送，交互延迟增加 <16ms。
+        private readonly object _mouseLock = new object();
+        private bool _hasPendingMouse;
+        private int _pendingMouseX;
+        private int _pendingMouseY;
+        private Timer _mouseFlushTimer;
+        private const int MouseFlushIntervalMs = 16;
 
         public void Start(ITransportClient transport, int screenWidth, int screenHeight)
         {
             _transport = transport;
             _screenWidth = screenWidth;
             _screenHeight = screenHeight;
+            // 防止重复 Start（如重连前未 Stop）导致旧定时器泄漏
+            if (_mouseFlushTimer != null)
+            {
+                try { _mouseFlushTimer.Dispose(); } catch { }
+                _mouseFlushTimer = null;
+            }
+            _mouseFlushTimer = new Timer(state => FlushPendingMouse(), null,
+                MouseFlushIntervalMs, MouseFlushIntervalMs);
         }
 
         /// <summary>服务端分辨率变化通知，更新坐标映射。</summary>
@@ -32,6 +52,20 @@ namespace EasyRDP.Client.Wpf
 
         public void Stop()
         {
+            // 先停定时器并等待在途回调结束，再置空 transport，
+            // 避免 FlushPendingMouse 在 Stop 返回后仍访问 _transport
+            if (_mouseFlushTimer != null)
+            {
+                try
+                {
+                    var waitHandle = new ManualResetEvent(false);
+                    _mouseFlushTimer.Dispose(waitHandle);
+                    waitHandle.WaitOne();
+                    waitHandle.Dispose();
+                }
+                catch { }
+                _mouseFlushTimer = null;
+            }
             _disposed = true;
             _transport = null;
         }
@@ -48,8 +82,36 @@ namespace EasyRDP.Client.Wpf
 
             byte[] payload = msg.Pack();
             MessageReassembler.FragAndSend(
-                _sendFrameId++, (byte)MessageType.InputEvent, payload,
+                (uint)Interlocked.Increment(ref _sendFrameId), (byte)MessageType.InputEvent, payload,
                 (sid, data) => _transport.Send(data), 0);
+        }
+
+        /// <summary>
+        /// 记录待发送的鼠标坐标（节流队列），由内部定时器按 ~60Hz 合并发送。
+        /// 比 WPF 原始事件频率低一个数量级，同时保证坐标始终是最新的。
+        /// </summary>
+        public void QueueMouseMove(int x, int y)
+        {
+            lock (_mouseLock)
+            {
+                _pendingMouseX = x;
+                _pendingMouseY = y;
+                _hasPendingMouse = true;
+            }
+        }
+
+        /// <summary>立即发送待处理的鼠标移动（在鼠标按键/滚轮事件前调用，保证点击位置准确）。</summary>
+        public void FlushPendingMouse()
+        {
+            int x, y;
+            lock (_mouseLock)
+            {
+                if (!_hasPendingMouse) return;
+                x = _pendingMouseX;
+                y = _pendingMouseY;
+                _hasPendingMouse = false;
+            }
+            SendInput(new InputEventMessage { Type = InputEventType.MouseMove, X = x, Y = y });
         }
 
         /// <summary>把客户端控件坐标映射到服务端屏幕坐标。</summary>
@@ -62,8 +124,33 @@ namespace EasyRDP.Client.Wpf
                 serverY = (int)controlY;
                 return;
             }
-            serverX = (int)(controlX / controlW * _screenWidth);
-            serverY = (int)(controlY / controlH * _screenHeight);
+
+            // 客户端 Image 用 Stretch=Uniform，宽高比不一致时内容居中并留有黑边。
+            // 先算出实际绘制区域（居中），黑边内的坐标钳制到绘制区边缘，
+            // 再把绘制区坐标映射到服务端像素坐标，避免比例不一致时光标位置失真。
+            double aspect = (double)_screenWidth / _screenHeight;
+            double drawW = controlW;
+            double drawH = controlH;
+            if (controlW / controlH > aspect)
+            {
+                drawH = controlH;
+                drawW = controlH * aspect;
+            }
+            else
+            {
+                drawW = controlW;
+                drawH = controlW / aspect;
+            }
+            double offX = (controlW - drawW) / 2.0;
+            double offY = (controlH - drawH) / 2.0;
+            double px = controlX - offX;
+            double py = controlY - offY;
+            if (px < 0) px = 0;
+            else if (px > drawW) px = drawW;
+            if (py < 0) py = 0;
+            else if (py > drawH) py = drawH;
+            serverX = (int)(px / drawW * _screenWidth);
+            serverY = (int)(py / drawH * _screenHeight);
         }
     }
 }

@@ -16,6 +16,15 @@ public partial class MainWindow : Window
         InitializeComponent();
         _vm = new MainWindowViewModel();
         DataContext = _vm;
+        // PasswordBox 不支持绑定 Password（安全设计），初始值在 XAML 构造后同步一次，
+        // 后续变化由 PasswordChanged 事件同步到 ViewModel。
+        PasswordBox.Password = _vm.Password ?? string.Empty;
+    }
+
+    /// <summary>PasswordBox 密码变化 → 同步到 ViewModel（UI 不直接绑定敏感属性）。</summary>
+    private void PasswordBox_PasswordChanged(object sender, RoutedEventArgs e)
+    {
+        _vm.Password = PasswordBox.Password;
     }
 
     /// <summary>将鼠标事件路由到 ViewModel。</summary>
@@ -66,8 +75,9 @@ public partial class MainWindow : Window
             }
         }
 
-        // 焦点在 TextBox 上时不拦截（让用户正常输入 IP 和端口）
-        if (System.Windows.Input.Keyboard.FocusedElement is System.Windows.Controls.TextBox)
+        // 焦点在 TextBox/PasswordBox 上时不拦截（让用户正常输入 IP、端口和密码）
+        if (System.Windows.Input.Keyboard.FocusedElement is System.Windows.Controls.TextBox
+            || System.Windows.Input.Keyboard.FocusedElement is System.Windows.Controls.PasswordBox)
             return;
 
         // WPF 中 Alt 键通过 SystemKey 传递
@@ -79,8 +89,9 @@ public partial class MainWindow : Window
     /// <summary>键盘释放 — 路由到 ViewModel。</summary>
     private void Window_KeyUp(object sender, KeyEventArgs e)
     {
-        // 焦点在 TextBox 上时不拦截
-        if (System.Windows.Input.Keyboard.FocusedElement is System.Windows.Controls.TextBox)
+        // 焦点在 TextBox/PasswordBox 上时不拦截
+        if (System.Windows.Input.Keyboard.FocusedElement is System.Windows.Controls.TextBox
+            || System.Windows.Input.Keyboard.FocusedElement is System.Windows.Controls.PasswordBox)
             return;
 
         Key key = e.Key == Key.System ? e.SystemKey : e.Key;

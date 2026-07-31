@@ -251,6 +251,17 @@ namespace EasyRDP.Server.Wpf
             var elapsed = DateTime.Now - _startTime;
             Uptime = string.Format("{0:D2}:{1:D2}:{2:D2}",
                 elapsed.Hours, elapsed.Minutes, elapsed.Seconds);
+
+            // 每秒刷新会话已发送帧数（原实现 Frames 列永远为 0）
+            if (_transportHost != null)
+            {
+                foreach (var item in Sessions)
+                {
+                    long frames = _transportHost.GetSessionFrames(item.IdValue);
+                    if (frames >= 0 && frames != item.Frames)
+                        item.Frames = (int)frames;
+                }
+            }
         }
 
         private void AddLog(string message)

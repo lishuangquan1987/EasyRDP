@@ -38,8 +38,8 @@
 
                 <!-- Password -->
                 <TextBlock Grid.Column="4" Text="Password:" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                <TextBox Grid.Column="5" Text="{Binding Password, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                         Width="140" VerticalAlignment="Center" Margin="0,0,16,0"/>
+                <PasswordBox x:Name="PasswordBox" Grid.Column="5" PasswordChanged="PasswordBox_PasswordChanged"
+                             Width="140" VerticalAlignment="Center" Margin="0,0,16,0"/>
 
                 <!-- 占位 -->
                 <TextBlock Grid.Column="6"/>

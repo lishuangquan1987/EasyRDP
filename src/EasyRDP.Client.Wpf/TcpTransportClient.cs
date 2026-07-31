@@ -36,6 +36,8 @@ namespace EasyRDP.Client.Wpf
             try
             {
                 _client = new TcpClient();
+                // 禁用 Nagle 算法：输入事件/心跳都是小包，Nagle + 延迟 ACK 会给交互输入增加约 40ms 延迟
+                _client.NoDelay = true;
                 var result = _client.BeginConnect(host, port, null, null);
                 if (!result.AsyncWaitHandle.WaitOne(timeoutMs))
                 {

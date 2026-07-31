@@ -25,6 +25,17 @@ namespace EasyRDP.Client.Wpf
         private Thread _renderThread;
         private long _frameCount;
         private int _decodeFailures;
+        // 握手竞态修复：服务端先启动视频流再发 HandshakeRes，客户端若在收到响应后才订阅
+        // 数据事件，首帧/首个关键帧（seq=0）会丢失，解码器只能等下一个 IDR（最长约 1 秒黑屏）。
+        // 因此在发送握手前就通过 BeginReceive 订阅，管线未就绪前把消息缓冲，InitPipeline 后回放。
+        private volatile bool _receiving;
+        // 跨线程访问（UI 线程写、接收线程读），必须 volatile 否则接收线程可能永远读到旧值
+        private volatile bool _pipelineReady;
+        private readonly object _pendingLock = new object();
+        private readonly System.Collections.Generic.List<MessageReceivedEventArgs> _pendingMessages
+            = new System.Collections.Generic.List<MessageReceivedEventArgs>();
+        private const int MaxPendingMessages = 1024;
+        private bool _pendingOverflowLogged;
 
         /// <summary>Gets the negotiated video codec used for decoding.</summary>
         public CodecId Codec { get; private set; }
@@ -58,18 +69,37 @@ namespace EasyRDP.Client.Wpf
             _frameBuffer = new FrameBuffer();
             if (_renderTarget != null)
                 _renderTarget.Resize(width, height);
+            _pipelineReady = true;
+            FlushPendingMessages();
+        }
+
+        /// <summary>
+        /// 在发送 HandshakeReq 之前调用：提前订阅传输层数据事件并创建重组器，
+        /// 使服务端在 HandshakeRes 之后立刻发来的视频帧不会因为客户端尚未 Start 而丢失。
+        /// 管线未就绪（InitPipeline 未完成）时收到的消息会先缓冲，就绪后按序回放。
+        /// </summary>
+        public void BeginReceive(ITransportClient transport)
+        {
+            lock (_pendingLock)
+            {
+                if (_receiving) return;
+                _transport = transport;
+                _receiving = true;
+                _reassembler = new MessageReassembler();
+                _reassembler.MessageReceived += OnMessageReceived;
+                _transport.DataReceived += OnDataReceived;
+            }
         }
 
         /// <summary>Starts the stream session: begins receiving, decoding, and rendering frames.</summary>
         public void Start(ITransportClient transport)
         {
             if (_running) return;
-            _transport = transport;
+            if (!_receiving)
+                BeginReceive(transport);
+            else
+                _transport = transport;
             _running = true;
-
-            _reassembler = new MessageReassembler();
-            _reassembler.MessageReceived += OnMessageReceived;
-            _transport.DataReceived += OnDataReceived;
 
             _receiveThread = new Thread(ReceiveLoop);
             _receiveThread.IsBackground = true;
@@ -78,6 +108,9 @@ namespace EasyRDP.Client.Wpf
             _renderThread = new Thread(RenderLoop);
             _renderThread.IsBackground = true;
             _renderThread.Start();
+
+            // 防御性回放：万一 InitPipeline 未先于 Start 完成，缓冲的消息也要能及时处理
+            FlushPendingMessages();
         }
 
         /// <summary>Stops the stream session, terminates background threads, and cleans up resources.</summary>
@@ -85,8 +118,14 @@ namespace EasyRDP.Client.Wpf
         {
             Logger.Info("ClientStreamSession stopping, frames received: {0} decodeFailures: {1}", _frameCount, _decodeFailures);
             _running = false;
+            _receiving = false;
+            _pipelineReady = false;
             if (_transport != null)
                 _transport.DataReceived -= OnDataReceived;
+            lock (_pendingLock)
+            {
+                _pendingMessages.Clear();
+            }
 
             // 取消所有正在进行的文件剪贴板下载，避免断连后后台线程继续向已关闭的 transport 发送请求
             // Cancel 只设置标志位，in-flight 的请求仍会等超时退出，但不会发新请求
@@ -206,6 +245,32 @@ namespace EasyRDP.Client.Wpf
 
         private void OnMessageReceived(object sender, MessageReceivedEventArgs e)
         {
+            if (!_pipelineReady)
+            {
+                // 管线未就绪（握手响应处理中）：缓冲消息，InitPipeline 完成后按序回放，
+                // 避免首个关键帧被丢弃导致解码器等待下一个 IDR。
+                lock (_pendingLock)
+                {
+                    if (_pendingMessages.Count < MaxPendingMessages)
+                    {
+                        _pendingMessages.Add(e);
+                    }
+                    else if (!_pendingOverflowLogged)
+                    {
+                        // 仅记录一次，避免满缓冲期间刷屏；此类丢弃只发生在握手窗口异常拉长时
+                        Logger.Warn("Pending message buffer full ({0}), discarding messages before pipeline ready",
+                            MaxPendingMessages);
+                        _pendingOverflowLogged = true;
+                    }
+                }
+                return;
+            }
+            RouteMessage(e);
+        }
+
+        /// <summary>把一条完整消息路由到对应处理器。</summary>
+        private void RouteMessage(MessageReceivedEventArgs e)
+        {
             if (e.MessageType == (byte)MessageType.VideoFrame)
             {
                 var msg = VideoFrameMessage.Unpack(e.Data);
@@ -238,6 +303,26 @@ namespace EasyRDP.Client.Wpf
             else if (e.MessageType == (byte)MessageType.ImageClipboardEnd)
             {
                 HandleImageClipboardEnd(e.Data);
+            }
+        }
+
+        /// <summary>
+        /// 回放管线就绪前缓冲的消息（按到达顺序）。在 InitPipeline/Start 时调用，
+        /// 此时位于 UI 线程（ConnectAsync 流程），仅回放握手窗口内的少量消息，开销可忽略。
+        /// </summary>
+        private void FlushPendingMessages()
+        {
+            System.Collections.Generic.List<MessageReceivedEventArgs> batch = null;
+            lock (_pendingLock)
+            {
+                if (_pendingMessages.Count == 0) return;
+                batch = new System.Collections.Generic.List<MessageReceivedEventArgs>(_pendingMessages);
+                _pendingMessages.Clear();
+            }
+            if (batch == null) return;
+            foreach (var e in batch)
+            {
+                RouteMessage(e);
             }
         }
 
