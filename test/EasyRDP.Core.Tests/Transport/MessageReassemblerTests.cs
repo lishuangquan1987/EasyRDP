@@ -1,3 +1,4 @@
+#nullable disable
 using EasyRDP.Core.Protocol;
 using EasyRDP.Core.Transport;
 using Xunit;
@@ -343,6 +344,54 @@ namespace EasyRDP.Core.Tests.Transport
             Assert.Equal(listPayload, received[1].Data);
             Assert.Equal((byte)MessageType.ClipFileContentsReq, received[2].MessageType);
             Assert.Equal(reqPayload, received[2].Data);
+        }
+
+        /// <summary>
+        /// 回归测试：多分片的 ClipFileContentsRes（frameId=0）传输途中插入一条单分片的
+        /// ClipboardSync（frameId=0），两条消息都必须完整送达。
+        /// 旧实现所有控制消息共用一个重组状态，插入的控制消息会被当作文件响应的分片而静默丢弃。
+        /// </summary>
+        [Fact]
+        public void ControlStream_InterleavedDifferentTypes_AllDeliveredIntact()
+        {
+            var reassembler = new MessageReassembler();
+            var received = new System.Collections.Generic.List<MessageReceivedEventArgs>();
+            reassembler.MessageReceived += (s, e) => received.Add(e);
+
+            // 模拟 1MB 文件响应的前几片（多分片控制消息）
+            byte[] resPayload = new byte[Constants.FragmentSize * 3 + 100];
+            for (int i = 0; i < resPayload.Length; i++)
+                resPayload[i] = (byte)(i % 251);
+            // 插入的剪贴板文本同步（单分片）
+            byte[] syncPayload = new byte[] { 1, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0x48, 0x69 }; // Format=1, "Hi"
+
+            var resFrags = new System.Collections.Generic.List<byte[]>();
+            var syncFrags = new System.Collections.Generic.List<byte[]>();
+            MessageReassembler.FragAndSend(0, (byte)MessageType.ClipFileContentsRes, resPayload,
+                (sid, data) => resFrags.Add(data), 0);
+            MessageReassembler.FragAndSend(0, (byte)MessageType.ClipboardSync, syncPayload,
+                (sid, data) => syncFrags.Add(data), 0);
+
+            Assert.True(resFrags.Count > 3);
+            Assert.Single(syncFrags);
+
+            // 交错投递：文件响应前 2 片 → 剪贴板同步 → 文件响应剩余全部
+            for (int i = 0; i < 2 && i < resFrags.Count; i++)
+                reassembler.OnFragment(new FragmentReceivedEventArgs(0, resFrags[i]));
+            reassembler.OnFragment(new FragmentReceivedEventArgs(0, syncFrags[0]));
+            for (int i = 2; i < resFrags.Count; i++)
+                reassembler.OnFragment(new FragmentReceivedEventArgs(0, resFrags[i]));
+
+            Assert.Equal(2, received.Count);
+
+            // 剪贴板同步先完成组装，因此先送达
+            Assert.Equal((byte)MessageType.ClipboardSync, received[0].MessageType);
+            Assert.Equal(syncPayload, received[0].Data);
+
+            Assert.Equal((byte)MessageType.ClipFileContentsRes, received[1].MessageType);
+            Assert.Equal(resPayload.Length, received[1].Data.Length);
+            for (int i = 0; i < resPayload.Length; i++)
+                Assert.Equal(resPayload[i], received[1].Data[i]);
         }
     }
 }

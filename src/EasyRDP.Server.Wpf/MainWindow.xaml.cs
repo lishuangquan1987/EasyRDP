@@ -26,5 +26,14 @@ namespace EasyRDP.Server.Wpf
         {
             _vm.Password = PasswordBox.Password;
         }
+
+        /// <summary>会话列表"踢出"按钮：路由到 ViewModel 异步断开对应会话。</summary>
+        private void KickButton_Click(object sender, RoutedEventArgs e)
+        {
+            var button = sender as System.Windows.Controls.Button;
+            if (button == null || button.Tag == null) return;
+            if (button.Tag is uint sessionId)
+                _vm.KickSession(sessionId);
+        }
     }
 }

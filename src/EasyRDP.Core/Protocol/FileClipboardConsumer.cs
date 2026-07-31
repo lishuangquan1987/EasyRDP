@@ -30,9 +30,10 @@ namespace EasyRDP.Core.Protocol
         /// 并发请求数（滑动窗口大小）。
         /// Consumer 同时发 Concurrency 个 FileContentsReq，收到响应后立即发下一个。
         /// 相比串行模式，减少 RTT 串行等待，6GB 文件预计从 184 秒降到约 52 秒。
-        /// 8 路是经验值：太少(1-2)提升有限，太多(16+)会争抢 _sendLock 并占用内存。
+        /// 4 路是折中值：太少(1-2)提升有限；太多会长时间占满发送锁，
+        /// 让同一 socket 上的视频帧/输入事件（无 QoS 优先级）被显著拖慢。
         /// </summary>
-        private const int Concurrency = 8;
+        private const int Concurrency = 4;
 
         /// <summary>
         /// 单次请求超时（30秒）。

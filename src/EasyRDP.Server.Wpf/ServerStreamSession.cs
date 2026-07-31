@@ -1,3 +1,4 @@
+#nullable disable
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -29,6 +30,8 @@ namespace EasyRDP.Server.Wpf
         private IVideoEncoder _encoder;
         private volatile bool _running;
         private volatile bool _stopping;
+        // 0=未触发, 1=已触发；用 Interlocked 保证跨线程只触发一次
+        private int _fatalRaisedFlag;
 
         // Two-level queues
         private Queue<CapturedFrame> _frameQueue = new Queue<CapturedFrame>();
@@ -50,11 +53,9 @@ namespace EasyRDP.Server.Wpf
         private Queue<long> _encodeTimes = new Queue<long>();
         private long _encodeSum;
         private const int AdaptiveWindow = 30;
-        private int _adaptiveLevel;
-        private long _adaptiveTargetMs = 33; // ~30fps
 
         // D12 global load
-        private int _globalLoadLevel;
+        private volatile int _globalLoadLevel;
 
         // Diagnostics counters
         private int _consecutiveEncodeFailures;
@@ -150,6 +151,7 @@ namespace EasyRDP.Server.Wpf
 
             _running = true;
             _stopping = false;
+            Interlocked.Exchange(ref _fatalRaisedFlag, 0);
             Logger.Info("Session {0}: stream started, resolution={1}x{2}, frameDelay={3}ms",
                 sessionId, _lastW, _lastH, FrameDelayMs);
 
@@ -345,14 +347,15 @@ namespace EasyRDP.Server.Wpf
                     Logger.Info("Session {0}: EncodeLoop iter={1} dequeued frame res={2}x{3} bgraLen={4}",
                         _sessionId, encodeLoopIter, frame.Width, frame.Height, frame.Pixels.Length);
 
-                // Throttle
-                if (FrameDelayMs > 0)
+                // Throttle（D11 自适应帧率 + D12 全局负载：负载每级额外 +10ms 帧间隔）
+                int effectiveDelay = FrameDelayMs + _globalLoadLevel * 10;
+                if (effectiveDelay > 0)
                 {
                     long now = Stopwatch.GetTimestamp();
                     long elapsed = (now - lastEncodeTimestamp) * 1000 / Stopwatch.Frequency;
-                    if (elapsed < FrameDelayMs - 1)
+                    if (elapsed < effectiveDelay - 1)
                     {
-                        Thread.Sleep(FrameDelayMs - (int)elapsed);
+                        Thread.Sleep(effectiveDelay - (int)elapsed);
                     }
                 }
                 lastEncodeTimestamp = Stopwatch.GetTimestamp();
@@ -392,6 +395,8 @@ namespace EasyRDP.Server.Wpf
                     Logger.Error(ex, "Session {0}: Encode threw exception seq={1} — frame skipped",
                         _sessionId, _sequenceNumber);
                     _consecutiveEncodeFailures++;
+                    if (_consecutiveEncodeFailures == 30)
+                        RaiseFatal("Encoder threw repeatedly (" + _consecutiveEncodeFailures + " times)");
                     lock (_lock) { _captureBufInUse[frame.BufferIndex] = false; }
                     continue;
                 }
@@ -432,6 +437,8 @@ namespace EasyRDP.Server.Wpf
                     if (_consecutiveEncodeFailures == 1 || _consecutiveEncodeFailures % 30 == 0)
                         Logger.Warn("Session {0}: encode failed (seq={1}), frame dropped. Consecutive failures={2}, encodeMs={3:F1}",
                             _sessionId, _sequenceNumber, _consecutiveEncodeFailures, encodeMs);
+                    if (_consecutiveEncodeFailures == 30)
+                        RaiseFatal("Encoder failed repeatedly (" + _consecutiveEncodeFailures + " frames)");
                     continue;
                 }
 
@@ -523,6 +530,25 @@ namespace EasyRDP.Server.Wpf
         private int GetPendingFrames()
         {
             lock (_lock) return _sendQueue.Count;
+        }
+
+        /// <summary>触发一次 FatalError（不可恢复故障，TransportHost 据此断开会话）。</summary>
+        private void RaiseFatal(string message)
+        {
+            if (Interlocked.CompareExchange(ref _fatalRaisedFlag, 1, 0) != 0) return;
+            Logger.Error("Session {0}: FatalError: {1}", _sessionId, message);
+            var handler = FatalError;
+            if (handler != null)
+            {
+                try
+                {
+                    handler(this, new ErrorEventArgs(message, null));
+                }
+                catch (Exception ex)
+                {
+                    Logger.Warn(ex, "FatalError handler threw");
+                }
+            }
         }
     }
 }

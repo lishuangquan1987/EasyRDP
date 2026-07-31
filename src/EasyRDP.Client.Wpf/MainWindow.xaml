@@ -67,7 +67,13 @@
                     <Button Content="Fullscreen" Command="{Binding FullscreenCommand}" Width="80" Height="28" Margin="0,0,4,0"
                             ToolTip="切换全屏/窗口模式"/>
                     <Button Content="Local Test" Command="{Binding StartTestCommand}" Width="80" Height="28"
-                            ToolTip="在本地运行渲染测试，验证管线是否正常"/>
+                            ToolTip="在本地运行渲染测试，验证管线是否正常" Margin="0,0,8,0"/>
+                    <Button Content="Lock" Command="{Binding LockCommand}" Width="56" Height="28" Margin="0,0,4,0"
+                            ToolTip="远程锁定（Win+L）；Ctrl+Alt+Del 属系统安全序列无法模拟"/>
+                    <Button Content="Alt+Tab" Command="{Binding AltTabCommand}" Width="64" Height="28" Margin="0,0,4,0"
+                            ToolTip="在远端发送 Alt+Tab 切换窗口"/>
+                    <Button Content="Reset Keys" Command="{Binding ResetKeysCommand}" Width="80" Height="28"
+                            ToolTip="释放可能卡住的 Ctrl/Alt/Shift/Win 键"/>
                 </StackPanel>
             </Grid>
         </Border>

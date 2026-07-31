@@ -230,5 +230,40 @@ namespace EasyRDP.Core.Tests.Protocol
             Assert.NotNull(restored.Data);
             Assert.Equal(0, restored.Data.Length);
         }
+
+        /// <summary>
+        /// 回归测试：Pack 必须以 DataLen 为准，只序列化前 DataLen 字节。
+        /// 旧实现误用 Data.Length，导致服务端复用整块 DIB 缓冲时把整张图片当单个消息发出
+        /// （>10MB 直接失败、发送期间阻塞视频流）。
+        /// </summary>
+        [Fact]
+        public void ImageClipboardData_PackUsesDataLen_NotDataLength()
+        {
+            const int dataLen = 64 * 1024;
+            // 模拟服务端"首块复用整个 DIB 数组"：Data.Length 远大于 DataLen
+            var big = new byte[1024 * 1024];
+            for (int i = 0; i < dataLen; i++)
+                big[i] = (byte)(i & 0xFF);
+
+            var msg = new ImageClipboardDataMessage
+            {
+                TransferId = 7,
+                Offset = 0,
+                DataLen = dataLen,
+                Data = big
+            };
+
+            byte[] payload = msg.Pack();
+            // payload 结构：TransferId(4) + Offset(8) + DataLen(4) + Data(dataLen)
+            Assert.Equal(16 + dataLen, payload.Length);
+
+            var restored = ImageClipboardDataMessage.Unpack(payload);
+            Assert.Equal(7u, restored.TransferId);
+            Assert.Equal(0L, restored.Offset);
+            Assert.Equal(dataLen, restored.DataLen);
+            Assert.Equal(dataLen, restored.Data.Length);
+            for (int i = 0; i < dataLen; i++)
+                Assert.Equal((byte)(i & 0xFF), restored.Data[i]);
+        }
     }
 }

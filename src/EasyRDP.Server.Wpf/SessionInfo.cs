@@ -1,3 +1,4 @@
+#nullable disable
 namespace EasyRDP.Server.Wpf
 {
     internal class SessionInfo

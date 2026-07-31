@@ -7,6 +7,7 @@ using System.Windows.Input;
 using System.Windows.Threading;
 using EasyDesk.Core;
 using EasyDesk.Windows;
+using EasyRDP.Shared;
 
 namespace EasyRDP.Server.Wpf
 {
@@ -32,9 +33,9 @@ namespace EasyRDP.Server.Wpf
         private string _uptime = "—";
         private string _logLine = "Ready";
         private bool _isRunning;
-        // 默认凭据 admin/admin — UI 可修改
-        private string _username = "admin";
-        private string _password = "admin";
+        // 默认不预设凭据：启动服务端时必须显式输入用户名/密码（StartServer 会校验非空）
+        private string _username = "";
+        private string _password = "";
 
         /// <summary>日志条目集合（最新在前）。</summary>
         public ObservableCollection<string> LogEntries { get; } = new ObservableCollection<string>();
@@ -262,6 +263,27 @@ namespace EasyRDP.Server.Wpf
                         item.Frames = (int)frames;
                 }
             }
+        }
+
+        /// <summary>踢出指定会话（异步执行，避免 UI 线程等待 Stop 的线程 Join）。</summary>
+        public void KickSession(uint sessionId)
+        {
+            var host = _transportHost;
+            if (host == null) return;
+            // 显式指定 TaskScheduler.Default，避免捕获调用方当前调度器
+            System.Threading.Tasks.Task.Factory.StartNew(() =>
+            {
+                try
+                {
+                    host.KickSession(sessionId);
+                }
+                catch (Exception ex)
+                {
+                    string message = ex.Message;
+                    _dispatcher.Invoke(() => AddLog("Kick failed: " + message));
+                }
+            }, System.Threading.CancellationToken.None, System.Threading.Tasks.TaskCreationOptions.None,
+                System.Threading.Tasks.TaskScheduler.Default);
         }
 
         private void AddLog(string message)

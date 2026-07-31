@@ -1,3 +1,4 @@
+#nullable disable
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -27,7 +28,6 @@ namespace EasyRDP.Server.Wpf
 
         // 上次光标状态（用于检测变化）
         private int _lastX, _lastY;
-        private bool _lastVisible;
         private byte[] _lastShapeData;
         private bool _hasLastState;
 
@@ -129,7 +129,6 @@ namespace EasyRDP.Server.Wpf
 
             int x = rawInfo.X;
             int y = rawInfo.Y;
-            bool visible = true; // Windows 无全局"光标隐藏"API，默认可见
             byte[] shapeData = _enableShape ? rawInfo.ImageData : null;
 
             bool positionChanged = !_hasLastState || x != _lastX || y != _lastY;
@@ -144,14 +143,14 @@ namespace EasyRDP.Server.Wpf
 
             _lastX = x;
             _lastY = y;
-            _lastVisible = visible;
             _lastShapeData = shapeData;
             _hasLastState = true;
 
             // 构建 CursorUpdateMessage（仅在形状变化时包含像素数据）
             var msg = new CursorUpdateMessage
             {
-                Visible = visible,
+                // Windows 无全局"光标隐藏"API，恒为可见
+                Visible = true,
                 X = x,
                 Y = y,
                 Width = shapeChanged && shapeData != null ? rawInfo.Width : 0,
@@ -200,8 +199,6 @@ namespace EasyRDP.Server.Wpf
         private Action<uint, byte[]> _sendTo;
         private uint _sessionId;
         private volatile bool _running;
-        private uint _sendFrameId = 500; // 保留供未来使用
-
         internal bool IsRunning { get { return _running; } }
 
         internal CursorTrackerSession(CursorTracker owner)

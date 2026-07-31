@@ -1,3 +1,4 @@
+#nullable disable
 using System;
 using System.Collections.Generic;
 using System.Threading;
@@ -735,6 +736,13 @@ namespace EasyRDP.Server.Wpf
             }
         }
 
+        /// <summary>强制断开指定会话（UI 踢出按钮）。</summary>
+        public void KickSession(uint sessionId)
+        {
+            Logger.Info("Session {0} kicked by UI", sessionId);
+            DisconnectSession(sessionId);
+        }
+
         private void OnClientConnected(object sender, ConnectionEventArgs e)
         {
             Logger.Info("Client connected: sessionId={0}", e.SessionId);
@@ -881,19 +889,22 @@ namespace EasyRDP.Server.Wpf
             try
             {
                 var msg = ClipFileContentsReqMessage.Unpack(e.Data);
+                FileClipboardProvider provider;
                 lock (_clipProviderLock)
                 {
-                    FileClipboardProvider provider;
-                    if (_serverClipProviders.TryGetValue(e.SessionId, out provider))
-                    {
-                        provider.HandleFileContentsReq(msg);
-                    }
-                    else
+                    if (!_serverClipProviders.TryGetValue(e.SessionId, out provider))
                     {
                         Logger.Warn("ClipFileContentsReq from session {0} but no provider: transferId={1}",
                             e.SessionId, msg.TransferId);
+                        return;
                     }
                 }
+                // 文件读取与响应发送放到线程池：接收线程不应被磁盘 IO 阻塞（影响输入事件延迟）
+                System.Threading.ThreadPool.QueueUserWorkItem(state =>
+                {
+                    try { provider.HandleFileContentsReq(msg); }
+                    catch (Exception ex) { Logger.Warn(ex, "HandleFileContentsReqFromClient failed on worker"); }
+                });
             }
             catch (Exception ex)
             {
@@ -1089,6 +1100,20 @@ namespace EasyRDP.Server.Wpf
                 {
                     _transportServer.SendTo(sid, data);
                 }, _cursorTracker);
+                // 流会话不可恢复故障（编码器反复失败等）→ 记录日志并异步断开该会话。
+                // 事件可能在编码线程触发，不能直接调用 DisconnectSession（Stop 会 Join 自身线程），
+                // 因此通过线程池调度。
+                streamSession.FatalError += (s, args) =>
+                {
+                    string message = args != null ? args.Message : "Unknown";
+                    Logger.Error("Session {0}: stream fatal error: {1}", e.SessionId, message);
+                    // 线程池调度，避免与编码线程自我 Join 死锁
+                    System.Threading.ThreadPool.QueueUserWorkItem(state =>
+                    {
+                        try { DisconnectSession(e.SessionId); }
+                        catch (Exception ex) { Logger.Warn(ex, "Fatal-error disconnect failed"); }
+                    });
+                };
 
                 var inputSession = new ServerInputSession(_inputSimulator);
 

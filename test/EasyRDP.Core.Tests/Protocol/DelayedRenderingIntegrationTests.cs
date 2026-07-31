@@ -1,3 +1,4 @@
+#nullable disable
 namespace EasyRDP.Core.Tests.Protocol
 {
     using System;

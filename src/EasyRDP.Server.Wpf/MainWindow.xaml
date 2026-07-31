@@ -83,6 +83,14 @@
                     <DataGridTextColumn Header="Codec" Binding="{Binding Codec}" Width="120"/>
                     <DataGridTextColumn Header="Resolution" Binding="{Binding Resolution}" Width="120"/>
                     <DataGridTextColumn Header="Frames" Binding="{Binding Frames}" Width="*"/>
+                    <DataGridTemplateColumn Header="Action" Width="70">
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <Button Content="Kick" Tag="{Binding IdValue}" Click="KickButton_Click"
+                                        Padding="6,0" HorizontalAlignment="Center"/>
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
                 </DataGrid.Columns>
             </DataGrid>
         </Grid>

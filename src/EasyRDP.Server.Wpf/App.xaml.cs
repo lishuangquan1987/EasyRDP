@@ -1,3 +1,4 @@
+#nullable enable
 using System;
 using System.Configuration;
 using System.Data;

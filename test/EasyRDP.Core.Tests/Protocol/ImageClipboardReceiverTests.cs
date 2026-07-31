@@ -1,3 +1,4 @@
+#nullable disable
 namespace EasyRDP.Core.Tests.Protocol
 {
     using System;
@@ -308,6 +309,22 @@ namespace EasyRDP.Core.Tests.Protocol
             // 验证首尾
             Assert.Equal(expectedContent[0], result[0]);
             Assert.Equal(expectedContent[totalSize - 1], result[totalSize - 1]);
+        }
+
+        /// <summary>
+        /// 回归测试：TotalSize 必须受上限约束，异常/恶意 Start 消息不能触发大内存分配（OOM）。
+        /// </summary>
+        [Fact]
+        public void Receiver_OversizedTotalSize_ShouldThrow()
+        {
+            // 超过 256MB 上限
+            Assert.Throws<System.ArgumentOutOfRangeException>(() =>
+                new ImageClipboardReceiver(1, 300L * 1024 * 1024));
+            // 非正值同样拒绝
+            Assert.Throws<System.ArgumentOutOfRangeException>(() =>
+                new ImageClipboardReceiver(1, 0));
+            Assert.Throws<System.ArgumentOutOfRangeException>(() =>
+                new ImageClipboardReceiver(1, -1));
         }
     }
 }

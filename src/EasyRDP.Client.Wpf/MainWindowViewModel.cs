@@ -8,6 +8,7 @@ using System.Windows.Threading;
 using EasyRDP.Core.Protocol;
 using EasyRDP.Core.Rendering;
 using EasyRDP.Core.Transport;
+using EasyRDP.Shared;
 using NLog;
 
 namespace EasyRDP.Client.Wpf
@@ -43,14 +44,15 @@ namespace EasyRDP.Client.Wpf
         private TcpTransportClient? _transport;
         private volatile bool _running;
         private volatile bool _disconnecting; // 防止 Disconnect → Disconnected 事件 → Stop 重入循环
-        private DispatcherTimer _fpsTimer;
+        private DispatcherTimer? _fpsTimer;
         private int _testFrameSeq;
 
         // 属性字段
         private string _host = "";
         private string _port = "2000";
-        private string _username = "admin";
-        private string _password = "admin";
+        // 默认不预设凭据：避免弱口令（admin/admin）在局域网暴露；服务端启动时要求显式配置
+        private string _username = "";
+        private string _password = "";
         private string _statusText = "Disconnected";
         private bool _isConnectEnabled = true;
         private bool _isStartEnabled = true;
@@ -90,6 +92,9 @@ namespace EasyRDP.Client.Wpf
             StartTestCommand = new RelayCommand(StartRenderTest, () => !_running);
             StopCommand = new RelayCommand(Stop, () => _running);
             FullscreenCommand = new RelayCommand(ToggleFullscreen);
+            LockCommand = new RelayCommand(SendLockKey);
+            AltTabCommand = new RelayCommand(SendAltTab);
+            ResetKeysCommand = new RelayCommand(ReleaseModifierKeys);
         }
 
         // ====== 属性 ======
@@ -204,6 +209,9 @@ namespace EasyRDP.Client.Wpf
         public RelayCommand StartTestCommand { get; }
         public RelayCommand StopCommand { get; }
         public RelayCommand FullscreenCommand { get; }
+        public RelayCommand LockCommand { get; }
+        public RelayCommand AltTabCommand { get; }
+        public RelayCommand ResetKeysCommand { get; }
 
         // ====== Connect 逻辑 ======
 
@@ -257,14 +265,27 @@ namespace EasyRDP.Client.Wpf
             // 连接后最长约 1 秒黑屏。BeginReceive 会把管线就绪前的消息缓冲起来。
             _streamSession = new ClientStreamSession();
             _streamSession.BeginReceive(_transport);
+            // 订阅不可恢复错误：解码器缺失/连续解码失败时提示并断开，避免黑屏无反馈
+            _streamSession.FatalError += (s, args) =>
+            {
+                if (_disconnecting) return;
+                string message = args != null ? args.Message : "Unknown stream error";
+                Logger.Error("Stream FatalError: {0}", message);
+                _dispatcher.Invoke(() =>
+                {
+                    if (_disconnecting) return;
+                    SetBusy(false, "Stream error: " + message);
+                    Stop();
+                });
+            };
 
             // 订阅就绪后发送握手请求
             var handshakeReq = new HandshakeReq
             {
                 Version = Constants.ProtocolVersion,
                 Capabilities = DecoderFactory.GetAvailableCodecs(),
-                Username = _username ?? "admin",
-                Password = _password ?? "admin"
+                Username = _username ?? "",
+                Password = _password ?? ""
             };
             byte[] reqPayload = handshakeReq.Pack();
             MessageReassembler.FragAndSend(0, (byte)MessageType.HandshakeReq, reqPayload,
@@ -328,7 +349,7 @@ namespace EasyRDP.Client.Wpf
             FrameSize = string.Format("{0}x{1}", handshakeRes.ScreenWidth, handshakeRes.ScreenHeight);
 
             // 监听断连事件：服务端断开时自动清理状态
-            EventHandler onDisconnected = null;
+            EventHandler? onDisconnected = null;
             onDisconnected = (s, ev) =>
             {
                 if (_disconnecting) return; // 防止重入
@@ -963,6 +984,43 @@ namespace EasyRDP.Client.Wpf
             if (_inputSession == null || !_running) return;
             var msg = new InputEventMessage { Type = InputEventType.MouseWheel, WheelDelta = delta };
             _inputSession.SendInput(msg);
+        }
+
+        /// <summary>发送 Win+L 锁定远端会话（SendInput 可模拟；Ctrl+Alt+Del 属系统安全序列，无法模拟）。</summary>
+        public void SendLockKey()
+        {
+            SendRemoteKeyCombo(new[] { 0x5B, 0x4C }); // VK_LWIN + 'L'
+        }
+
+        /// <summary>发送 Alt+Tab 在远端切换窗口。</summary>
+        public void SendAltTab()
+        {
+            SendRemoteKeyCombo(new[] { 0x12, 0x09 }); // VK_MENU + VK_TAB
+        }
+
+        /// <summary>释放可能卡住的修饰键（Ctrl/Alt/Shift/Win），防止远端按键粘连。</summary>
+        public void ReleaseModifierKeys()
+        {
+            if (_inputSession == null || !_running) return;
+            int[] mods = { 0x10, 0x11, 0x12, 0x5B, 0x5C }; // Shift, Ctrl, Alt, LWin, RWin
+            foreach (int vk in mods)
+            {
+                _inputSession.SendInput(new InputEventMessage { Type = InputEventType.KeyUp, KeyCode = vk });
+            }
+        }
+
+        /// <summary>按"全部按下、逆序抬起"发送一组虚拟键（用于组合键）。</summary>
+        private void SendRemoteKeyCombo(int[] virtualKeys)
+        {
+            if (_inputSession == null || !_running || virtualKeys == null) return;
+            foreach (int vk in virtualKeys)
+            {
+                _inputSession.SendInput(new InputEventMessage { Type = InputEventType.KeyDown, KeyCode = vk });
+            }
+            for (int i = virtualKeys.Length - 1; i >= 0; i--)
+            {
+                _inputSession.SendInput(new InputEventMessage { Type = InputEventType.KeyUp, KeyCode = virtualKeys[i] });
+            }
         }
 
         /// <summary>处理键盘按下事件（由 View 的 KeyDown 事件调用）。</summary>

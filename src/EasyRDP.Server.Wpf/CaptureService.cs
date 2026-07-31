@@ -1,3 +1,4 @@
+#nullable disable
 using System;
 using System.Threading;
 using EasyDesk.Core;

@@ -6,6 +6,10 @@
     <ProjectReference Include="..\..\EasyDesk\src\EasyDesk.Windows\EasyDesk.Windows.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Compile Include="..\Shared\RelayCommand.cs" Link="RelayCommand.cs" />
+  </ItemGroup>
+
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFrameworks>net40;net8.0-windows</TargetFrameworks>

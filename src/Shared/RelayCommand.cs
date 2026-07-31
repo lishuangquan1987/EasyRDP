@@ -1,10 +1,11 @@
+#nullable enable
 using System;
 using System.Windows.Input;
 
-namespace EasyRDP.Client.Wpf
+namespace EasyRDP.Shared
 {
     /// <summary>
-    /// 通用 ICommand 实现，用于 ViewModel 命令绑定。
+    /// 通用 ICommand 实现，供各 UI 工程通过链接共享（避免客户端/服务端重复维护两份）。
     /// </summary>
     public class RelayCommand : ICommand
     {
@@ -29,9 +30,12 @@ namespace EasyRDP.Client.Wpf
             _execute();
         }
 
+        /// <summary>手动触发 CanExecuteChanged（用于命令可用性联动）。</summary>
         public void RaiseCanExecuteChanged()
         {
-            CanExecuteChanged?.Invoke(this, EventArgs.Empty);
+            var handler = CanExecuteChanged;
+            if (handler != null)
+                handler(this, EventArgs.Empty);
         }
     }
 }

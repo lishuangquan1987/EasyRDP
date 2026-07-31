@@ -1,3 +1,4 @@
+#nullable disable
 using System;
 using System.Threading;
 using EasyRDP.Core.Protocol;
@@ -21,6 +22,8 @@ namespace EasyRDP.Client.Wpf
         private IRenderTarget _renderTarget;
         private MessageReassembler _reassembler;
         private volatile bool _running;
+        // 0=未触发, 1=已触发；用 Interlocked 保证跨线程只触发一次
+        private int _fatalRaisedFlag;
         private Thread _receiveThread;
         private Thread _renderThread;
         private long _frameCount;
@@ -120,8 +123,14 @@ namespace EasyRDP.Client.Wpf
             _running = false;
             _receiving = false;
             _pipelineReady = false;
+            Interlocked.Exchange(ref _fatalRaisedFlag, 0);
             if (_transport != null)
                 _transport.DataReceived -= OnDataReceived;
+            if (_reassembler != null)
+            {
+                _reassembler.MessageReceived -= OnMessageReceived;
+                _reassembler = null;
+            }
             lock (_pendingLock)
             {
                 _pendingMessages.Clear();
@@ -440,17 +449,23 @@ namespace EasyRDP.Client.Wpf
             try
             {
                 var msg = ClipFileContentsReqMessage.Unpack(data);
+                FileClipboardProvider provider;
                 lock (_clipProviderLock)
                 {
-                    if (_clipProvider != null)
-                    {
-                        _clipProvider.HandleFileContentsReq(msg);
-                    }
-                    else
+                    provider = _clipProvider;
+                    if (provider == null)
                     {
                         Logger.Warn("ClipFileContentsReq received but no provider: transferId={0}", msg.TransferId);
+                        return;
                     }
                 }
+                // 文件读取与响应发送放到线程池：接收线程不应被磁盘 IO 阻塞
+                // （否则同一 socket 上的视频帧/输入事件处理会被拖慢）
+                System.Threading.ThreadPool.QueueUserWorkItem(state =>
+                {
+                    try { provider.HandleFileContentsReq(msg); }
+                    catch (Exception ex) { Logger.Warn(ex, "HandleFileContentsReq failed on worker"); }
+                });
             }
             catch (Exception ex)
             {
@@ -583,7 +598,10 @@ namespace EasyRDP.Client.Wpf
             {
                 // 解码器不可用 — 无法处理 H264 数据，丢弃此帧
                 if (_frameCount == 0)
+                {
                     Logger.Error("No decoder available, cannot decode H264 frame seq={0}", msg.SequenceNumber);
+                    RaiseFatal("No video decoder available (codec: " + Codec + ")");
+                }
                 return;
             }
 
@@ -594,6 +612,8 @@ namespace EasyRDP.Client.Wpf
                 if (_decodeFailures <= 3 || _decodeFailures % 50 == 0)
                     Logger.Warn("Decode failed: status={0} seq={1} keyframe={2} dataLen={3} (total failures={4})",
                         result.Status, msg.SequenceNumber, msg.IsKeyframe, msg.Data.Length, _decodeFailures);
+                if (_decodeFailures == 100)
+                    RaiseFatal("Video decode failed repeatedly (" + _decodeFailures + " frames) - connection unusable");
                 return;
             }
 
@@ -605,6 +625,25 @@ namespace EasyRDP.Client.Wpf
                     msg.SequenceNumber, msg.Width, msg.Height, msg.IsKeyframe, msg.Data.Length);
             else if (_frameCount % 100 == 0)
                 Logger.Debug("Frames decoded: {0}, last seq={1} dataLen={2}", _frameCount, msg.SequenceNumber, msg.Data.Length);
+        }
+
+        /// <summary>触发一次 FatalError（不可恢复故障，UI 层据此提示并断开）。</summary>
+        private void RaiseFatal(string message)
+        {
+            if (Interlocked.CompareExchange(ref _fatalRaisedFlag, 1, 0) != 0) return;
+            Logger.Error("FatalError: {0}", message);
+            var handler = FatalError;
+            if (handler != null)
+            {
+                try
+                {
+                    handler(this, new ErrorEventArgs(message, null));
+                }
+                catch (Exception ex)
+                {
+                    Logger.Warn(ex, "FatalError handler threw");
+                }
+            }
         }
 
         private void ProcessCursorUpdate(CursorUpdateMessage msg)

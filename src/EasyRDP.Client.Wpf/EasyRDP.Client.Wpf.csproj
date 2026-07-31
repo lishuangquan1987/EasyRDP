@@ -4,6 +4,10 @@
     <ProjectReference Include="..\EasyRDP.Core\EasyRDP.Core.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Compile Include="..\Shared\RelayCommand.cs" Link="RelayCommand.cs" />
+  </ItemGroup>
+
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>
