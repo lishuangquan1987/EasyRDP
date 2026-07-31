@@ -1,84 +1,145 @@
-using System;
+#nullable disable
 using System.ComponentModel;
-using System.Globalization;
 using System.Windows;
-using System.Windows.Data;
 using System.Windows.Input;
-using AlyClient.CSharpSDK;
-using EasyRDP.Client.Wpf.ViewModels;
+using System.Windows.Media;
 
-namespace EasyRDP.Client.Wpf
+namespace EasyRDP.Client.Wpf;
+
+/// <summary>
+/// 客户端主窗口（View 层）。仅负责初始化 ViewModel 和路由鼠标事件。
+/// 所有业务逻辑在 MainWindowViewModel 中。
+/// </summary>
+public partial class MainWindow : Window
 {
-    public partial class MainWindow
+    private readonly MainWindowViewModel _vm;
+
+    public MainWindow()
     {
-        private MainViewModel _vm;
+        InitializeComponent();
+        _vm = new MainWindowViewModel();
+        DataContext = _vm;
+        // PasswordBox 不支持绑定 Password（安全设计），初始值在 XAML 构造后同步一次，
+        // 后续变化由 PasswordChanged 事件同步到 ViewModel。
+        PasswordBox.Password = _vm.Password ?? string.Empty;
 
-        public MainWindow()
-        {
-            _vm = new MainViewModel();
-            DataContext = _vm;
-            InitializeComponent();
-        }
-
-        private void OnMouseMove(object s, MouseEventArgs e)
-        { _vm.OnLocalMouseMove(e.GetPosition((IInputElement)s), (UIElement)s); }
-        private void OnMouseDown(object s, MouseButtonEventArgs e)
-        {
-            // 捕获鼠标：保证拖拽过程中移出控件仍能收到 MouseUp，避免远程端按钮卡在"按下"状态
-            Mouse.Capture((IInputElement)s);
-            // 强制发送积压的鼠标移动，确保按下时位置与服务端一致
-            _vm.FlushPendingMove(true);
-            var d = _vm.InputCapturer.EncodeMouseButton(e, true, _vm.SeqTracker.Next()); _vm.SendInput(d);
-        }
-        private void OnMouseUp(object s, MouseButtonEventArgs e)
-        {
-            // 释放前先发送最新位置，避免松开坐标与按下时错位
-            _vm.FlushPendingMove(true);
-            var d = _vm.InputCapturer.EncodeMouseButton(e, false, _vm.SeqTracker.Next()); _vm.SendInput(d);
-            // 释放捕获，恢复正常鼠标路由
-            Mouse.Capture(null);
-        }
-        private void OnMouseWheel(object s, MouseWheelEventArgs e)
-        { var d = _vm.InputCapturer.EncodeMouseWheel(e, _vm.SeqTracker.Next()); _vm.SendInput(d); }
-        private void OnKeyDown(object s, KeyEventArgs e)
-        { var d = _vm.InputCapturer.EncodeKey(e, true, _vm.SeqTracker.Next()); _vm.SendInput(d); }
-        private void OnKeyUp(object s, KeyEventArgs e)
-        { var d = _vm.InputCapturer.EncodeKey(e, false, _vm.SeqTracker.Next()); _vm.SendInput(d); }
-
-        private void OnClosing(object s, CancelEventArgs e) { _vm.Cleanup(); }
+        // 连接状态指示灯：连接成功后状态点变绿
+        _vm.PropertyChanged += (s, e) => OnViewModelPropertyChanged(e.PropertyName);
     }
 
-    public class BoolToVisibilityConverter : IValueConverter
+    /// <summary>ViewModel 属性变化 → 同步仅 View 层拥有的 UI 元素（确保在 UI 线程执行）。</summary>
+    private void OnViewModelPropertyChanged(string propertyName)
     {
-        public object Convert(object v, Type t, object p, CultureInfo c)
-        { return (bool)v ? Visibility.Visible : Visibility.Collapsed; }
-        public object ConvertBack(object v, Type t, object p, CultureInfo c) { return null; }
+        if (!Dispatcher.CheckAccess())
+        {
+            Dispatcher.BeginInvoke(new Action(() => OnViewModelPropertyChanged(propertyName)));
+            return;
+        }
+
+        // 选中不同配置时，把 ViewModel 的密码同步回 PasswordBox（Password 不支持绑定）
+        if (propertyName == nameof(MainWindowViewModel.Password)
+            && PasswordBox.Password != (_vm.Password ?? string.Empty))
+        {
+            PasswordBox.Password = _vm.Password ?? string.Empty;
+            return;
+        }
+            if (propertyName == nameof(MainWindowViewModel.IsConnected))
+            {
+                var okBrush = TryFindResource("StatusOkBrush") as Brush;
+                var idleBrush = TryFindResource("StatusIdleBrush") as Brush;
+                StatusDot.Foreground = _vm.IsConnected
+                    ? (okBrush ?? idleBrush ?? StatusDot.Foreground)
+                    : (idleBrush ?? okBrush ?? StatusDot.Foreground);
+            }
     }
 
-    public class InverseBoolConverter : IValueConverter
+    /// <summary>PasswordBox 密码变化 → 同步到 ViewModel（UI 不直接绑定敏感属性）。</summary>
+    private void PasswordBox_PasswordChanged(object sender, RoutedEventArgs e)
     {
-        public object Convert(object v, Type t, object p, CultureInfo c) { return !(bool)v; }
-        public object ConvertBack(object v, Type t, object p, CultureInfo c) { return !(bool)v; }
+        _vm.Password = PasswordBox.Password;
+    }
+
+    /// <summary>将鼠标事件路由到 ViewModel。</summary>
+    private void RenderImage_MouseMove(object sender, MouseEventArgs e)
+    {
+        var pos = e.GetPosition(RenderImage);
+        _vm.HandleMouseMove(pos.X, pos.Y, RenderImage.ActualWidth, RenderImage.ActualHeight);
+    }
+
+    /// <summary>将鼠标按下事件路由到 ViewModel。</summary>
+    private void RenderImage_MouseDown(object sender, MouseButtonEventArgs e)
+    {
+        _vm.HandleMouseDown(e.ChangedButton);
+    }
+
+    /// <summary>将鼠标释放事件路由到 ViewModel。</summary>
+    private void RenderImage_MouseUp(object sender, MouseButtonEventArgs e)
+    {
+        _vm.HandleMouseUp(e.ChangedButton);
+    }
+
+    /// <summary>将滚轮事件路由到 ViewModel。</summary>
+    private void RenderImage_MouseWheel(object sender, MouseWheelEventArgs e)
+    {
+        _vm.HandleMouseWheel(e.Delta);
+    }
+
+    /// <summary>键盘按下 — 路由到 ViewModel。</summary>
+    private void Window_KeyDown(object sender, KeyEventArgs e)
+    {
+        // F11 切换全屏（业界惯例，类似浏览器全屏快捷键）
+        if (e.Key == Key.F11)
+        {
+            _vm.ToggleFullscreen();
+            e.Handled = true;
+            return;
+        }
+
+        // Esc 退出全屏（仅在已全屏时生效；非全屏时 Esc 不拦截，正常转发输入）
+        if (e.Key == Key.Escape)
+        {
+            var window = Application.Current?.MainWindow as MainWindow;
+            if (window != null && window.WindowStyle == WindowStyle.None)
+            {
+                _vm.ToggleFullscreen();
+                e.Handled = true;
+                return;
+            }
+        }
+
+        // 焦点在 TextBox/PasswordBox 上时不拦截（让用户正常输入 IP、端口和密码）
+        if (System.Windows.Input.Keyboard.FocusedElement is System.Windows.Controls.TextBox
+            || System.Windows.Input.Keyboard.FocusedElement is System.Windows.Controls.PasswordBox)
+            return;
+
+        // WPF 中 Alt 键通过 SystemKey 传递
+        Key key = e.Key == Key.System ? e.SystemKey : e.Key;
+        _vm.HandleKeyDown(key);
+        e.Handled = true;
+    }
+
+    /// <summary>键盘释放 — 路由到 ViewModel。</summary>
+    private void Window_KeyUp(object sender, KeyEventArgs e)
+    {
+        // 焦点在 TextBox/PasswordBox 上时不拦截
+        if (System.Windows.Input.Keyboard.FocusedElement is System.Windows.Controls.TextBox
+            || System.Windows.Input.Keyboard.FocusedElement is System.Windows.Controls.PasswordBox)
+            return;
+
+        Key key = e.Key == Key.System ? e.SystemKey : e.Key;
+        _vm.HandleKeyUp(key);
+        e.Handled = true;
     }
 
     /// <summary>
-    /// 将 AlyClientStatus 转换为 Visibility：仅在 DiscoveredUpdate/DownloadingUpdate/DownloadedUpdate 时可见。
+    /// 切换全屏 UI：全屏时隐藏顶部配置区和底部状态栏，让桌面显示区填满整个窗口。
+    /// 由 MainWindowViewModel.ToggleFullscreen 调用。
     /// </summary>
-    public class AlyStatusToVisibilityConverter : IValueConverter
+    /// <param name="fullscreen">true=进入全屏，false=退出全屏。</param>
+    public void SetFullscreenUI(bool fullscreen)
     {
-        public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
-        {
-            var status = (AlyClientStatus)value;
-            return (status == AlyClientStatus.DiscoveredUpdate ||
-                    status == AlyClientStatus.DownloadingUpdate ||
-                    status == AlyClientStatus.DownloadedUpdate)
-                ? Visibility.Visible
-                : Visibility.Collapsed;
-        }
-
-        public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
-        {
-            return null;
-        }
+        TopBar.Visibility = fullscreen ? Visibility.Collapsed : Visibility.Visible;
+        ActionBar.Visibility = fullscreen ? Visibility.Collapsed : Visibility.Visible;
+        BottomBar.Visibility = fullscreen ? Visibility.Collapsed : Visibility.Visible;
     }
 }

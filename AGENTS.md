@@ -1,103 +1,127 @@
 # EasyRDP
 
-轻量级局域网远程桌面工具 — 自定义协议 + 可扩展传输层（TCP 默认，UDP 可选）。服务端和客户端各两套 UI：WPF (.NET 4, XP 兼容) + Avalonia (.NET 8, 跨平台)。底层 EasyDesk 桌面 I/O 库驱动。
+跨平台远程桌面应用的 monorepo。当前处于设计阶段 — 五层数据管线架构已完整定义，待实现。
 
-## Project
+## 项目概述
 
-- **Stack**: C#, dual-framework — `net40` (XP 兼容) + `net8.0` (Avalonia, 跨平台)
-- **Submodule**: `EasyDesk/` — 桌面 I/O 库 (net40;netstandard2.0, 零依赖 P/Invoke)
-- **Current phase**: EasyDesk ✅ | EasyRDP.Core Protocol ✅ | Transport (TCP/UDP + Options) ✅ | Codec 协商基础 (B-2: CodecId/CodecCapabilities/CodecNegotiator) ✅ | 编码层抽象 B-1/B-3/B-4 ⏳ | WPF/Avalonia UIs ⏳
-  - 编码层改进计划见 `docs/EasyRDP-Codec-Plan-B.md`（B1–B4：可插拔编码后端 Bitmap/H.264 软编/H.264 硬编，net40 保留 Bitmap 兜底，H.264 代码用 `#if NET8_0_OR_GREATER` 隔离）。
-- **Entry**: `src/EasyRDP.Server/Program.cs` (server) / `src/EasyRDP.Client/Program.cs` (client)
-- **Config**: `src/EasyRDP.Server/appsettings.json` (port, auth token, compression, frame rate)
-- **Tests**: `test/EasyRDP.Core.Tests/` — Transport 集成测试 (xUnit, 37 cases)
+- **目标**：远程桌面 — 截屏 → 编码 → 传输 → 解码 → 渲染，上层为编排层（Session）
+- **设计文档**：`docs/EasyRDP-Abstraction-Layers-Design.md`（v2.7，约 96KB，权威规范）
+- **技术栈**：C# (.NET)、Go、Avalonia 11.3
+- **结构**：根目录下两个 git submodule，见 `.gitmodules`
 
-## Commands
+### 子模块
+
+| 路径 | 仓库 | 职责 |
+|------|------|------|
+| `EasyDesk/` | EasyDesk | 桌面 I/O 抽象库 — 屏幕捕获、键鼠模拟、光标、剪贴板、桌面信息（net40/netstandard2.0，纯 P/Invoke） |
+| `aly/` | aly | 自动更新系统 — 服务端 (Go/Gin/Ent/SQLite)、客户端 (Go 1.10，兼容 XP)、发布 CLI (Go/cobra)、发布 GUI (Avalonia/.NET 8) |
+
+每个子模块有自己的 `AGENTS.md`，进入对应目录工作前必须先读取。
+
+### 根目录文件
+
+- `docs/EasyRDP-Abstraction-Layers-Design.md` — 五层架构规范（Capture / Encode / Transport / Decode / Render + Session 编排）
+- `reasonix.toml` — Reasonix agent 配置
+
+## 命令
+
+### EasyDesk（仅 Windows）
 
 ```bash
-# Clone (submodule)
-git clone --recurse-submodules https://github.com/lishuangquan1987/EasyRDP.git
-git submodule update --init --recursive   # if already cloned
-
-# Build (full solution)
-dotnet build
-
-# Run server (default port 8750, config: appsettings.json)
-dotnet run --project src/EasyRDP.Server
-
-# Run client (connect to localhost or [ip])
-dotnet run --project src/EasyRDP.Client [server-ip]
-
-# Test EasyDesk (⚠️ moves mouse/presses keys)
-cd EasyDesk
-dotnet test test/EasyDesk.Windows.Tests/EasyDesk.Windows.Tests.csproj
-
-# Test EasyRDP.Core Transport
-dotnet test test/EasyRDP.Core.Tests/EasyRDP.Core.Tests.csproj
+dotnet build EasyDesk/EasyDesk.sln
+dotnet test EasyDesk/test/EasyDesk.Windows.Tests/EasyDesk.Windows.Tests.csproj
 ```
 
-## Architecture
+测试会真实移动鼠标/按键/操作剪贴板，运行时不要操作机器。
 
-```
-EasyRDP/
-├── src/
-│   ├── EasyRDP.Core/             # 协议 + 传输共享库 (net40;net8.0)
-│   │   ├── Protocol/             # 消息类型、编解码、BinaryPacker、CompressHelper
-│   │   ├── Transport/            # ITransportClient/ITransportServer + TCP/UDP + PacketFramer
-│   │   └── Encoding/             # 编码层抽象 + 实现（ITransportMode，B1–B4）
-│   ├── EasyRDP.Server.Wpf/       # .NET 4 + WPF 服务端 (XP 兼容)
-│   └── EasyRDP.Client.Wpf/       # .NET 4 + WPF 客户端 (XP 兼容)
-└── EasyDesk/                     ← Git 子模块（桌面 I/O 库）
-    ├── src/EasyDesk.Core/         # 5 接口 + 8 模型
-    ├── src/EasyDesk.Windows/      # P/Invoke 实现 (user32/gdi32/kernel32)
-    └── test/                      # xUnit 集成测试
+### aly — 服务端
+
+```bash
+cd aly/server
+go run . -p 2000                       # 启动服务，默认端口 2000
+go run . -p 2000 -db /path/to/aly.db   # 指定数据库路径
 ```
 
-> ⚠️ 已移除项目：`EasyRDP.Server`（Console 服务端）、`EasyRDP.Client`（Console 客户端）、
-> `EasyRDP.Server.Avalonia`（Avalonia 服务端）、`EasyRDP.Client.Avalonia`（Avalonia 客户端）。
-> 当前仅保留 WPF 版本，通过 `EasyRDP.Core` 共享协议与编码逻辑。
+首次运行自动创建 SQLite 数据库。
 
-- **EasyRDP.Core** — 协议编解码 + Deflate 压缩 + 可扩展传输层（`ITransportClient` / `ITransportServer`，TCP/UDP 双实现 + `PacketFramer`）+ 可插拔编码层（`ITransportMode`，B1–B4）。多目标 `net40;net8.0`。
-- **CompressHelper** — DeflateStream 压缩/解压，兼容 net40。`Protocol/CompressHelper.cs`
-- **EasyDesk** — 5 个接口：`IInputSimulator`, `IScreenCapturer`, `ICursorCapturer`, `IClipboardService`, `IDesktopInfo`。详见 `EasyDesk/AGENTS.md`。
+### aly — 发布 CLI
 
-## Conventions
+```bash
+cd aly/publish/publish-cli
+go run . config init --server http://localhost:2000 --project myapp
+go run . status
+go run . add --all
+go run . push --version V1.0.1 --message "发布说明"
+```
 
-### Current implementation
+### aly — 发布 GUI
 
-| Aspect | Server | Client |
-|---|---|---|
-| Target | net8.0 | net8.0-windows |
-| UI | Console (WPF/Avalonia 开发中) | Console stub (WPF/Avalonia 开发中) |
-| Config | appsettings.json (JSON) | — |
+```bash
+dotnet run --project aly/publish/publish-gui/src/AlyPublish/AlyPublish.csproj
+```
 
-### Dual framework (planned)
+### aly — 客户端（兼容 XP，Go 1.10，GOPATH 模式，386）
 
-| Aspect | .NET 4 WPF | .NET 8 Avalonia |
-|---|---|---|
-| Target OS | Windows XP ~ 11 | Windows 7+, Linux, macOS |
-| UI | WPF (System.Windows) | Avalonia (cross-platform XAML) |
-| Role | XP compatibility only | New-feature trunk |
-| Code sharing | Zero UI code shared | Zero UI code shared |
+```bash
+# 构建：先将 client/ 复制到 GOPATH/src/aly/client/，然后：
+set GOOS=windows && set GOARCH=386 && set GO111MODULE=off
+go build -ldflags="-s -w" -o aly-client.exe .
+```
 
-- **EasyRDP.Core** is the only shared library — all protocol + transport logic lives here.
-- Use `#if NET8_0_OR_GREATER` conditional compilation in EasyRDP.Core when APIs diverge.
-- New features go into .NET 8 first; backport to .NET 4 only if XP compatibility demanded.
-- EasyDesk already targets `net40;netstandard2.0` — all stacks reference it directly.
+详见 `aly/client/aly-client/build.bat`。
 
-### C# 5.0 (mandatory where net40)
+## 架构
 
-EasyDesk and EasyRDP.Core must compile under C# 5.0 (net40 target). See `EasyDesk/AGENTS.md` for the full forbidden/alternative table. Key no-nos: string interpolation `$""`, `?.`, `nameof()`, expression-bodied members, `async/await`.
+```
+EasyRDP/                          # Monorepo 根 — 项目级文档、共享配置
+├── docs/
+│   └── EasyRDP-Abstraction-Layers-Design.md   # 主设计文档：五层管线规范
+├── EasyDesk/                     # 子模块：桌面 I/O（截屏+输入层的构建基石）
+│   ├── src/EasyDesk.Core/        #   接口 + 模型
+│   ├── src/EasyDesk.Windows/     #   Windows P/Invoke 实现
+│   └── test/                     #   xUnit 集成测试
+└── aly/                          # 子模块：自动更新系统
+    ├── server/                   #   API 服务端 (Go/Gin/Ent/SQLite)
+    ├── client/aly-client/        #   更新器可执行文件 (Go 1.10, 386, 兼容 XP)
+    ├── publish/publish-cli/      #   发布 CLI (Go/cobra)
+    └── publish/publish-gui/      #   发布 GUI (Avalonia 11.3, .NET 8)
+```
 
-### General
+EasyRDP 的核心管线（`docs/` 中的规范）将在根目录下实现 — 目前处于设计阶段，尚未开始编码。EasyDesk 提供截屏基元；aly 负责分发和更新。
 
-- 一个文件只包含一个类（One class per file），文件名与类名一致
-- `using` directives inside `namespace` blocks
-- XML doc comments on all public API
-- No `.editorconfig` — manual consistency
-- **ScreenFrame.Scan0** must always be `Marshal.FreeHGlobal`'d in `finally`
-- **Clipboard** requires STA thread — `thread.SetApartmentState(ApartmentState.STA)`
+## 约定
 
-## Notes
+### 跨模块
 
-- Placeholder for future quick-adds.
+- 每个子模块有独立的 `AGENTS.md` — **进入对应目录工作前必须先读取**
+- 子模块独立版本管理；clone 后执行 `git submodule update --init`
+- 子模块指针变更需显式提交（指向特定 commit）
+- 设计文档是唯一权威来源 — 接口变更必须与之保持同步
+
+### 各语言规范
+
+- EasyDesk：C# 5.0（net40 目标 — 禁止字符串插值、`?.`、表达式体成员等 C# 6+ 语法）。详见 `EasyDesk/AGENTS.md`
+- aly server / publish-cli：现代 Go（go.mod，modules）
+- aly client：Go 1.10，GOPATH 模式，`GOARCH=386`，禁用 modules — 必须编译为 Windows XP 可运行
+- aly publish-gui：.NET 8，Avalonia 11.3，CommunityToolkit.Mvvm，Semi.Avalonia，Serilog。详见 `aly/AGENTS.md`
+- 编码规范
+  - 每个类一个文件，每个类，每个属性、方法必须添加注释
+  - wpf/avalonia除了viewmodel可以引用view外，其余必须严格遵守MVVM的设计
+  - 关键逻辑添加必要的注释
+  - 尽量避免魔法字符串
+
+### 中文注意事项
+
+- `aly/` 的文档、注释、AGENTS.md 使用中文
+- EasyDesk 和设计文档使用英文
+- PowerShell `Set-Content` 不加 `-Encoding UTF8` 会把中文按 GBK 编码导致乱码 — 编辑含中文的文件时用 Python
+
+## 备注
+
+- H.264 硬件/软件编码是强制要求，不允许回退到原始像素绕过编码问题。OpenH264 仅支持 I420 (YUV) 输入，所有 BGRA 截屏数据必须先做 BGRA→I420 颜色空间转换再送入编码器。
+- OpenH264 v2.6.0 本地源码路径：`E:\DownloadCode\openh264`。核对结构体字节对齐、vtable 槽位映射、接口方法签名等无需到 GitHub 翻阅源码，直接本地查看。关键文件：
+  - `codec/api/wels/codec_app_def.h` — SFrameBSInfo / SLayerBSInfo / SSourcePicture / SDecodingParam / SBufferInfo 等结构体定义
+  - `codec/api/wels/codec_api.h` — ISVCEncoder / ISVCDecoder 接口声明（vtable 槽位顺序）
+  - `codec/encoder/plus/src/welsEncoderExt.cpp` — 编码器实现（验证接口方法顺序）
+  - `codec/decoder/plus/src/welsDecoderExt.cpp` — 解码器实现（验证接口方法顺序）
+- 预留，后续快速追加。

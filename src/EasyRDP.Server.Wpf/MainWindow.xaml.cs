@@ -1,62 +1,55 @@
+﻿#nullable disable
 using System;
 using System.ComponentModel;
-using System.Globalization;
 using System.Windows;
-using System.Windows.Data;
-using System.Windows.Forms;
-using AlyClient.CSharpSDK;
-using EasyRDP.Server.Wpf.ViewModels;
 
 namespace EasyRDP.Server.Wpf
 {
-    public partial class MainWindow
+    /// <summary>
+    /// 服务端主窗口（View 层）。仅初始化 ViewModel 和组件绑定。
+    /// 所有业务逻辑在 MainWindowViewModel 中。
+    /// </summary>
+    public partial class MainWindow : Window
     {
-        private NotifyIcon _tray;
-        private bool _forceExit;
-        private MainViewModel _vm;
+        private readonly MainWindowViewModel _vm;
 
         public MainWindow()
         {
             InitializeComponent();
-            _vm = (MainViewModel)Resources["VM"];
-            _tray = new NotifyIcon { Text = "EasyRDP Server", Visible = true, Icon = System.Drawing.SystemIcons.Application };
-            _tray.ContextMenuStrip = new ContextMenuStrip();
-            _tray.ContextMenuStrip.Items.Add("显示窗口", null, (s, e) => { Show(); WindowState = WindowState.Normal; ShowInTaskbar = true; Activate(); });
-            _tray.ContextMenuStrip.Items.Add("退出", null, (s, e) => _vm.ExitCommand.Execute(null));
-            _tray.DoubleClick += (s, e) => { Show(); WindowState = WindowState.Normal; ShowInTaskbar = true; Activate(); };
+            _vm = new MainWindowViewModel(Dispatcher);
+            DataContext = _vm;
+            // PasswordBox 不支持绑定 Password，初始值在构造后同步一次，
+            // 后续变化由 PasswordChanged 事件同步到 ViewModel。
+            PasswordBox.Password = _vm.Password ?? string.Empty;
         }
 
-        private void OnWindowStateChanged(object sender, System.EventArgs e)
+        /// <summary>PasswordBox 密码变化 → 同步到 ViewModel。</summary>
+        private void PasswordBox_PasswordChanged(object sender, RoutedEventArgs e)
         {
-            if (WindowState == WindowState.Minimized) { Hide(); ShowInTaskbar = false; }
+            _vm.Password = PasswordBox.Password;
         }
 
-        private void OnWindowClosing(object sender, CancelEventArgs e)
+        /// <summary>会话列表"踢出"按钮：路由到 ViewModel 异步断开对应会话。</summary>
+        private void KickButton_Click(object sender, RoutedEventArgs e)
         {
-            if (!_forceExit) { e.Cancel = true; WindowState = WindowState.Minimized; return; }
-            if (_vm.IsRunning) _vm.StopCommand.Execute(null);
-            _tray.Visible = false; _tray.Dispose();
-        }
-    }
-
-    /// <summary>
-    /// 将 AlyClientStatus 转换为 Visibility：仅在 DiscoveredUpdate/DownloadingUpdate/DownloadedUpdate 时可见。
-    /// </summary>
-    public class AlyStatusToVisibilityConverter : IValueConverter
-    {
-        public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
-        {
-            var status = (AlyClientStatus)value;
-            return (status == AlyClientStatus.DiscoveredUpdate ||
-                    status == AlyClientStatus.DownloadingUpdate ||
-                    status == AlyClientStatus.DownloadedUpdate)
-                ? Visibility.Visible
-                : Visibility.Collapsed;
+            var button = sender as System.Windows.Controls.Button;
+            if (button == null || button.Tag == null) return;
+            if (button.Tag is uint sessionId)
+                _vm.KickSession(sessionId);
         }
 
-        public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
+        /// <summary>窗口关闭前自动保存当前设置。</summary>
+        protected override void OnClosing(CancelEventArgs e)
         {
-            return null;
+            try
+            {
+                _vm.SaveSettings();
+            }
+            catch (Exception ex)
+            {
+                NLog.LogManager.GetCurrentClassLogger().Warn(ex, "Save settings on close failed");
+            }
+            base.OnClosing(e);
         }
     }
 }

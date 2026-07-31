@@ -1,155 +1,148 @@
-using System;
-using System.Text;
-
 namespace EasyRDP.Core.Protocol
 {
+    using System;
+    using System.IO;
+    using System.Text;
+
     /// <summary>
-    /// 二进制数据读写工具类。
-    /// 提供大小端转换、基本类型读写，兼容 .NET 4.0 / C# 5.0。
+    /// 紧凑二进制序列化器。所有消息 payload 的读写都经它，保证小端、紧凑布局。
+    /// net40/C#5.0 可用，内部基于 BinaryWriter/BinaryReader，无第三方依赖。
     /// </summary>
-    public static class BinaryPacker
+    public class BinaryPacker : IDisposable
     {
-        private static readonly UTF8Encoding Utf8 = new UTF8Encoding(false);
+        private readonly MemoryStream _stream;
+        private readonly BinaryWriter _writer;
+        private readonly BinaryReader _reader;
 
-        #region Write helpers
-
-        public static void WriteByte(byte[] buffer, int offset, byte value)
+        /// <summary>Initializes a new instance of the <see cref="BinaryPacker"/> class for writing.</summary>
+        public BinaryPacker()
         {
-            buffer[offset] = value;
+            _stream = new MemoryStream();
+            _writer = new BinaryWriter(_stream);
         }
 
-        public static void WriteUInt16LE(byte[] buffer, int offset, ushort value)
+        private BinaryPacker(byte[] data)
         {
-            buffer[offset] = (byte)(value & 0xFF);
-            buffer[offset + 1] = (byte)((value >> 8) & 0xFF);
+            _stream = new MemoryStream(data);
+            _reader = new BinaryReader(_stream);
         }
 
-        public static void WriteInt16LE(byte[] buffer, int offset, short value)
+        /// <summary>Creates a <see cref="BinaryPacker"/> instance for reading from the given byte array.</summary>
+        /// <param name="data">The byte array to read from.</param>
+        public static BinaryPacker From(byte[] data)
         {
-            WriteUInt16LE(buffer, offset, (ushort)value);
+            return new BinaryPacker(data);
         }
 
-        public static void WriteUInt32LE(byte[] buffer, int offset, uint value)
+        /// <summary>Returns the written bytes as an array.</summary>
+        public byte[] GetBytes()
         {
-            buffer[offset] = (byte)(value & 0xFF);
-            buffer[offset + 1] = (byte)((value >> 8) & 0xFF);
-            buffer[offset + 2] = (byte)((value >> 16) & 0xFF);
-            buffer[offset + 3] = (byte)((value >> 24) & 0xFF);
+            _writer.Flush();
+            return _stream.ToArray();
         }
 
-        public static void WriteInt32LE(byte[] buffer, int offset, int value)
+        /// <summary>Releases all resources used by the <see cref="BinaryPacker"/>.</summary>
+        public void Dispose()
         {
-            WriteUInt32LE(buffer, offset, (uint)value);
+            if (_writer != null) _writer.Dispose();
+            if (_reader != null) _reader.Dispose();
+            if (_stream != null) _stream.Dispose();
         }
 
-        public static void WriteUInt64LE(byte[] buffer, int offset, ulong value)
+        // —— 写方法 ——
+
+        /// <summary>Writes a single byte.</summary>
+        public void WriteByte(byte v)
         {
-            buffer[offset] = (byte)(value & 0xFF);
-            buffer[offset + 1] = (byte)((value >> 8) & 0xFF);
-            buffer[offset + 2] = (byte)((value >> 16) & 0xFF);
-            buffer[offset + 3] = (byte)((value >> 24) & 0xFF);
-            buffer[offset + 4] = (byte)((value >> 32) & 0xFF);
-            buffer[offset + 5] = (byte)((value >> 40) & 0xFF);
-            buffer[offset + 6] = (byte)((value >> 48) & 0xFF);
-            buffer[offset + 7] = (byte)((value >> 56) & 0xFF);
+            _writer.Write(v);
         }
 
-        /// <summary>写入字节数组</summary>
-        public static void WriteBytes(byte[] buffer, int offset, byte[] data, int dataOffset, int count)
+        /// <summary>Writes a 32-bit signed integer in little-endian format.</summary>
+        public void WriteInt32(int v)
         {
-            Buffer.BlockCopy(data, dataOffset, buffer, offset, count);
+            _writer.Write(v);
         }
 
-        /// <summary>写入 UTF-8 字符串，格式：[2字节长度 LE][UTF-8字节]</summary>
-        public static void WriteStringUTF8(byte[] buffer, int offset, string value)
+        /// <summary>Writes a 32-bit unsigned integer in little-endian format.</summary>
+        public void WriteUInt32(uint v)
         {
-            if (value == null)
-                value = string.Empty;
-
-            byte[] bytes = Utf8.GetBytes(value);
-            int len = bytes.Length;
-            if (len > ushort.MaxValue)
-                throw new ArgumentException("String too long for protocol", "value");
-
-            WriteUInt16LE(buffer, offset, (ushort)len);
-            if (len > 0)
-                WriteBytes(buffer, offset + 2, bytes, 0, len);
+            _writer.Write(v);
         }
 
-        /// <summary>计算 WriteStringUTF8 需要的字节数</summary>
-        public static int MeasureStringUTF8(string value)
+        /// <summary>Writes a 64-bit signed integer in little-endian format.</summary>
+        public void WriteInt64(long v)
         {
-            if (value == null)
-                return 2;
-            return 2 + Utf8.GetByteCount(value);
+            _writer.Write(v);
         }
 
-        #endregion
-
-        #region Read helpers
-
-        public static byte ReadByte(byte[] buffer, int offset)
+        /// <summary>写入字符串：uint16 长度前缀 + UTF-8 编码。</summary>
+        public void WriteString(string v)
         {
-            return buffer[offset];
+            if (v == null)
+                v = "";
+            byte[] b = Encoding.UTF8.GetBytes(v);
+            _writer.Write((ushort)b.Length);
+            _writer.Write(b);
         }
 
-        public static ushort ReadUInt16LE(byte[] buffer, int offset)
+        /// <summary>写入字节数组：uint32 长度前缀 + 原始字节。null 按长度 0 处理。</summary>
+        public void WriteBytes(byte[] v)
         {
-            return (ushort)(buffer[offset] | (buffer[offset + 1] << 8));
+            if (v == null)
+            {
+                _writer.Write((uint)0);
+                return;
+            }
+            _writer.Write((uint)v.Length);
+            if (v.Length > 0)
+                _writer.Write(v);
         }
 
-        public static short ReadInt16LE(byte[] buffer, int offset)
+        // —— 读方法 ——
+
+        /// <summary>Reads a single byte.</summary>
+        public byte ReadByte()
         {
-            return (short)ReadUInt16LE(buffer, offset);
+            return _reader.ReadByte();
         }
 
-        public static uint ReadUInt32LE(byte[] buffer, int offset)
+        /// <summary>Reads a 32-bit signed integer in little-endian format.</summary>
+        public int ReadInt32()
         {
-            return (uint)(buffer[offset]
-                | (buffer[offset + 1] << 8)
-                | (buffer[offset + 2] << 16)
-                | (buffer[offset + 3] << 24));
+            return _reader.ReadInt32();
         }
 
-        public static int ReadInt32LE(byte[] buffer, int offset)
+        /// <summary>Reads a 32-bit unsigned integer in little-endian format.</summary>
+        public uint ReadUInt32()
         {
-            return (int)ReadUInt32LE(buffer, offset);
+            return _reader.ReadUInt32();
         }
 
-        public static ulong ReadUInt64LE(byte[] buffer, int offset)
+        /// <summary>Reads a 64-bit signed integer in little-endian format.</summary>
+        public long ReadInt64()
         {
-            return (ulong)buffer[offset]
-                | ((ulong)buffer[offset + 1] << 8)
-                | ((ulong)buffer[offset + 2] << 16)
-                | ((ulong)buffer[offset + 3] << 24)
-                | ((ulong)buffer[offset + 4] << 32)
-                | ((ulong)buffer[offset + 5] << 40)
-                | ((ulong)buffer[offset + 6] << 48)
-                | ((ulong)buffer[offset + 7] << 56);
+            return _reader.ReadInt64();
         }
 
-        /// <summary>读取字节数组</summary>
-        public static byte[] ReadBytes(byte[] buffer, int offset, int count)
+        /// <summary>读取字符串：先读 uint16 长度，再读 UTF-8 字节。</summary>
+        public string ReadString()
         {
-            byte[] result = new byte[count];
-            Buffer.BlockCopy(buffer, offset, result, 0, count);
-            return result;
-        }
-
-        /// <summary>读取 UTF-8 字符串，格式：[2字节长度 LE][UTF-8字节]</summary>
-        public static string ReadStringUTF8(byte[] buffer, int offset, out int bytesRead)
-        {
-            ushort len = ReadUInt16LE(buffer, offset);
-            bytesRead = 2 + len;
+            int len = _reader.ReadUInt16();
             if (len == 0)
-                return string.Empty;
-            if (offset + 2 + len > buffer.Length)
-                throw new ArgumentException(string.Format(
-                    "String length {0} exceeds buffer bounds (offset={1}, buffer={2})",
-                    len, offset, buffer.Length));
-            return Utf8.GetString(buffer, offset + 2, len);
+                return "";
+            return Encoding.UTF8.GetString(_reader.ReadBytes(len));
         }
 
-        #endregion
+        /// <summary>读取字节数组：先读 uint32 长度，再读原始字节。长度为 0 返回 null。</summary>
+        public byte[] ReadBytes()
+        {
+            int len = (int)_reader.ReadUInt32();
+            if (len == 0)
+                return null;
+            // 防止恶意或损坏数据触发 OOM：拒绝超过 MaxSafePayloadSize 的分配
+            if (len > Constants.MaxSafePayloadSize)
+                return null;
+            return _reader.ReadBytes(len);
+        }
     }
 }
