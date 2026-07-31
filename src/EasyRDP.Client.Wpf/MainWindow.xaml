@@ -148,7 +148,10 @@
                 MouseWheel="RenderImage_MouseWheel"
                 Focusable="True">
             <Grid>
-                <Image x:Name="RenderImage" Source="{Binding RenderBitmap}" Stretch="Uniform"/>
+                <!-- Fant 高质量缩放：远程分辨率与窗口尺寸不一致时，线性插值会糊化文字/
+                     代码高亮边缘，Fant（双三次变体）在放大/缩小时保留更多细节。 -->
+                <Image x:Name="RenderImage" Source="{Binding RenderBitmap}" Stretch="Uniform"
+                       RenderOptions.BitmapScalingMode="Fant"/>
 
                 <!-- 文件剪贴板传输进度条：叠加在桌面显示区顶部 -->
                 <Border HorizontalAlignment="Center" VerticalAlignment="Top"

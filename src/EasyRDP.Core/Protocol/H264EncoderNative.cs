@@ -81,19 +81,79 @@ namespace EasyRDP.Core.Protocol
             _height = height;
             _targetBitrate = targetBitrate;
 
-            var init = H264Native.GetVTableDelegate<H264Native.InitializeEncoderDelegate>(
-                _encoder, H264Native.VTABLE_SLOT_INITIALIZE);
-            var param = new H264Native.SEncParamBase();
-            param.Init(width, height, targetBitrate);
-            int ret = init(_encoder, ref param);
+            // 屏幕内容模式（SCREEN_CONTENT_REAL_TIME）必须走 SEncParamExt：
+            // GetDefaultParams（vtable slot 2）让 DLL 按自身编译布局填充完整默认值，
+            // 再按已知偏移覆盖关键字段，最后 InitializeExt（vtable slot 1）初始化。
+            // 不直接在 C# 重建 SEncParamExt struct（37 字段 + 嵌套 SSpatialLayerConfig
+            // + C++ bool 1 字节对齐，二进制布局风险高，一处错位即静默写坏相邻字段）。
+            int ret;
+            int maxBitrate = (int)Math.Min((long)targetBitrate * 3 / 2, int.MaxValue);
+            int frameRateBits = BitConverter.ToInt32(BitConverter.GetBytes(30f), 0);
+
+            var getDefaultParams = H264Native.GetVTableDelegate<H264Native.GetDefaultParamsDelegate>(
+                _encoder, H264Native.VTABLE_SLOT_GET_DEFAULT_PARAMS);
+            IntPtr pParam = Marshal.AllocHGlobal(H264Native.SEncParamExtOffsets.AllocSize);
+            try
+            {
+                // 清零后让 DLL 填充默认值（保证所有字段合法，尤其是嵌套 sSliceArgument）
+                for (int off = 0; off < H264Native.SEncParamExtOffsets.AllocSize; off += 8)
+                    Marshal.WriteInt64(pParam, off, 0);
+
+                int defaultRet = getDefaultParams(_encoder, pParam);
+                if (defaultRet != 0)
+                {
+                    Logger.Error("OpenH264 GetDefaultParams failed: return code {0}", defaultRet);
+                    throw new InvalidOperationException("OpenH264 GetDefaultParams failed: " + defaultRet);
+                }
+
+                // ── 顶层参数 ──
+                Marshal.WriteInt32(pParam, H264Native.SEncParamExtOffsets.IUsageType,
+                    H264Native.SCREEN_CONTENT_REAL_TIME);
+                Marshal.WriteInt32(pParam, H264Native.SEncParamExtOffsets.IPicWidth, width);
+                Marshal.WriteInt32(pParam, H264Native.SEncParamExtOffsets.IPicHeight, height);
+                Marshal.WriteInt32(pParam, H264Native.SEncParamExtOffsets.ITargetBitrate, targetBitrate);
+                Marshal.WriteInt32(pParam, H264Native.SEncParamExtOffsets.IRCMode,
+                    H264Native.RC_BITRATE_MODE);
+                Marshal.WriteInt32(pParam, H264Native.SEncParamExtOffsets.FMaxFrameRate, frameRateBits);
+                Marshal.WriteInt32(pParam, H264Native.SEncParamExtOffsets.ITemporalLayerNum, 1);
+                Marshal.WriteInt32(pParam, H264Native.SEncParamExtOffsets.ISpatialLayerNum, 1);
+
+                // ── 第 0 层（唯一空间层）：分辨率/帧率/码率必须与顶层一致 ──
+                int layer0 = H264Native.SEncParamExtOffsets.SSpatialLayers;
+                Marshal.WriteInt32(pParam, layer0 + H264Native.SSpatialLayerConfigOffsets.IVideoWidth, width);
+                Marshal.WriteInt32(pParam, layer0 + H264Native.SSpatialLayerConfigOffsets.IVideoHeight, height);
+                Marshal.WriteInt32(pParam, layer0 + H264Native.SSpatialLayerConfigOffsets.FFrameRate, frameRateBits);
+                Marshal.WriteInt32(pParam, layer0 + H264Native.SSpatialLayerConfigOffsets.ISpatialBitrate, targetBitrate);
+                Marshal.WriteInt32(pParam, layer0 + H264Native.SSpatialLayerConfigOffsets.IMaxSpatialBitrate, maxBitrate);
+                // Baseline profile + CAVLC：屏幕内容模式最稳组合（CABAC 在 SCREEN_CONTENT
+                // 模式下存在兼容性风险），码率给足后画质收益来自 QP 上限而非熵编码。
+                Marshal.WriteInt32(pParam, layer0 + H264Native.SSpatialLayerConfigOffsets.UiProfileIdc,
+                    H264Native.PROFILE_BASELINE);
+                Marshal.WriteInt32(pParam, layer0 + H264Native.SSpatialLayerConfigOffsets.UiLevelIdc, 0);
+
+                // ── 码控/量化上限：限制最大 QP，避免屏幕文字区域被过度压缩变糊 ──
+                Marshal.WriteInt32(pParam, H264Native.SEncParamExtOffsets.IMaxBitrate, maxBitrate);
+                Marshal.WriteInt32(pParam, H264Native.SEncParamExtOffsets.IMaxQp, 36);
+                Marshal.WriteInt32(pParam, H264Native.SEncParamExtOffsets.IMinQp, 0);
+                Marshal.WriteInt32(pParam, H264Native.SEncParamExtOffsets.IEntropyCodingModeFlag, 0);
+
+                var init = H264Native.GetVTableDelegate<H264Native.InitializeExtDelegate>(
+                    _encoder, H264Native.VTABLE_SLOT_INITIALIZE_EXT);
+                ret = init(_encoder, pParam);
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(pParam);
+            }
             if (ret != 0)
             {
-                Logger.Error("OpenH264 Initialize failed: return code {0}, resolution={1}x{2} bitrate={3}",
-                    ret, width, height, targetBitrate);
-                throw new InvalidOperationException("OpenH264 encoder Initialize failed: " + ret);
+                Logger.Error("OpenH264 InitializeExt failed: return code {0}, resolution={1}x{2} bitrate={3} usageType={4}",
+                    ret, width, height, targetBitrate, H264Native.SCREEN_CONTENT_REAL_TIME);
+                throw new InvalidOperationException("OpenH264 encoder InitializeExt failed: " + ret);
             }
 
-            Logger.Info("OpenH264 encoder initialized: {0}x{1} @ {2} bps", width, height, targetBitrate);
+            Logger.Info("OpenH264 encoder initialized (SCREEN_CONTENT_REAL_TIME): {0}x{1} @ {2} bps maxBitrate={3}",
+                width, height, targetBitrate, maxBitrate);
 
             // 告知编码器输入格式为 I420（slot 7 = SetOption）。
             // 旧代码错误地把 slot 7 当作 ForceIntraFrame 来调用 SetOption，导致 AV；

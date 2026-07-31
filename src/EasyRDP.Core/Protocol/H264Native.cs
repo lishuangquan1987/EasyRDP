@@ -48,16 +48,27 @@ namespace EasyRDP.Core.Protocol
 
         // ====== 编码器参数 ======
 
-        internal const int VIDEO_REAL_TIME = 1;
-        internal const int SCREEN_CONTENT_REAL_TIME = 2;
+        // EUsageType 枚举（openh264 codec_app_def.h）：
+        //   CAMERA_VIDEO_REAL_TIME = 0, SCREEN_CONTENT_REAL_TIME = 1, CAMERA_VIDEO_NON_REAL_TIME = 2
+        // 头文件注释 "1.CAMERA... 2.SCREEN..." 是文档编号不是枚举值，
+        // 历史实现误把 SCREEN_CONTENT_REAL_TIME 写成 2（实际是 CAMERA_VIDEO_NON_REAL_TIME），
+        // 导致屏幕内容模式从未真正生效（SEncParamBase 路径实际一直以 SCREEN=1 运行）。
+        internal const int VIDEO_REAL_TIME = 0;
+        internal const int SCREEN_CONTENT_REAL_TIME = 1;
         internal const int RC_QUALITY_MODE = 0;
         internal const int RC_BITRATE_MODE = 1;
+        internal const int PROFILE_BASELINE = 66;
+        internal const int PROFILE_MAIN = 77;
         internal const int VIDEO_FORMAT_BGRA = 23;       // 解码器输出颜色格式
         internal const int ENCODER_FORMAT_BGRA = 6;     // 编码器 BGRA（通常不被 encoder 支持）
         internal const int ENCODER_FORMAT_I420 = 23;     // 编码器 I420 — OpenH264 中 videoFormatI420 = 23
         internal const int FRAME_TYPE_IDR = 1;
 
-        /// <summary>编码器初始化参数。</summary>
+        /// <summary>
+        /// 编码器初始化参数（SEncParamBase 简版）。仅支持 VIDEO_REAL_TIME 用法。
+        /// 注意：SCREEN_CONTENT_REAL_TIME 必须使用 SEncParamExt（InitializeExt），
+        /// 本结构已不再用于生产路径，仅保留作参考/诊断。
+        /// </summary>
         [StructLayout(LayoutKind.Sequential)]
         internal struct SEncParamBase
         {
@@ -77,6 +88,107 @@ namespace EasyRDP.Core.Protocol
                 iRCMode = RC_BITRATE_MODE;
                 fMaxFrameRate = 30f;
             }
+        }
+
+        // ============================================================
+        // SEncParamExt — 原生内存 + Marshal 偏移写入
+        // ------------------------------------------------------------
+        // OpenH264 的 SEncParamExt 有 37 个字段，其中包含 4 个嵌套的
+        // SSpatialLayerConfig（各 200 字节）和多个 C++ bool（1 字节）。
+        // 在 C# 中重建整个 struct 的二进制布局风险极高（bool 对齐、枚举大小等），
+        // 因此采用"原生缓冲 + 按已知偏移写入"的方案：
+        //   1. AllocHGlobal 分配足够大的原生缓冲（8KB）并清零
+        //   2. 调用 ISVCEncoder::GetDefaultParams（vtable slot 2）让 DLL 按
+        //      自身编译布局填充完整默认值（含 sSpatialLayers 内部字段）
+        //   3. 用 Marshal.Write* 按本类定义的偏移覆盖需要修改的字段
+        //   4. 调用 ISVCEncoder::InitializeExt（vtable slot 1）
+        //
+        // 偏移依据 openh264 2.6.0 codec_api.h / codec_app_def.h：
+        // SEncParamExt 字段顺序（Rust openh264-sys2 repr(C) 可交叉验证）：
+        //   iUsageType(0) iPicWidth(4) iPicHeight(8) iTargetBitrate(12)
+        //   iRCMode(16) fMaxFrameRate(20) iTemporalLayerNum(24) iSpatialLayerNum(28)
+        //   sSpatialLayers[4](32, 每层 200B) iComplexityMode(832) uiIntraPeriod(836)
+        //   iNumRefFrame(840) eSpsPpsIdStrategy(844) bPrefixNalAddingCtrl(848)
+        //   bEnableSSEI(849) bSimulcastAVC(850) [pad](851) iPaddingFlag(852)
+        //   iEntropyCodingModeFlag(856) bEnableFrameSkip(860) [pad](861-863)
+        //   iMaxBitrate(864) iMaxQp(868) iMinQp(872) uiMaxNalSize(876)
+        //   bEnableLongTermReference(880) [pad](881-883) iLTRRefNum(884)
+        //   iLtrMarkPeriod(888) iMultipleThreadIdc(892) bUseLoadBalancing(894)
+        //   [pad](895) iLoopFilterDisableIdc(896) iLoopFilterAlphaC0Offset(900)
+        //   iLoopFilterBetaOffset(904) bEnableDenoise(908) bEnableBackgroundDetection(909)
+        //   bEnableAdaptiveQuant(910) bEnableFrameCroppingFlag(911)
+        //   bEnableSceneChangeDetect(912) bIsLosslessLink(913)
+        // ============================================================
+        internal static class SEncParamExtOffsets
+        {
+            public const int AllocSize = 8192;
+
+            public const int IUsageType = 0;
+            public const int IPicWidth = 4;
+            public const int IPicHeight = 8;
+            public const int ITargetBitrate = 12;
+            public const int IRCMode = 16;
+            public const int FMaxFrameRate = 20;
+            public const int ITemporalLayerNum = 24;
+            public const int ISpatialLayerNum = 28;
+            public const int SSpatialLayers = 32;
+
+            // sSpatialLayers[4] 之后
+            public const int IComplexityMode = 832;
+            public const int UiIntraPeriod = 836;
+            public const int INumRefFrame = 840;
+            public const int ESpsPpsIdStrategy = 844;
+            public const int BPrefixNalAddingCtrl = 848;
+            public const int BEnableSSEI = 849;
+            public const int BSimulcastAVC = 850;
+            public const int IPaddingFlag = 852;
+            public const int IEntropyCodingModeFlag = 856;
+            public const int BEnableFrameSkip = 860;
+            public const int IMaxBitrate = 864;
+            public const int IMaxQp = 868;
+            public const int IMinQp = 872;
+            public const int UiMaxNalSize = 876;
+            public const int BEnableLongTermReference = 880;
+            public const int ILTRRefNum = 884;
+            public const int ILtrMarkPeriod = 888;
+            public const int IMultipleThreadIdc = 892;
+            public const int BUseLoadBalancing = 894;
+            public const int ILoopFilterDisableIdc = 896;
+            public const int ILoopFilterAlphaC0Offset = 900;
+            public const int ILoopFilterBetaOffset = 904;
+            public const int BEnableDenoise = 908;
+            public const int BEnableBackgroundDetection = 909;
+            public const int BEnableAdaptiveQuant = 910;
+            public const int BEnableFrameCroppingFlag = 911;
+            public const int BEnableSceneChangeDetect = 912;
+            public const int BIsLosslessLink = 913;
+        }
+
+        /// <summary>
+        /// SEncParamExt.sSpatialLayers[i]（SSpatialLayerConfig，200 字节）字段偏移。
+        /// 布局（openh264 codec_app_def.h）：
+        ///   iVideoWidth(0) iVideoHeight(4) fFrameRate(8) iSpatialBitrate(12)
+        ///   iMaxSpatialBitrate(16) uiProfileIdc(20) uiLevelIdc(24) iDLayerQp(28)
+        ///   sSliceArgument(32, 152B：uiSliceMode+uiSliceNum+uiSliceMbNum[35]+uiSliceSizeConstraint)
+        ///   bVideoSignalTypePresent(184) uiVideoFormat(185) bFullRange(186)
+        ///   bColorDescriptionPresent(187) uiColorPrimaries(188)
+        ///   uiTransferCharacteristics(189) uiColorMatrix(190) bAspectRatioPresent(191)
+        ///   eAspectRatio(192) sAspectRatioExtWidth(196) sAspectRatioExtHeight(198)
+        ///   总大小 200 字节（4 字节对齐）。
+        /// </summary>
+        internal static class SSpatialLayerConfigOffsets
+        {
+            public const int LayerSize = 200;
+
+            public const int IVideoWidth = 0;
+            public const int IVideoHeight = 4;
+            public const int FFrameRate = 8;
+            public const int ISpatialBitrate = 12;
+            public const int IMaxSpatialBitrate = 16;
+            public const int UiProfileIdc = 20;
+            public const int UiLevelIdc = 24;
+            public const int IDLayerQp = 28;
+            public const int BFullRange = 186;
         }
 
         /// <summary>
@@ -422,8 +534,14 @@ namespace EasyRDP.Core.Protocol
         // AV 原因：调用 slot 7 当 ForceIntraFrame(encoder, true) 时，实际调用
         // SetOption(encoder, eOptionId=true=1, pOption=垃圾)，pOption 被解引用 → AV。
         // 现已修正为正确的槽位。
+        //
+        // 屏幕内容模式（SCREEN_CONTENT_REAL_TIME）必须用 InitializeExt（slot 1）
+        // + GetDefaultParams（slot 2）初始化 SEncParamExt；SEncParamBase 路径
+        // （slot 0 Initialize）只接受 VIDEO_REAL_TIME，无法开启屏幕内容优化。
 
         internal const int VTABLE_SLOT_INITIALIZE = 0;
+        internal const int VTABLE_SLOT_INITIALIZE_EXT = 1;
+        internal const int VTABLE_SLOT_GET_DEFAULT_PARAMS = 2;
         internal const int VTABLE_SLOT_ENCODE_FRAME = 4;
         internal const int VTABLE_SLOT_FORCE_INTRA_FRAME = 6;
         internal const int VTABLE_SLOT_SET_OPTION = 7;
@@ -439,6 +557,16 @@ namespace EasyRDP.Core.Protocol
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         internal delegate int InitializeEncoderDelegate(
             IntPtr pEncoder, ref SEncParamBase pParam);
+
+        /// <summary>ISVCEncoder::InitializeExt(const SEncParamExt*) — 扩展参数初始化（屏幕内容模式）。</summary>
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        internal delegate int InitializeExtDelegate(
+            IntPtr pEncoder, IntPtr pParam);
+
+        /// <summary>ISVCEncoder::GetDefaultParams(SEncParamExt*) — 让 DLL 填充默认参数。</summary>
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        internal delegate int GetDefaultParamsDelegate(
+            IntPtr pEncoder, IntPtr pParam);
 
         /// <summary>ForceIntraFrame(bool bIDR, int iLayerId = -1) — 强制下一帧为 IDR 关键帧。
         /// 注意：OpenH264 2.6.0 接口实际有 2 个参数（iLayerId 有默认值 -1），

@@ -160,6 +160,16 @@ namespace EasyRDP.Core.Protocol
                 kv.Value.Done.Set();
             }
             _net40Pending.Clear();
+#else
+            // netstandard2.0/net8 路径：取消所有 in-flight 的 TaskCompletionSource，
+            // 让 await tcs.Task 立即抛 TaskCanceledException 退出，
+            // 否则断连后下载线程最多还要挂 30 秒等 RequestTimeoutMs 超时。
+            foreach (var kv in _pendingRequests)
+            {
+                TaskCompletionSource<byte[]> tcs;
+                if (_pendingRequests.TryRemove(kv.Key, out tcs))
+                    tcs.TrySetCanceled();
+            }
 #endif
         }
 
@@ -291,6 +301,14 @@ namespace EasyRDP.Core.Protocol
 
                     // 等待窗口空位：最多 Concurrency 个 in-flight
                     semaphore.Wait();
+
+                    // 等待许可期间可能已被 Cancel/失败：拿到许可后再次检查，
+                    // 否则会在取消后仍发起一个多余的文件块请求
+                    if (_cancelled || Thread.VolatileRead(ref failedFlag) == 1)
+                    {
+                        semaphore.Release();
+                        break;
+                    }
 
                     long reqPos = (long)chunkIdx * ChunkSize;
                     int toRead = (int)Math.Min(ChunkSize, fileSize - reqPos);

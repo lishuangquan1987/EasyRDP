@@ -461,3 +461,6 @@ var args = $"push --version \"{version}\" --message \"{message}\"";
 | 远程延迟高 | ✅ 修复：net8 服务端启用 DXGI 截屏（1-5ms/帧，替代 BitBlt 30-50ms）；编码线程"最新帧优先"丢弃过期帧；帧率下限 33→16ms；队列不再积压过期帧（`WindowsDesktopFactory.cs`/`DxgiScreenCapturer.cs`/`ServerStreamSession.cs`） |
 | 颜色失真、代码高亮不可见 | ✅ 修复：默认码率 2Mbps→8Mbps（1080p 屏幕内容文字/色彩显著改善）；分辨率取偶保证 I420 平面正确；DXGI 原始帧质量更高 |
 | 远程鼠标右键无效 | ✅ 修复：改用 `PreviewMouseDown/Up` 隧道事件保证右键在任何元素处理前被转发；显式按钮映射；按下时 `Mouse.Capture` 防止松开丢失导致按键粘连；服务端 `SendInput` 串行化（`MainWindow.xaml`/`MainWindow.xaml.cs`/`MainWindowViewModel.cs`/`WindowsInputSimulator.cs`） |
+| 全屏仍能看到下方任务栏（第二轮反馈） | ✅ 已修复：全屏模式新增 `WM_GETMINMAXINFO` 处理（`MainWindow.xaml.cs`），最大化时返回显示器 `rcMonitor` 整帧矩形，真正盖住任务栏；仍不用 `Topmost`，Esc/F11/断开时均可退出 |
+| 颜色仍不够清晰、不如 VNC（第二轮反馈） | ✅ 已优化：编码器切换到真正的 `SCREEN_CONTENT_REAL_TIME` 模式（修复 `EUsageType` 枚举值历史错误：原 `SCREEN_CONTENT_REAL_TIME=2` 实际是 `CAMERA_VIDEO_NON_REAL_TIME`，正确值为 1）；`SEncParamExt` 通过 `GetDefaultParams+InitializeExt` 初始化，码率 8Mbps→12Mbps（最大码率 18Mbps），`iMaxQp=36` 保持文字锋利；客户端渲染 `BitmapScalingMode=Fant` 降低缩放模糊（`H264Native.cs`/`H264EncoderNative.cs`/`ServerStreamSession.cs`/`MainWindow.xaml`） |
+| 远程粘贴文件功能检查 | ✅ 已检查并加固：双向链路（客户端↔服务端）逐步审查无严重错误；`FileClipboardConsumer.Cancel()` 现在立即唤醒 in-flight 请求（断连时不再悬置 30 秒）；新增 Provider↔Consumer 端到端还返测试（含 >1MB 大文件分块/中文名/空文件）及 transferId 不匹配返回错误的单元测试（`FileClipboardRoundTripTests.cs`） |

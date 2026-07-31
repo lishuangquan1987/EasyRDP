@@ -1275,32 +1275,21 @@ namespace EasyRDP.Client.Wpf
         {
             var window = Application.Current?.MainWindow as MainWindow;
             if (window == null) return;
-            if (window.WindowStyle == WindowStyle.None)
-            {
-                ExitFullscreen();
-            }
-            else
-            {
-                // 进入全屏：无边框 + 最大化（盖住任务栏）+ 隐藏顶/底栏。
-                // 不用 Topmost=true：置顶窗口会把用户锁死在客户端（其他窗口永远无法
-                // 切到前台，服务端断开后尤其危险）。无边框最大化本身已覆盖任务栏。
-                window.WindowStyle = WindowStyle.None;
-                window.WindowState = WindowState.Maximized;
-                window.SetFullscreenUI(true);
-                Logger.Info("Entered fullscreen");
-            }
+            window.SetFullscreenMode(!window.IsFullscreenMode);
+            Logger.Info(window.IsFullscreenMode ? "Entered fullscreen" : "Exited fullscreen");
         }
 
-        /// <summary>退出全屏并恢复普通窗口（断开连接时也会调用，保证用户始终能切走）。</summary>
+        /// <summary>
+        /// 退出全屏并恢复普通窗口（断开连接时也会调用，保证用户始终能切走）。
+        /// 全屏窗口的尺寸/位置由 View 层 WM_GETMINMAXINFO 钩子管理，
+        /// ViewModel 只负责请求状态切换。
+        /// </summary>
         public void ExitFullscreen()
         {
             var window = Application.Current?.MainWindow as MainWindow;
-            if (window == null || window.WindowStyle != WindowStyle.None)
+            if (window == null || !window.IsFullscreenMode)
                 return;
-            window.WindowStyle = WindowStyle.SingleBorderWindow;
-            window.WindowState = WindowState.Normal;
-            window.Topmost = false;
-            window.SetFullscreenUI(false);
+            window.SetFullscreenMode(false);
             Logger.Info("Exited fullscreen");
         }
 
