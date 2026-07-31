@@ -1,4 +1,5 @@
 using System;
+using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Threading;
 using System.Threading.Tasks;
@@ -85,6 +86,11 @@ namespace EasyRDP.Client.Wpf
         // 用 System.Threading.Timer（线程池）而非 DispatcherTimer：UI 线程卡住或最小化时仍能可靠触发。
         private Timer? _heartbeatTimer;
 
+        // ====== 多服务器配置保存 ======
+        private readonly ConnectionProfileStore _profileStore;
+        private ServerProfile? _selectedProfile;
+        private string _profileName = "";
+
         public MainWindowViewModel()
         {
             _dispatcher = Application.Current?.Dispatcher ?? Dispatcher.CurrentDispatcher;
@@ -95,7 +101,49 @@ namespace EasyRDP.Client.Wpf
             LockCommand = new RelayCommand(SendLockKey);
             AltTabCommand = new RelayCommand(SendAltTab);
             ResetKeysCommand = new RelayCommand(ReleaseModifierKeys);
+            SaveProfileCommand = new RelayCommand(SaveProfile);
+            DeleteProfileCommand = new RelayCommand(DeleteProfile, () => SelectedProfile != null);
+
+            // 启动时恢复已保存的多服务器配置
+            _profileStore = new ConnectionProfileStore();
+            System.Collections.Generic.List<ServerProfile> saved = _profileStore.Load(out string lastProfileName);
+            foreach (var p in saved)
+                Profiles.Add(p);
+            if (Profiles.Count > 0)
+            {
+                var last = FindProfile(lastProfileName);
+                SelectedProfile = last ?? Profiles[0];
+            }
         }
+
+        /// <summary>已保存的服务器配置列表。</summary>
+        public ObservableCollection<ServerProfile> Profiles { get; } = new ObservableCollection<ServerProfile>();
+
+        /// <summary>当前选中的服务器配置（选择后自动填充连接字段）。</summary>
+        public ServerProfile? SelectedProfile
+        {
+            get { return _selectedProfile; }
+            set
+            {
+                if (_selectedProfile == value) return;
+                _selectedProfile = value;
+                OnPropertyChanged(nameof(SelectedProfile));
+                if (value != null)
+                    ApplyProfile(value);
+                DeleteProfileCommand.RaiseCanExecuteChanged();
+                PersistProfiles(false);
+            }
+        }
+
+        /// <summary>配置名称（可编辑下拉框的文本，用于新建/重命名）。</summary>
+        public string ProfileName
+        {
+            get { return _profileName; }
+            set { _profileName = value ?? ""; OnPropertyChanged(nameof(ProfileName)); }
+        }
+
+        public RelayCommand SaveProfileCommand { get; }
+        public RelayCommand DeleteProfileCommand { get; }
 
         // ====== 属性 ======
 
@@ -212,6 +260,108 @@ namespace EasyRDP.Client.Wpf
         public RelayCommand LockCommand { get; }
         public RelayCommand AltTabCommand { get; }
         public RelayCommand ResetKeysCommand { get; }
+
+        // ====== 多服务器配置管理 ======
+
+        /// <summary>把选中配置的字段填充到连接输入框。</summary>
+        private void ApplyProfile(ServerProfile p)
+        {
+            Host = p.Host ?? "";
+            Port = p.Port ?? "";
+            Username = p.Username ?? "";
+            Password = p.Password ?? "";
+            ProfileName = p.Name ?? "";
+        }
+
+        /// <summary>保存当前连接字段为一个配置（同名替换）。</summary>
+        private void SaveProfile()
+        {
+            string name = (ProfileName ?? "").Trim();
+            if (name.Length == 0)
+            {
+                // 未命名时用 host:port 生成默认名
+                name = (Host ?? "").Trim();
+                if (name.Length == 0)
+                {
+                    StatusText = "Host is empty";
+                    return;
+                }
+                name = name + ":" + (string.IsNullOrEmpty(Port) ? DefaultPort.ToString() : Port);
+            }
+
+            var profile = new ServerProfile
+            {
+                Name = name,
+                Host = Host ?? "",
+                Port = Port ?? "",
+                Username = Username ?? "",
+                Password = Password ?? ""
+            };
+
+            var existing = FindProfile(name);
+            if (existing != null)
+            {
+                int idx = Profiles.IndexOf(existing);
+                Profiles[idx] = profile;
+            }
+            else
+            {
+                Profiles.Add(profile);
+            }
+
+            SelectedProfile = profile;
+            StatusText = "Profile saved: " + name;
+            if (!PersistProfiles(true))
+                StatusText = "Failed to save profiles";
+            Logger.Info("Profile saved: {0}", name);
+        }
+
+        /// <summary>删除当前选中的配置。</summary>
+        private void DeleteProfile()
+        {
+            var selected = SelectedProfile;
+            if (selected == null) return;
+            int idx = Profiles.IndexOf(selected);
+            string name = selected.Name;
+            Profiles.Remove(selected);
+
+            if (Profiles.Count > 0)
+                SelectedProfile = Profiles[Math.Min(idx, Profiles.Count - 1)];
+            else
+            {
+                SelectedProfile = null;
+                ProfileName = "";
+            }
+            StatusText = "Profile deleted: " + name;
+            if (!PersistProfiles(true))
+                StatusText = "Failed to save profiles";
+            Logger.Info("Profile deleted: {0}", name);
+        }
+
+        /// <summary>按名称查找配置（忽略大小写）。</summary>
+        private ServerProfile? FindProfile(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return null;
+            foreach (var p in Profiles)
+            {
+                if (string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase))
+                    return p;
+            }
+            return null;
+        }
+
+        /// <summary>持久化配置列表与最后选择的配置名。</summary>
+        private bool PersistProfiles(bool notify)
+        {
+            if (_profileStore == null) return true;
+            var list = new System.Collections.Generic.List<ServerProfile>(Profiles.Count);
+            foreach (var p in Profiles)
+                list.Add(p.Clone());
+            bool ok = _profileStore.Save(list, SelectedProfile != null ? SelectedProfile.Name : "");
+            if (!ok && notify)
+                StatusText = "Failed to save profiles";
+            return ok;
+        }
 
         // ====== Connect 逻辑 ======
 

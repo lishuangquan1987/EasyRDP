@@ -1,4 +1,6 @@
 ﻿#nullable disable
+using System;
+using System.ComponentModel;
 using System.Windows;
 
 namespace EasyRDP.Server.Wpf
@@ -34,6 +36,20 @@ namespace EasyRDP.Server.Wpf
             if (button == null || button.Tag == null) return;
             if (button.Tag is uint sessionId)
                 _vm.KickSession(sessionId);
+        }
+
+        /// <summary>窗口关闭前自动保存当前设置。</summary>
+        protected override void OnClosing(CancelEventArgs e)
+        {
+            try
+            {
+                _vm.SaveSettings();
+            }
+            catch (Exception ex)
+            {
+                NLog.LogManager.GetCurrentClassLogger().Warn(ex, "Save settings on close failed");
+            }
+            base.OnClosing(e);
         }
     }
 }

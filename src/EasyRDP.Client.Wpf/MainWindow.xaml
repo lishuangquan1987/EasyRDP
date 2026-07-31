@@ -1,85 +1,147 @@
 <Window x:Class="EasyRDP.Client.Wpf.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="EasyRDP Client" Height="720" Width="1100"
-        MinHeight="480" MinWidth="640"
+        Title="EasyRDP Client" Height="820" Width="1420"
+        MinHeight="560" MinWidth="1260"
         WindowStartupLocation="CenterScreen"
+        Background="{StaticResource WindowBackgroundBrush}"
         KeyDown="Window_KeyDown" KeyUp="Window_KeyUp">
-    <Window.Resources>
-        <!-- WPF 内置转换器：bool → Visibility（IsClipboardTransferring 控制进度条可见性） -->
-        <BooleanToVisibilityConverter x:Key="BoolToVis"/>
-    </Window.Resources>
     <Grid>
         <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <!-- ====== 顶部：连接配置区 ====== -->
-        <Border x:Name="TopBar" Grid.Row="0" BorderBrush="#CCC" BorderThickness="0,0,0,1" Padding="12,10">
+        <!-- ====== 顶部工具栏（深色）：品牌 + 连接配置 ====== -->
+        <Border x:Name="TopBar" Grid.Row="0" Background="{StaticResource ToolbarDarkBrush}" Padding="14,10">
             <Grid>
                 <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="*"/>
                     <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="Auto"/>
-                    <ColumnDefinition Width="Auto"/>
-                    <ColumnDefinition Width="Auto"/>
-                    <ColumnDefinition Width="Auto"/>
-                    <ColumnDefinition Width="Auto"/>
-                    <ColumnDefinition Width="Auto"/>
-                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <!-- 品牌 -->
+                <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,20,0">
+                    <TextBlock Text="&#x25CF;" Foreground="{StaticResource AccentBrush}" FontSize="12"
+                               VerticalAlignment="Center" Margin="0,0,8,0"/>
+                    <TextBlock Text="EasyRDP Client" Style="{StaticResource BrandTextStyle}"/>
+                </StackPanel>
+
+                <!-- 服务器配置管理 -->
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,10,0">
+                    <TextBlock Text="PROFILE" Style="{StaticResource ToolbarLabelStyle}" Margin="0,0,6,0"/>
+                    <ComboBox Width="132"
+                              Style="{StaticResource ToolbarComboBoxStyle}"
+                              ItemsSource="{Binding Profiles}"
+                              DisplayMemberPath="Name"
+                              SelectedItem="{Binding SelectedProfile}"
+                              Text="{Binding ProfileName, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                              ToolTip="选择已保存的服务器配置，或输入新名称后点 Save"/>
+                    <Button Content="Save" Style="{StaticResource ToolbarButtonStyle}" Height="28" Padding="8,0"
+                            Command="{Binding SaveProfileCommand}" Margin="4,0,0,0"
+                            ToolTip="把当前连接字段保存为配置（同名覆盖）"/>
+                    <Button Content="Del" Style="{StaticResource ToolbarButtonStyle}" Height="28" Padding="8,0"
+                            Command="{Binding DeleteProfileCommand}" Margin="2,0,0,0"
+                            ToolTip="删除当前选中的配置"/>
+                </StackPanel>
+
+                <Separator Grid.Column="2" Style="{StaticResource ToolbarSeparatorStyle}"/>
+
+                <!-- Host -->
+                <StackPanel Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,12,0">
+                    <TextBlock Text="HOST" Style="{StaticResource ToolbarLabelStyle}" Margin="0,0,6,0"/>
+                    <TextBox x:Name="HostBox" Text="{Binding Host, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                             Style="{StaticResource ToolbarTextBoxStyle}" Width="132"/>
+                </StackPanel>
+
+                <!-- Port -->
+                <StackPanel Grid.Column="4" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,12,0">
+                    <TextBlock Text="PORT" Style="{StaticResource ToolbarLabelStyle}" Margin="0,0,6,0"/>
+                    <TextBox Text="{Binding Port, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                             Style="{StaticResource ToolbarTextBoxStyle}" Width="64"/>
+                </StackPanel>
+
+                <!-- Username -->
+                <StackPanel Grid.Column="5" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,12,0">
+                    <TextBlock Text="USER" Style="{StaticResource ToolbarLabelStyle}" Margin="0,0,6,0"/>
+                    <TextBox Text="{Binding Username, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                             Style="{StaticResource ToolbarTextBoxStyle}" Width="92"/>
+                </StackPanel>
+
+                <!-- Password -->
+                <StackPanel Grid.Column="6" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,12,0">
+                    <TextBlock Text="PASS" Style="{StaticResource ToolbarLabelStyle}" Margin="0,0,6,0"/>
+                    <PasswordBox x:Name="PasswordBox" PasswordChanged="PasswordBox_PasswordChanged"
+                                 Style="{StaticResource ToolbarPasswordBoxStyle}" Width="100"/>
+                </StackPanel>
+
+                <!-- 主操作按钮 -->
+                <StackPanel Grid.Column="8" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Button Content="Connect" Style="{StaticResource PrimaryButtonStyle}"
+                            Command="{Binding ConnectCommand}" Margin="0,0,6,0"/>
+                    <Button Content="Disconnect" Style="{StaticResource DangerButtonStyle}"
+                            Command="{Binding StopCommand}"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <!-- ====== 信息条（浅色）：状态 + 会话指标 + 远程操作 ====== -->
+        <Border x:Name="ActionBar" Grid.Row="1" Background="#F4F6F8"
+                BorderBrush="#DDE3E8" BorderThickness="0,0,0,1" Padding="14,6">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
 
-                <!-- Host -->
-                <TextBlock Grid.Column="0" Text="Host:" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                <TextBox Grid.Column="1" Text="{Binding Host, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                         VerticalAlignment="Center" Margin="0,0,12,0"/>
+                <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+                    <TextBlock x:Name="StatusDot" Text="&#x25CF;" FontSize="11"
+                               Foreground="{StaticResource StatusIdleBrush}" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                    <TextBlock Text="Status: " Style="{StaticResource ActionLabelStyle}"/>
+                    <TextBlock Text="{Binding StatusText}" Style="{StaticResource ActionValueStyle}" Margin="0,0,24,0"/>
 
-                <!-- Port -->
-                <TextBlock Grid.Column="2" Text="Port:" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                <TextBox Grid.Column="3" Text="{Binding Port, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                         Width="60" VerticalAlignment="Center" Margin="0,0,12,0"/>
+                    <TextBlock Text="Resolution: " Style="{StaticResource ActionLabelStyle}"/>
+                    <TextBlock Text="{Binding FrameSize}" Style="{StaticResource ActionValueStyle}" Margin="0,0,24,0"/>
 
-                <!-- Username -->
-                <TextBlock Grid.Column="4" Text="User:" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                <TextBox Grid.Column="5" Text="{Binding Username, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                         Width="100" VerticalAlignment="Center" Margin="0,0,12,0"/>
+                    <TextBlock Text="FPS: " Style="{StaticResource ActionLabelStyle}"/>
+                    <TextBlock Text="{Binding FrameRateText}" Style="{StaticResource ActionValueStyle}" Margin="0,0,24,0"/>
 
-                <!-- Password -->
-                <TextBlock Grid.Column="6" Text="Password:" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                <PasswordBox x:Name="PasswordBox" Grid.Column="7" PasswordChanged="PasswordBox_PasswordChanged"
-                             Width="120" VerticalAlignment="Center" Margin="0,0,12,0"/>
-
-                <!-- 主操作按钮 -->
-                <StackPanel Grid.Column="8" Orientation="Horizontal" Margin="0,0,12,0">
-                    <Button Content="Connect" Command="{Binding ConnectCommand}" Width="80" Height="28" Margin="0,0,4,0"/>
-                    <Button Content="Disconnect" Command="{Binding StopCommand}" Width="80" Height="28"/>
+                    <TextBlock Text="Codec: " Style="{StaticResource ActionLabelStyle}"/>
+                    <TextBlock Text="{Binding CodecName}" Style="{StaticResource ActionValueStyle}"/>
                 </StackPanel>
 
-                <!-- 分隔线 -->
-                <Separator Grid.Column="9" Width="1" Background="#CCC" Margin="0,4"/>
-
-                <!-- 次要按钮 -->
-                <StackPanel Grid.Column="10" Orientation="Horizontal" Margin="12,0,0,0">
-                    <Button Content="Fullscreen" Command="{Binding FullscreenCommand}" Width="80" Height="28" Margin="0,0,4,0"
-                            ToolTip="切换全屏/窗口模式"/>
-                    <Button Content="Local Test" Command="{Binding StartTestCommand}" Width="80" Height="28"
-                            ToolTip="在本地运行渲染测试，验证管线是否正常" Margin="0,0,8,0"/>
-                    <Button Content="Lock" Command="{Binding LockCommand}" Width="56" Height="28" Margin="0,0,4,0"
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Button Content="Fullscreen" Style="{StaticResource LightButtonStyle}"
+                            Command="{Binding FullscreenCommand}" Margin="0,0,6,0"
+                            ToolTip="切换全屏/窗口模式（F11）"/>
+                    <Button Content="Lock" Style="{StaticResource LightButtonStyle}"
+                            Command="{Binding LockCommand}" Margin="0,0,6,0"
                             ToolTip="远程锁定（Win+L）；Ctrl+Alt+Del 属系统安全序列无法模拟"/>
-                    <Button Content="Alt+Tab" Command="{Binding AltTabCommand}" Width="64" Height="28" Margin="0,0,4,0"
+                    <Button Content="Alt+Tab" Style="{StaticResource LightButtonStyle}"
+                            Command="{Binding AltTabCommand}" Margin="0,0,6,0"
                             ToolTip="在远端发送 Alt+Tab 切换窗口"/>
-                    <Button Content="Reset Keys" Command="{Binding ResetKeysCommand}" Width="80" Height="28"
+                    <Button Content="Reset Keys" Style="{StaticResource LightButtonStyle}"
+                            Command="{Binding ResetKeysCommand}" Margin="0,0,6,0"
                             ToolTip="释放可能卡住的 Ctrl/Alt/Shift/Win 键"/>
+                    <Button Content="Local Test" Style="{StaticResource LightButtonStyle}"
+                            Command="{Binding StartTestCommand}"
+                            ToolTip="在本地运行渲染测试，验证管线是否正常"/>
                 </StackPanel>
             </Grid>
         </Border>
 
         <!-- ====== 中间：桌面显示区 ====== -->
-        <Border Grid.Row="1" Background="Black"
+        <Border Grid.Row="2" Background="Black"
                 MouseMove="RenderImage_MouseMove"
                 MouseDown="RenderImage_MouseDown"
                 MouseUp="RenderImage_MouseUp"
@@ -88,8 +150,7 @@
             <Grid>
                 <Image x:Name="RenderImage" Source="{Binding RenderBitmap}" Stretch="Uniform"/>
 
-                <!-- 文件剪贴板传输进度条：叠加在桌面显示区顶部，半透明黑色背景 -->
-                <!-- IsHitTestVisible=False 让鼠标穿透，不拦截远程桌面点击 -->
+                <!-- 文件剪贴板传输进度条：叠加在桌面显示区顶部 -->
                 <Border HorizontalAlignment="Center" VerticalAlignment="Top"
                         Margin="0,12,0,0" Padding="20,10"
                         Background="#E0000000" CornerRadius="6"
@@ -99,25 +160,19 @@
                         <TextBlock Text="{Binding ClipboardProgressText}"
                                    Foreground="White" HorizontalAlignment="Center" Margin="0,0,0,6"
                                    FontSize="13"/>
-                        <ProgressBar Value="{Binding ClipboardProgressValue}"
-                                     Maximum="100" Width="320" Height="8"
-                                     Foreground="#4CAF50" Background="#40000000"/>
+                        <ProgressBar Value="{Binding ClipboardProgressValue}" Maximum="100" Width="320"
+                                     Style="{StaticResource AccentProgressBarStyle}"/>
                     </StackPanel>
                 </Border>
             </Grid>
         </Border>
 
-        <!-- ====== 底部：状态栏 ====== -->
-        <Border x:Name="BottomBar" Grid.Row="2" Background="#F5F5F5" BorderBrush="#CCC" BorderThickness="0,1,0,0" Padding="12,6">
+        <!-- ====== 底部状态栏（浅色）：快捷键提示 ====== -->
+        <Border x:Name="BottomBar" Grid.Row="3" Background="#F4F6F8"
+                BorderBrush="#DDE3E8" BorderThickness="0,1,0,0" Padding="14,5">
             <StackPanel Orientation="Horizontal">
-                <TextBlock Text="Status: " VerticalAlignment="Center"/>
-                <TextBlock Text="{Binding StatusText}" FontWeight="Bold" VerticalAlignment="Center" Margin="0,0,16,0"/>
-                <TextBlock Text="Resolution: " VerticalAlignment="Center"/>
-                <TextBlock Text="{Binding FrameSize}" FontWeight="Bold" VerticalAlignment="Center" Margin="0,0,16,0"/>
-                <TextBlock Text="FPS: " VerticalAlignment="Center"/>
-                <TextBlock Text="{Binding FrameRateText}" FontWeight="Bold" VerticalAlignment="Center" Margin="0,0,16,0"/>
-                <TextBlock Text="Codec: " VerticalAlignment="Center"/>
-                <TextBlock Text="{Binding CodecName}" FontWeight="Bold" VerticalAlignment="Center"/>
+                <TextBlock Text="F11 / Esc 全屏切换" Style="{StaticResource ActionLabelStyle}" Margin="0,0,16,0"/>
+                <TextBlock Text="焦点在输入框时不转发键盘" Style="{StaticResource ActionLabelStyle}"/>
             </StackPanel>
         </Border>
     </Grid>

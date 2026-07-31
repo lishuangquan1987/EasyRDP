@@ -37,6 +37,9 @@ namespace EasyRDP.Server.Wpf
         private string _username = "";
         private string _password = "";
 
+        // 设置持久化：%AppData%\EasyRDP\server\settings.json
+        private readonly ServerSettingsStore _settingsStore = new ServerSettingsStore();
+
         /// <summary>日志条目集合（最新在前）。</summary>
         public ObservableCollection<string> LogEntries { get; } = new ObservableCollection<string>();
 
@@ -112,12 +115,21 @@ namespace EasyRDP.Server.Wpf
 
         public RelayCommand StartCommand { get; }
         public RelayCommand StopCommand { get; }
+        public RelayCommand SaveSettingsCommand { get; }
 
         public MainWindowViewModel(Dispatcher dispatcher)
         {
             _dispatcher = dispatcher;
             StartCommand = new RelayCommand(StartServer, () => !IsRunning);
             StopCommand = new RelayCommand(StopServer, () => IsRunning);
+            SaveSettingsCommand = new RelayCommand(SaveSettings);
+
+            // 启动时恢复上次保存的服务端设置
+            ServerSettings settings = _settingsStore.Load();
+            if (!string.IsNullOrEmpty(settings.Port))
+                PortText = settings.Port;
+            Username = settings.Username ?? "";
+            Password = settings.Password ?? "";
         }
 
         // ====== Start 逻辑 ======
@@ -138,6 +150,9 @@ namespace EasyRDP.Server.Wpf
                     MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
+
+            // 启动即持久化当前设置
+            SaveSettings();
 
             try
             {
@@ -206,6 +221,18 @@ namespace EasyRDP.Server.Wpf
             SessionCount = "0";
             Uptime = "—";
             AddLog("Server stopped");
+        }
+
+        /// <summary>把当前端口/用户名/密码保存到本地配置文件。</summary>
+        public void SaveSettings()
+        {
+            bool ok = _settingsStore.Save(new ServerSettings
+            {
+                Port = PortText ?? "2000",
+                Username = Username ?? "",
+                Password = Password ?? ""
+            });
+            AddLog(ok ? "Settings saved" : "Settings save failed");
         }
 
         // ====== 会话事件 ======

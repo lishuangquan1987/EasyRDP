@@ -1,5 +1,8 @@
+#nullable disable
+using System.ComponentModel;
 using System.Windows;
 using System.Windows.Input;
+using System.Windows.Media;
 
 namespace EasyRDP.Client.Wpf;
 
@@ -19,6 +22,35 @@ public partial class MainWindow : Window
         // PasswordBox 不支持绑定 Password（安全设计），初始值在 XAML 构造后同步一次，
         // 后续变化由 PasswordChanged 事件同步到 ViewModel。
         PasswordBox.Password = _vm.Password ?? string.Empty;
+
+        // 连接状态指示灯：连接成功后状态点变绿
+        _vm.PropertyChanged += (s, e) => OnViewModelPropertyChanged(e.PropertyName);
+    }
+
+    /// <summary>ViewModel 属性变化 → 同步仅 View 层拥有的 UI 元素（确保在 UI 线程执行）。</summary>
+    private void OnViewModelPropertyChanged(string propertyName)
+    {
+        if (!Dispatcher.CheckAccess())
+        {
+            Dispatcher.BeginInvoke(new Action(() => OnViewModelPropertyChanged(propertyName)));
+            return;
+        }
+
+        // 选中不同配置时，把 ViewModel 的密码同步回 PasswordBox（Password 不支持绑定）
+        if (propertyName == nameof(MainWindowViewModel.Password)
+            && PasswordBox.Password != (_vm.Password ?? string.Empty))
+        {
+            PasswordBox.Password = _vm.Password ?? string.Empty;
+            return;
+        }
+            if (propertyName == nameof(MainWindowViewModel.IsConnected))
+            {
+                var okBrush = TryFindResource("StatusOkBrush") as Brush;
+                var idleBrush = TryFindResource("StatusIdleBrush") as Brush;
+                StatusDot.Foreground = _vm.IsConnected
+                    ? (okBrush ?? idleBrush ?? StatusDot.Foreground)
+                    : (idleBrush ?? okBrush ?? StatusDot.Foreground);
+            }
     }
 
     /// <summary>PasswordBox 密码变化 → 同步到 ViewModel（UI 不直接绑定敏感属性）。</summary>
@@ -107,6 +139,7 @@ public partial class MainWindow : Window
     public void SetFullscreenUI(bool fullscreen)
     {
         TopBar.Visibility = fullscreen ? Visibility.Collapsed : Visibility.Visible;
+        ActionBar.Visibility = fullscreen ? Visibility.Collapsed : Visibility.Visible;
         BottomBar.Visibility = fullscreen ? Visibility.Collapsed : Visibility.Visible;
     }
 }
