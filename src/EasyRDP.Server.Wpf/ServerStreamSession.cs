@@ -103,9 +103,10 @@ namespace EasyRDP.Server.Wpf
             _cursorTracker = cursorTracker;
             FrameDelayMs = 33; // ~30fps default
             KeyframeInterval = 30;
-            // 1080p 屏幕内容：8Mbps 仍有文字边缘/纯色渐变可见瑕疵，12Mbps + 屏幕内容模式
-            // + QP 上限 36 后接近 VNC 观感；局域网下带宽充裕，16M 上限码率由编码器 iMaxBitrate 兜底。
-            TargetBitrate = 12000000;
+            // 1080p 屏幕内容：12Mbps 动态滚动场景仍可见色度/文字边缘瑕疵，
+            // 15Mbps + 屏幕内容模式 + QP 上限 36 + 关闭去块滤波后更接近 VNC 观感；
+            // 局域网下带宽充裕，22.5M 上限码率由编码器 iMaxBitrate 兜底。
+            TargetBitrate = 15000000;
         }
 
         public void Start(uint sessionId, CodecId codec)

@@ -139,6 +139,10 @@ namespace EasyRDP.Server.Wpf
             bool positionChanged = !_hasLastState || x != _lastX || y != _lastY;
             bool shapeChanged = _enableShape && _hasLastState
                 && !ArraysEqual(shapeData, _lastShapeData);
+            // 首次轮询（_hasLastState=false）必须携带形状数据：
+            // 否则客户端永远拿不到初始光标位图，只会更新位置（表现就是"鼠标永远是箭头"）。
+            bool firstUpdate = !_hasLastState;
+            bool includeShape = _enableShape && (firstUpdate || shapeChanged);
 
             if (!positionChanged && !shapeChanged)
             {
@@ -158,11 +162,11 @@ namespace EasyRDP.Server.Wpf
                 Visible = true,
                 X = x,
                 Y = y,
-                Width = shapeChanged && shapeData != null ? rawInfo.Width : 0,
-                Height = shapeChanged && shapeData != null ? rawInfo.Height : 0,
-                HotX = shapeChanged ? rawInfo.HotspotX : 0,
-                HotY = shapeChanged ? rawInfo.HotspotY : 0,
-                RgbaPixels = shapeChanged ? shapeData : null
+                Width = includeShape && shapeData != null ? rawInfo.Width : 0,
+                Height = includeShape && shapeData != null ? rawInfo.Height : 0,
+                HotX = includeShape ? rawInfo.HotspotX : 0,
+                HotY = includeShape ? rawInfo.HotspotY : 0,
+                RgbaPixels = includeShape ? shapeData : null
             };
 
             byte[] payload = msg.Pack();

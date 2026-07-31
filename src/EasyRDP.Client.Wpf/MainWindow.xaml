@@ -153,6 +153,14 @@
                 <Image x:Name="RenderImage" Source="{Binding RenderBitmap}" Stretch="Uniform"
                        RenderOptions.BitmapScalingMode="Fant"/>
 
+                <!-- 远程光标叠加层：显示服务端光标形状/位置，盖住本地箭头光标。
+                     不参与命中测试，鼠标事件仍由 RenderImage 处理。 -->
+                <Image x:Name="RemoteCursorImage"
+                       HorizontalAlignment="Left" VerticalAlignment="Top"
+                       Stretch="None" IsHitTestVisible="False"
+                       RenderOptions.BitmapScalingMode="NearestNeighbor"
+                       Visibility="Collapsed"/>
+
                 <!-- 文件剪贴板传输进度条：叠加在桌面显示区顶部 -->
                 <Border HorizontalAlignment="Center" VerticalAlignment="Top"
                         Margin="0,12,0,0" Padding="20,10"

@@ -63,6 +63,9 @@ namespace EasyRDP.Client.Wpf
         private int _frameRate;
         private string _codecName = "—";
         private WriteableBitmap? _renderBitmap;
+        // 远程屏幕尺寸（握手时记录）：用于把远程光标坐标映射到本地显示区
+        private int _remoteScreenWidth;
+        private int _remoteScreenHeight;
         // 剪贴板轮询：检测本地剪贴板变化，发送到服务端
         private DispatcherTimer? _clipboardTimer;
         private string _lastClipboardText = "";
@@ -230,6 +233,22 @@ namespace EasyRDP.Client.Wpf
         public string FrameRateText
         {
             get { return _frameRate > 0 ? string.Format("{0} FPS", _frameRate) : "—"; }
+        }
+
+        /// <summary>远程光标更新事件（接收线程触发，订阅者需 marshal 到 UI 线程）。
+        /// 光标形状数据是 Windows AND/XOR 掩码格式（来自 EasyDesk WindowsCursorCapturer）。</summary>
+        public event Action<CursorInfo>? RemoteCursorChanged;
+
+        /// <summary>远程屏幕宽度（握手时记录）。</summary>
+        public int RemoteScreenWidth
+        {
+            get { return _remoteScreenWidth; }
+        }
+
+        /// <summary>远程屏幕高度（握手时记录）。</summary>
+        public int RemoteScreenHeight
+        {
+            get { return _remoteScreenHeight; }
         }
 
         /// <summary>文件剪贴板是否正在传输，控制进度条可见性。</summary>
@@ -479,6 +498,11 @@ namespace EasyRDP.Client.Wpf
 
             _streamSession.RenderTarget = _renderTarget;
             _streamSession.InitPipeline(handshakeRes.Codec, handshakeRes.ScreenWidth, handshakeRes.ScreenHeight);
+            _remoteScreenWidth = handshakeRes.ScreenWidth;
+            _remoteScreenHeight = handshakeRes.ScreenHeight;
+            // 订阅远程光标更新（形状 + 位置）：WpfRenderTarget.UpdateCursor 在接收线程触发，
+            // MainWindow 订阅 RemoteCursorChanged 后在 UI 线程渲染光标叠加层
+            _renderTarget.CursorChanged += OnRemoteCursorChanged;
             // 订阅服务端→客户端剪贴板同步事件：服务端用户复制 → 客户端自动设置本地剪贴板
             _streamSession.ClipboardReceived += OnClipboardReceivedFromServer;
             // 订阅文件剪贴板同步事件：服务端用户复制文件 → 客户端写入临时目录并设置 CF_HDROP
@@ -1107,6 +1131,7 @@ namespace EasyRDP.Client.Wpf
             // 清理渲染资源
             if (_renderTarget != null)
             {
+                _renderTarget.CursorChanged -= OnRemoteCursorChanged;
                 try { _renderTarget.Dispose(); } catch { }
                 _renderTarget = null;
             }
@@ -1127,6 +1152,14 @@ namespace EasyRDP.Client.Wpf
             ClipboardProgressValue = 0;
             ClipboardProgressText = "";
             SetBusy(false, "Disconnected");
+        }
+
+        /// <summary>远程光标更新回调（接收线程）→ 转发为 RemoteCursorChanged 事件。</summary>
+        private void OnRemoteCursorChanged(CursorInfo cursor)
+        {
+            var handler = RemoteCursorChanged;
+            if (handler != null)
+                handler(cursor);
         }
 
         // ====== 输入事件处理（由 View 代码后置调用） ======

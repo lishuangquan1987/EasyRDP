@@ -5,6 +5,9 @@ using System.Windows;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Media.Imaging;
+using EasyRDP.Core.Rendering;
+using NLog;
 
 namespace EasyRDP.Client.Wpf;
 
@@ -14,6 +17,7 @@ namespace EasyRDP.Client.Wpf;
 /// </summary>
 public partial class MainWindow : Window
 {
+    private static readonly Logger Logger = LogManager.GetCurrentClassLogger();
     private readonly MainWindowViewModel _vm;
     // 全屏状态：由 SetFullscreenMode 维护，WndProc 据此决定 WM_GETMINMAXINFO 返回值。
     // 全屏 = WindowStyle.None + Maximized + 最大化尺寸覆盖整个监视器（含任务栏区域），
@@ -22,6 +26,12 @@ public partial class MainWindow : Window
 
     private const int WM_GETMINMAXINFO = 0x0024;
     private const uint MONITOR_DEFAULTTONEAREST = 0x00000002;
+
+    // 远程光标叠加状态
+    private WriteableBitmap? _cursorBitmap;
+    private bool _remoteCursorVisible;
+    private int _cursorHotX;
+    private int _cursorHotY;
 
     [DllImport("user32.dll")]
     private static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint dwFlags);
@@ -58,7 +68,19 @@ public partial class MainWindow : Window
 
         // 连接状态指示灯：连接成功后状态点变绿
         _vm.PropertyChanged += (s, e) => OnViewModelPropertyChanged(e.PropertyName);
+        // 远程光标更新（接收线程触发，内部转 UI 线程）
+        _vm.RemoteCursorChanged += OnRemoteCursorChanged;
+        // 显示区尺寸变化时重算光标位置
+        RenderImage.SizeChanged += (s, e) =>
+        {
+            if (_remoteCursorVisible)
+                UpdateCursorPosition(_lastRemoteCursorX, _lastRemoteCursorY);
+        };
     }
+
+    // 最近一次远程光标坐标（SizeChanged 重定位用）
+    private int _lastRemoteCursorX;
+    private int _lastRemoteCursorY;
 
     /// <summary>当前是否处于全屏模式（供 ViewModel/快捷键判断）。</summary>
     public bool IsFullscreenMode
@@ -82,6 +104,10 @@ public partial class MainWindow : Window
             // 先无边框再最大化：无边框窗口最大化默认只铺工作区（任务栏仍可见），
             // WndProc 拦截 WM_GETMINMAXINFO 返回 rcMonitor 后才会盖住任务栏。
             WindowStyle = WindowStyle.None;
+            // 若窗口此前已是 Maximized（工作区尺寸），改样式不会触发重新查询 MINMAXINFO，
+            // 必须先复位 Normal 再 Maximized，保证每次进全屏都重新走最大化流程 → 稳定盖住任务栏。
+            if (WindowState == WindowState.Maximized)
+                WindowState = WindowState.Normal;
             WindowState = WindowState.Maximized;
             Topmost = false;
             SetFullscreenUI(true);
@@ -157,6 +183,11 @@ public partial class MainWindow : Window
             PasswordBox.Password = _vm.Password ?? string.Empty;
             return;
         }
+        // 断开连接 → 隐藏远程光标、恢复本地系统光标
+        if (propertyName == nameof(MainWindowViewModel.IsConnected) && !_vm.IsConnected)
+        {
+            HideRemoteCursor();
+        }
             if (propertyName == nameof(MainWindowViewModel.IsConnected))
             {
                 var okBrush = TryFindResource("StatusOkBrush") as Brush;
@@ -165,6 +196,155 @@ public partial class MainWindow : Window
                     ? (okBrush ?? idleBrush ?? StatusDot.Foreground)
                     : (idleBrush ?? okBrush ?? StatusDot.Foreground);
             }
+    }
+
+    /// <summary>
+    /// 远程光标更新（可能来自接收线程）：合成光标位图并定位到显示区。
+    /// 光标数据为 Windows AND/XOR 掩码格式：ImageData = [AND 掩码(1bpp, 行对齐 2B)] + [XOR 掩码(BGRA32)]。
+    /// </summary>
+    private void OnRemoteCursorChanged(CursorInfo cursor)
+    {
+        if (!Dispatcher.CheckAccess())
+        {
+            Dispatcher.BeginInvoke(new Action<CursorInfo>(OnRemoteCursorChanged), cursor);
+            return;
+        }
+
+        try
+        {
+            if (!_vm.IsConnected)
+            {
+                HideRemoteCursor();
+                return;
+            }
+
+            _remoteCursorVisible = cursor.Visible;
+            _cursorHotX = cursor.HotX;
+            _cursorHotY = cursor.HotY;
+
+            // 形状数据变化（含首次连接）→ 重建光标位图
+            if (cursor.RgbaPixels != null && cursor.Width > 0 && cursor.Height > 0)
+            {
+                byte[] bgra = ComposeCursorBgra(cursor);
+                if (bgra != null)
+                {
+                    if (_cursorBitmap == null
+                        || _cursorBitmap.PixelWidth != cursor.Width
+                        || _cursorBitmap.PixelHeight != cursor.Height)
+                    {
+                        _cursorBitmap = new WriteableBitmap(
+                            cursor.Width, cursor.Height, 96, 96, PixelFormats.Bgra32, null);
+                    }
+                    _cursorBitmap.WritePixels(
+                        new Int32Rect(0, 0, cursor.Width, cursor.Height),
+                        bgra, cursor.Width * 4, 0);
+                    RemoteCursorImage.Source = _cursorBitmap;
+                }
+            }
+
+            if (!_remoteCursorVisible)
+            {
+                HideRemoteCursor();
+                return;
+            }
+
+            _lastRemoteCursorX = cursor.X;
+            _lastRemoteCursorY = cursor.Y;
+            RemoteCursorImage.Visibility = Visibility.Visible;
+            // 隐藏本地箭头光标，只显示远程光标形状
+            RenderImage.Cursor = Cursors.None;
+            UpdateCursorPosition(cursor.X, cursor.Y);
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn(ex, "Remote cursor update failed");
+        }
+    }
+
+    /// <summary>把远程光标坐标（含热区偏移）映射到显示区实际渲染矩形。</summary>
+    private void UpdateCursorPosition(int remoteX, int remoteY)
+    {
+        Rect rect = GetRenderImageRect();
+        if (rect.IsEmpty) return;
+        double scaleX = rect.Width / _vm.RemoteScreenWidth;
+        double scaleY = rect.Height / _vm.RemoteScreenHeight;
+        RemoteCursorImage.Margin = new Thickness(
+            rect.X + remoteX * scaleX - _cursorHotX * scaleX,
+            rect.Y + remoteY * scaleY - _cursorHotY * scaleY,
+            0, 0);
+    }
+
+    /// <summary>计算 RenderImage 在 Uniform 拉伸下实际渲染的矩形（处理黑边 letterbox）。</summary>
+    private Rect GetRenderImageRect()
+    {
+        double iw = RenderImage.ActualWidth;
+        double ih = RenderImage.ActualHeight;
+        int sw = _vm.RemoteScreenWidth;
+        int sh = _vm.RemoteScreenHeight;
+        if (iw <= 0 || ih <= 0 || sw <= 0 || sh <= 0)
+            return Rect.Empty;
+        double scale = Math.Min(iw / sw, ih / sh);
+        double w = sw * scale;
+        double h = sh * scale;
+        return new Rect((iw - w) / 2, (ih - h) / 2, w, h);
+    }
+
+    /// <summary>隐藏远程光标叠加层并恢复本地系统光标。</summary>
+    private void HideRemoteCursor()
+    {
+        _remoteCursorVisible = false;
+        RemoteCursorImage.Visibility = Visibility.Collapsed;
+        RenderImage.Cursor = null;
+    }
+
+    /// <summary>
+    /// 把 Windows AND/XOR 光标掩码合成为 BGRA32 像素。
+    /// AND=1 → 透明；AND=0 且 XOR alpha=0 → 不透明黑（旧式光标约定）。
+    /// </summary>
+    private static byte[] ComposeCursorBgra(CursorInfo cursor)
+    {
+        int w = cursor.Width;
+        int h = cursor.Height;
+        byte[] src = cursor.RgbaPixels;
+        if (w <= 0 || h <= 0 || src == null) return null;
+
+        int andStride = ((w + 15) / 16) * 2; // 1bpp 行对齐到 2 字节
+        int xorStride = w * 4;
+        int expected = andStride * h + xorStride * h;
+        if (src.Length < expected) return null;
+
+        byte[] dst = new byte[w * h * 4];
+        int xorBase = andStride * h;
+        for (int row = 0; row < h; row++)
+        {
+            for (int col = 0; col < w; col++)
+            {
+                int andByteIdx = row * andStride + (col >> 3);
+                int andBit = 7 - (col & 7);
+                bool andSet = ((src[andByteIdx] >> andBit) & 1) != 0;
+
+                int si = xorBase + row * xorStride + col * 4;
+                byte b = src[si];
+                byte g = src[si + 1];
+                byte r = src[si + 2];
+                byte a = src[si + 3];
+                if (andSet)
+                {
+                    b = g = r = a = 0; // 挖空区域全透明
+                }
+                else if (a == 0)
+                {
+                    a = 255; // 旧式光标：AND=0 + XOR alpha=0 → 不透明黑
+                }
+
+                int di = (row * w + col) * 4;
+                dst[di] = b;
+                dst[di + 1] = g;
+                dst[di + 2] = r;
+                dst[di + 3] = a;
+            }
+        }
+        return dst;
     }
 
     /// <summary>PasswordBox 密码变化 → 同步到 ViewModel（UI 不直接绑定敏感属性）。</summary>
