@@ -93,6 +93,7 @@ namespace EasyRDP.Server.Wpf
             if (payload != null)
             {
                 session.SendCursorUpdate(payload);
+                Logger.Info("CursorTracker: sent initial cursor state ({0} bytes) to new session", payload.Length);
             }
             // payload 为 null（服务端刚启动、尚未首次轮询）时由首次轮询（firstUpdate）广播覆盖。
         }

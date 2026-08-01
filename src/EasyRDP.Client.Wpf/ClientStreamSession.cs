@@ -42,6 +42,8 @@ namespace EasyRDP.Client.Wpf
         // 管线（RenderTarget）就绪前到达的光标消息：服务端在 HandshakeRes 之前就已启动光标会话，
         // 若直接丢弃，初始形状更新会在握手窗口丢失，之后只收到纯位置更新 → 客户端永远没有光标位图。
         private CursorUpdateMessage _pendingCursor;
+        // 是否已记录过"首次收到含形状的光标更新"（诊断用，避免 60Hz 刷屏）
+        private bool _cursorShapeLogged;
 
         /// <summary>Gets the negotiated video codec used for decoding.</summary>
         public CodecId Codec { get; private set; }
@@ -692,6 +694,13 @@ namespace EasyRDP.Client.Wpf
         private void ProcessCursorUpdate(CursorUpdateMessage msg)
         {
             if (_renderTarget == null) return;
+            // 首次收到含形状的光标更新时记录一次，便于诊断"客户端看不到光标"类问题
+            if (msg.RgbaPixels != null && msg.Width > 0 && msg.Height > 0 && !_cursorShapeLogged)
+            {
+                _cursorShapeLogged = true;
+                Logger.Info("First cursor shape received: {0}x{1} hotspot={2},{3} pos={4},{5} pixels={6}",
+                    msg.Width, msg.Height, msg.HotX, msg.HotY, msg.X, msg.Y, msg.RgbaPixels.Length);
+            }
             _renderTarget.UpdateCursor(new CursorInfo
             {
                 Visible = msg.Visible,
