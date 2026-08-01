@@ -226,7 +226,9 @@ public partial class MainWindow : Window
             if (cursor.RgbaPixels != null && cursor.Width > 0 && cursor.Height > 0)
             {
                 byte[] bgra = ComposeCursorBgra(cursor);
-                if (bgra != null)
+                // 空形状（全部透明，如捕获端数据异常）时保留上一帧位图，
+                // 避免光标在编辑等场景下凭空消失；仅记录诊断日志。
+                if (bgra != null && HasOpaquePixels(bgra))
                 {
                     if (_cursorBitmap == null
                         || _cursorBitmap.PixelWidth != cursor.Width
@@ -239,6 +241,11 @@ public partial class MainWindow : Window
                         new Int32Rect(0, 0, cursor.Width, cursor.Height),
                         bgra, cursor.Width * 4, 0);
                     RemoteCursorImage.Source = _cursorBitmap;
+                }
+                else
+                {
+                    Logger.Warn("Remote cursor shape empty, keeping previous bitmap (size={0}x{1})",
+                        cursor.Width, cursor.Height);
                 }
             }
 
@@ -298,8 +305,8 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// 把 Windows AND/XOR 光标掩码合成为 BGRA32 像素。
-    /// AND=1 → 透明；AND=0 且 XOR alpha=0 → 不透明黑（旧式光标约定）。
+    /// 把光标掩码（AND 1bpp + XOR BGRA32）合成为 BGRA32 像素。
+    /// AND=1 → 透明覆盖；AND=0 → 直接使用 XOR 像素（alpha 即透明度）。
     /// </summary>
     private static byte[] ComposeCursorBgra(CursorInfo cursor)
     {
@@ -332,10 +339,10 @@ public partial class MainWindow : Window
                 {
                     b = g = r = a = 0; // 挖空区域全透明
                 }
-                else if (a == 0)
-                {
-                    a = 255; // 旧式光标：AND=0 + XOR alpha=0 → 不透明黑
-                }
+                // AND=0 时直接使用 XOR 像素的 BGRA/alpha：
+                // 单色光标已由 EasyDesk 捕获端转换为真实 alpha（透明=0，黑白=255），
+                // 彩色光标 alpha 即透明度。旧规则把 alpha=0 强制为不透明黑，
+                // 会把现代 alpha 光标的透明区域涂黑，或掩盖空形状数据。
 
                 int di = (row * w + col) * 4;
                 dst[di] = b;
@@ -345,6 +352,17 @@ public partial class MainWindow : Window
             }
         }
         return dst;
+    }
+
+    /// <summary>判断合成后的 BGRA 位图是否含有非透明像素（用于空形状兜底）。</summary>
+    private static bool HasOpaquePixels(byte[] bgra)
+    {
+        if (bgra == null) return false;
+        for (int i = 3; i < bgra.Length; i += 4)
+        {
+            if (bgra[i] != 0) return true;
+        }
+        return false;
     }
 
     /// <summary>PasswordBox 密码变化 → 同步到 ViewModel（UI 不直接绑定敏感属性）。</summary>
