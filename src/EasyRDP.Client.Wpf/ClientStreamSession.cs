@@ -39,6 +39,9 @@ namespace EasyRDP.Client.Wpf
             = new System.Collections.Generic.List<MessageReceivedEventArgs>();
         private const int MaxPendingMessages = 1024;
         private bool _pendingOverflowLogged;
+        // 管线（RenderTarget）就绪前到达的光标消息：服务端在 HandshakeRes 之前就已启动光标会话，
+        // 若直接丢弃，初始形状更新会在握手窗口丢失，之后只收到纯位置更新 → 客户端永远没有光标位图。
+        private CursorUpdateMessage _pendingCursor;
 
         /// <summary>Gets the negotiated video codec used for decoding.</summary>
         public CodecId Codec { get; private set; }
@@ -134,6 +137,7 @@ namespace EasyRDP.Client.Wpf
             lock (_pendingLock)
             {
                 _pendingMessages.Clear();
+                _pendingCursor = null;
             }
 
             // 取消所有正在进行的文件剪贴板下载，避免断连后后台线程继续向已关闭的 transport 发送请求
@@ -207,6 +211,27 @@ namespace EasyRDP.Client.Wpf
             try
             {
                 var msg = CursorUpdateMessage.Unpack(cursorPayload);
+                if (!_pipelineReady)
+                {
+                    // 管线就绪前缓冲光标消息，由 FlushPendingCursor 在握手完成后回放，
+                    // 避免初始形状更新被 ProcessCursorUpdate 的 _renderTarget==null 检查丢弃。
+                    // 注意：移动光标产生的纯位置更新（RgbaPixels=null）不能覆盖未回放的形状消息，
+                    // 否则回放后客户端仍无位图可渲染；位置只刷新坐标，形状保留。
+                    lock (_pendingLock)
+                    {
+                        var pending = _pendingCursor;
+                        if (pending != null && pending.RgbaPixels != null && msg.RgbaPixels == null)
+                        {
+                            pending.X = msg.X;
+                            pending.Y = msg.Y;
+                        }
+                        else
+                        {
+                            _pendingCursor = msg;
+                        }
+                    }
+                    return;
+                }
                 ProcessCursorUpdate(msg);
             }
             catch (Exception)
@@ -332,6 +357,24 @@ namespace EasyRDP.Client.Wpf
             foreach (var e in batch)
             {
                 RouteMessage(e);
+            }
+        }
+
+        /// <summary>
+        /// 回放管线就绪前缓冲的最新光标消息（含初始形状位图）。
+        /// 由 ViewModel 在 IsConnected=true 后调用，确保 MainWindow 的光标处理在已连接状态下执行。
+        /// </summary>
+        public void FlushPendingCursor()
+        {
+            CursorUpdateMessage pending;
+            lock (_pendingLock)
+            {
+                pending = _pendingCursor;
+                _pendingCursor = null;
+            }
+            if (pending != null && _pipelineReady)
+            {
+                ProcessCursorUpdate(pending);
             }
         }
 

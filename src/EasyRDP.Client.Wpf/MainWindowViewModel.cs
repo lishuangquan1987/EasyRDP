@@ -523,6 +523,9 @@ namespace EasyRDP.Client.Wpf
                 handshakeRes.Codec, handshakeRes.ScreenWidth, handshakeRes.ScreenHeight);
             _running = true;
             IsConnected = true;
+            // 回放握手期间缓冲的初始光标状态（含形状位图）：此时光标事件已挂接、IsConnected 已置位，
+            // MainWindow 能正常渲染远程光标，否则客户端只更新位置、永远没有光标位图可显示。
+            _streamSession?.FlushPendingCursor();
             CodecName = handshakeRes.Codec.ToString();
             FrameSize = string.Format("{0}x{1}", handshakeRes.ScreenWidth, handshakeRes.ScreenHeight);
 
