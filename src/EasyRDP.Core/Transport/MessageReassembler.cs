@@ -187,6 +187,23 @@ namespace EasyRDP.Core.Transport
             }
         }
 
+        /// <summary>
+        /// 以单个完整分片发送整条消息（不切 1400 字节分片）。
+        /// 用于 ClipFileContentsRes 等"一次响应即一个完整帧"的场景：接收方按完整帧解析，
+        /// 多个并发响应在线路上交错时互不干扰（若切成多个分片且共用 frameId，
+        /// 接收端重组器会把不同响应的分片混在一起导致 payload 损坏）。
+        /// 接收端 FramingBuffer 已支持单分片消息超过 FragmentSize（如 1MB 数据块）。
+        /// </summary>
+        public static void SendSingleFragment(uint frameId, byte messageType, byte[] payload,
+            Action<uint, byte[]> sendAction, uint sessionId)
+        {
+            if (payload == null)
+                payload = new byte[0];
+            byte[] wire = BuildWireFragment(
+                frameId, 0, 1, messageType, (uint)payload.Length, payload);
+            sendAction(sessionId, wire);
+        }
+
         private static byte[] BuildWireFragment(uint frameId, ushort fragIdx, ushort fragCount,
             byte messageType, uint totalPayloadLen, byte[] fragData)
         {

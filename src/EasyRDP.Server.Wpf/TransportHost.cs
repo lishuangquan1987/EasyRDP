@@ -457,7 +457,10 @@ namespace EasyRDP.Server.Wpf
                         // FragAndSend 签名：(frameId, messageType, payload, sendAction, sessionId)
                         // 最后一个参数 sessionId 才是传给 sendAction 的实参。
                         // 控制流 frameId=0；sessionId=targetSid（必须真实，否则 SendTo 静默失败）
-                        MessageReassembler.FragAndSend(0, (byte)MessageType.ClipFileContentsRes, payload,
+                        // 单完整帧发送：并发响应的分片若交错且共用 frameId=0，
+                        // 接收端重组器会把不同响应的分片混在一起导致 payload 损坏（下载失败 → 无粘贴菜单）。
+                        // 每个响应作为完整帧发送，线上交错时互不干扰。
+                        MessageReassembler.SendSingleFragment(0, (byte)MessageType.ClipFileContentsRes, payload,
                             (s, d) => _transportServer.SendTo(s, d), targetSid);
                     });
                 lock (_clipProviderLock)

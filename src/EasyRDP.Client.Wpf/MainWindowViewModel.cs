@@ -743,7 +743,10 @@ namespace EasyRDP.Client.Wpf
                 var provider = new FileClipboardProvider(transferId, filePaths,
                     (sid, payload) =>
                     {
-                        MessageReassembler.FragAndSend(0, (byte)MessageType.ClipFileContentsRes, payload,
+                        // 单完整帧发送：并发响应的分片若交错且共用 frameId=0，
+                        // 接收端重组器会把不同响应的分片混在一起导致 payload 损坏（下载失败 → 无粘贴菜单）。
+                        // 每个响应作为完整帧发送，线上交错时互不干扰。
+                        MessageReassembler.SendSingleFragment(0, (byte)MessageType.ClipFileContentsRes, payload,
                             (s, d) => transport.Send(d), 0);
                     });
                 _streamSession?.SetFileClipboardProvider(provider);
