@@ -136,6 +136,9 @@ namespace EasyRDP.Client.Wpf
         private Action<string>? _onRequestDownloadUpdate;
         private Action<string>? _onRequestApplyUpdate;
         private Action<string>? _onUpdateErrorChanged;
+        // aly-client.exe 崩溃时错误消息包含整段 Go 堆栈，且每 ~5 秒重试一次：
+        // 限频 + 截断，避免日志文件被堆栈刷爆。用 long ticks + Interlocked 保证原子。
+        private long _lastAlyErrorLoggedTicks;
 
         /// <summary>当前更新状态（None=无更新）。</summary>
         private AlyClientStatus _alyClientStatus = AlyClientStatus.None;
@@ -229,7 +232,21 @@ namespace EasyRDP.Client.Wpf
             _onUpdateErrorChanged = msg =>
             {
                 if (!string.IsNullOrEmpty(msg))
-                    Logger.Warn("aly update error: {0}", msg);
+                {
+                    long nowTicks = DateTime.UtcNow.Ticks;
+                    long lastTicks = Interlocked.Read(ref _lastAlyErrorLoggedTicks);
+                    if (lastTicks != 0
+                        && (nowTicks - lastTicks) / TimeSpan.TicksPerSecond < 60)
+                        return;
+                    if (Interlocked.CompareExchange(
+                        ref _lastAlyErrorLoggedTicks, nowTicks, lastTicks) != lastTicks)
+                        return;
+                    string firstLine = msg;
+                    int nl = msg.IndexOf('\n');
+                    if (nl > 0)
+                        firstLine = msg.Substring(0, nl);
+                    Logger.Warn("aly update error: {0}", firstLine);
+                }
             };
             _alyUpdateClient.ErrorStatusChanged += _onUpdateErrorChanged;
         }

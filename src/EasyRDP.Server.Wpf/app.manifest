@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
+  <assemblyIdentity version="1.0.0.0" name="EasyRDP.Server.Wpf.app" />
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v2">
+    <security>
+      <requestedPrivileges xmlns="urn:schemas-microsoft-com:asm.v3">
+        <requestedExecutionLevel level="asInvoker" uiAccess="false" />
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
+  <!--
+    DPI 感知声明：无清单时 net40 进程被系统当作 DPI 未感知，
+    GetSystemMetrics 返回虚拟化（逻辑）像素，而 DXGI/BitBlt 捕获的是物理像素 ——
+    输入坐标按逻辑尺寸归一化后与实际画面错位（125% 缩放下约 25% 水平偏移，即 ~200px）。
+    声明系统 DPI 感知后 GetSystemMetrics 返回物理像素，与捕获/握手尺寸一致，映射精确。
+    XP 忽略此节点，行为不变。
+  -->
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true</dpiAware>
+    </windowsSettings>
+  </application>
+</assembly>

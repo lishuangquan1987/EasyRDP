@@ -1,0 +1,9 @@
+<Project>
+  <!--
+    显式启用 app.manifest（DPI 感知）：SDK 风格项目不会自动把 app.manifest 作为 ApplicationManifest。
+    服务端 net40 进程默认 DPI 未感知，GetSystemMetrics 返回逻辑像素导致输入坐标与物理画面错位。
+  -->
+  <PropertyGroup>
+    <ApplicationManifest>$(MSBuildProjectDirectory)\app.manifest</ApplicationManifest>
+  </PropertyGroup>
+</Project>
