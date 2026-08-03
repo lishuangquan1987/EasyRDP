@@ -74,13 +74,24 @@ public partial class MainWindow : Window
         RenderImage.SizeChanged += (s, e) =>
         {
             if (_remoteCursorVisible)
-                UpdateCursorPosition(_lastRemoteCursorX, _lastRemoteCursorY);
+            {
+                // 优先锚定本地鼠标位置（零延迟），未知时才退回服务端回显位置
+                if (_hasLocalCursorPos)
+                    PositionRemoteCursorAtLocal();
+                else
+                    UpdateCursorPosition(_lastRemoteCursorX, _lastRemoteCursorY);
+            }
         };
     }
 
     // 最近一次远程光标坐标（SizeChanged 重定位用）
     private int _lastRemoteCursorX;
     private int _lastRemoteCursorY;
+    // 本地鼠标位置（RenderImage 坐标系）：远程光标叠加层直接锚定于此，
+    // 指针显示不再等待服务端回显，从根本上消除回显延迟导致的"鼠标不跟手"。
+    private double _localCursorX;
+    private double _localCursorY;
+    private bool _hasLocalCursorPos;
 
     /// <summary>当前是否处于全屏模式（供 ViewModel/快捷键判断）。</summary>
     public bool IsFullscreenMode
@@ -268,12 +279,36 @@ public partial class MainWindow : Window
             RemoteCursorImage.Visibility = Visibility.Visible;
             // 隐藏本地箭头光标，只显示远程光标形状
             RenderImage.Cursor = Cursors.None;
-            UpdateCursorPosition(cursor.X, cursor.Y);
+            // 指针位置锚定本地鼠标位置（零延迟）；服务端回显仅用于同步形状，
+            // 位置只在尚未捕获本地鼠标位置时作为回退（如刚连接、鼠标未移动）。
+            if (_hasLocalCursorPos)
+                PositionRemoteCursorAtLocal();
+            else
+                UpdateCursorPosition(cursor.X, cursor.Y);
         }
         catch (Exception ex)
         {
             Logger.Warn(ex, "Remote cursor update failed");
         }
+    }
+
+    /// <summary>
+    /// 把远程光标叠加层定位到本地鼠标位置：指针显示与手的移动同帧完成，
+    /// 不再依赖服务端回显位置（回显只负责同步光标形状）。
+    /// </summary>
+    private void PositionRemoteCursorAtLocal()
+    {
+        if (!_remoteCursorVisible || RemoteCursorImage.Visibility != Visibility.Visible)
+            return;
+        Rect rect = GetRenderImageRect();
+        if (rect.IsEmpty) return;
+        // 热区偏移按视频缩放比例换算（与 UpdateCursorPosition 一致）
+        double scaleX = rect.Width / _vm.RemoteScreenWidth;
+        double scaleY = rect.Height / _vm.RemoteScreenHeight;
+        RemoteCursorImage.Margin = new Thickness(
+            _localCursorX - _cursorHotX * scaleX,
+            _localCursorY - _cursorHotY * scaleY,
+            0, 0);
     }
 
     /// <summary>把远程光标坐标（含热区偏移）映射到显示区实际渲染矩形。</summary>
@@ -308,6 +343,8 @@ public partial class MainWindow : Window
     private void HideRemoteCursor()
     {
         _remoteCursorVisible = false;
+        // 重置本地位置标记：重连后先以回显位置显示，直到下一次本地鼠标移动重新锚定
+        _hasLocalCursorPos = false;
         RemoteCursorImage.Visibility = Visibility.Collapsed;
         RenderImage.Cursor = null;
     }
@@ -397,7 +434,12 @@ public partial class MainWindow : Window
     private void RenderImage_MouseMove(object sender, MouseEventArgs e)
     {
         var pos = e.GetPosition(RenderImage);
+        // 记录本地鼠标位置并零延迟定位光标叠加层（指针显示不等待服务端回显）
+        _hasLocalCursorPos = true;
+        _localCursorX = pos.X;
+        _localCursorY = pos.Y;
         _vm.HandleMouseMove(pos.X, pos.Y, RenderImage.ActualWidth, RenderImage.ActualHeight);
+        PositionRemoteCursorAtLocal();
     }
 
     /// <summary>
