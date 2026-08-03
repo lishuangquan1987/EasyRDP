@@ -371,6 +371,20 @@ public partial class MainWindow : Window
         _vm.Password = PasswordBox.Password;
     }
 
+    /// <summary>窗口关闭前停止 aly 自动更新后台循环，避免阻塞线程残留。</summary>
+    protected override void OnClosing(CancelEventArgs e)
+    {
+        try
+        {
+            _vm.CleanupUpdateClient();
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn(ex, "Cleanup aly update client failed");
+        }
+        base.OnClosing(e);
+    }
+
     /// <summary>将鼠标事件路由到 ViewModel。</summary>
     private void RenderImage_MouseMove(object sender, MouseEventArgs e)
     {

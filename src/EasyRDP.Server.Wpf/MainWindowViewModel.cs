@@ -5,9 +5,11 @@ using System.ComponentModel;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Threading;
+using AlyClient.CSharpSDK;
 using EasyDesk.Core;
 using EasyDesk.Windows;
 using EasyRDP.Shared;
+using NLog;
 
 namespace EasyRDP.Server.Wpf
 {
@@ -16,6 +18,7 @@ namespace EasyRDP.Server.Wpf
     /// </summary>
     public class MainWindowViewModel : INotifyPropertyChanged
     {
+        private static readonly Logger Logger = LogManager.GetCurrentClassLogger();
         private readonly Dispatcher _dispatcher;
 
         // 业务对象
@@ -123,6 +126,9 @@ namespace EasyRDP.Server.Wpf
             StartCommand = new RelayCommand(StartServer, () => !IsRunning);
             StopCommand = new RelayCommand(StopServer, () => IsRunning);
             SaveSettingsCommand = new RelayCommand(SaveSettings);
+            CheckUpdateCommand = new RelayCommand(CheckUpdate,
+                () => AlyClientStatus == AlyClientStatus.DiscoveredUpdate
+                    || AlyClientStatus == AlyClientStatus.DownloadedUpdate);
 
             // 启动时恢复上次保存的服务端设置
             ServerSettings settings = _settingsStore.Load();
@@ -130,6 +136,163 @@ namespace EasyRDP.Server.Wpf
                 PortText = settings.Port;
             Username = settings.Username ?? "";
             Password = settings.Password ?? "";
+
+            // 启动 aly 自动更新后台检查（检查 → 下载 → 应用）
+            InitializeUpdateClient();
+        }
+
+        // ====== 自动更新（aly） ======
+
+        private AlyUpdateClient _alyUpdateClient;
+        private System.Threading.CancellationTokenSource _requestDownloadUpdateCts =
+            new System.Threading.CancellationTokenSource();
+        private System.Threading.CancellationTokenSource _requestApplyUpdateCts =
+            new System.Threading.CancellationTokenSource();
+        private readonly System.Threading.CancellationTokenSource _updateShutdownCts =
+            new System.Threading.CancellationTokenSource();
+        private Action<AlyClientStatus, string> _onUpdateStatusChanged;
+        private Action<string> _onRequestDownloadUpdate;
+        private Action<string> _onRequestApplyUpdate;
+        private Action<string> _onUpdateErrorChanged;
+
+        /// <summary>当前更新状态（None=无更新）。</summary>
+        private AlyClientStatus _alyClientStatus = AlyClientStatus.None;
+        public AlyClientStatus AlyClientStatus
+        {
+            get { return _alyClientStatus; }
+            private set
+            {
+                if (_alyClientStatus == value) return;
+                _alyClientStatus = value;
+                OnPropertyChanged(nameof(AlyClientStatus));
+                IsUpdatePanelVisible = value != AlyClientStatus.None;
+                CheckUpdateCommand.RaiseCanExecuteChanged();
+            }
+        }
+
+        /// <summary>更新状态提示文本（如 "Found new version: v1.0.1"）。</summary>
+        private string _alyClientUpdateStr = string.Empty;
+        public string AlyClientUpdateStr
+        {
+            get { return _alyClientUpdateStr; }
+            private set
+            {
+                if (_alyClientUpdateStr == value) return;
+                _alyClientUpdateStr = value;
+                OnPropertyChanged(nameof(AlyClientUpdateStr));
+            }
+        }
+
+        /// <summary>是否有更新提示需要展示（status != None）。</summary>
+        private bool _isUpdatePanelVisible;
+        public bool IsUpdatePanelVisible
+        {
+            get { return _isUpdatePanelVisible; }
+            private set
+            {
+                if (_isUpdatePanelVisible == value) return;
+                _isUpdatePanelVisible = value;
+                OnPropertyChanged(nameof(IsUpdatePanelVisible));
+            }
+        }
+
+        /// <summary>确认下载/应用更新的命令（仅在等待用户确认时可用）。</summary>
+        public RelayCommand CheckUpdateCommand { get; private set; }
+
+        /// <summary>
+        /// 初始化 aly 更新客户端：启动后台循环（检查 → 下载 → 应用），
+        /// 并将 SDK 线程上的状态事件转发到 UI 线程。
+        /// </summary>
+        private void InitializeUpdateClient()
+        {
+            _alyUpdateClient = new AlyUpdateClient();
+            // 事件处理委托保存为字段，便于 CleanupUpdateClient 退订
+            _onUpdateStatusChanged = (status, tips) =>
+            {
+                try
+                {
+                    _dispatcher.BeginInvoke(() =>
+                    {
+                        AlyClientStatus = status;
+                        AlyClientUpdateStr = tips ?? string.Empty;
+                    });
+                }
+                catch (Exception ex)
+                {
+                    Logger.Warn(ex, "aly update status marshal failed");
+                }
+            };
+            _alyUpdateClient.StatusChanged += _onUpdateStatusChanged;
+
+            // 非强制更新：阻塞更新循环，直到用户在 UI 上点击确认（CheckUpdate 取消对应的 CTS）
+            _onRequestDownloadUpdate = newVersion =>
+            {
+                // 捕获令牌（struct）：源 CTS 被取消/替换/Dispose 后仍可安全读取状态
+                var confirmationToken = _requestDownloadUpdateCts.Token;
+                var shutdownToken = _updateShutdownCts.Token;
+                while (!confirmationToken.IsCancellationRequested && !shutdownToken.IsCancellationRequested)
+                    System.Threading.Thread.Sleep(500);
+            };
+            _alyUpdateClient.RequestDownloadUpdate += _onRequestDownloadUpdate;
+
+            _onRequestApplyUpdate = newVersion =>
+            {
+                var confirmationToken = _requestApplyUpdateCts.Token;
+                var shutdownToken = _updateShutdownCts.Token;
+                while (!confirmationToken.IsCancellationRequested && !shutdownToken.IsCancellationRequested)
+                    System.Threading.Thread.Sleep(500);
+            };
+            _alyUpdateClient.RequestApplyUpdate += _onRequestApplyUpdate;
+
+            _onUpdateErrorChanged = msg =>
+            {
+                if (!string.IsNullOrEmpty(msg))
+                    Logger.Warn("aly update error: {0}", msg);
+            };
+            _alyUpdateClient.ErrorStatusChanged += _onUpdateErrorChanged;
+        }
+
+        /// <summary>根据当前状态确认"下载"或"应用"更新。</summary>
+        private void CheckUpdate()
+        {
+            if (AlyClientStatus == AlyClientStatus.DiscoveredUpdate)
+                ResetUpdateConfirmation(ref _requestDownloadUpdateCts);
+            else if (AlyClientStatus == AlyClientStatus.DownloadedUpdate)
+                ResetUpdateConfirmation(ref _requestApplyUpdateCts);
+            else
+                Logger.Warn("CheckUpdate called in unexpected state: {0}", AlyClientStatus);
+        }
+
+        /// <summary>取消当前确认等待，并为下一个更新周期准备新的确认令牌。</summary>
+        private static void ResetUpdateConfirmation(ref System.Threading.CancellationTokenSource cts)
+        {
+            // 等待循环持有的是 Token（struct），此处可安全 Cancel + Dispose 旧实例
+            var old = cts;
+            cts = new System.Threading.CancellationTokenSource();
+            try { old.Cancel(); } catch (ObjectDisposedException) { }
+            try { old.Dispose(); } catch (ObjectDisposedException) { }
+        }
+
+        /// <summary>停止自动更新后台检查并释放资源（窗口关闭时调用）。</summary>
+        public void CleanupUpdateClient()
+        {
+            // 先解除可能阻塞的确认等待，再停止后台循环
+            try { _updateShutdownCts.Cancel(); } catch (ObjectDisposedException) { }
+
+            var client = _alyUpdateClient;
+            _alyUpdateClient = null;
+            if (client != null)
+            {
+                if (_onUpdateStatusChanged != null) client.StatusChanged -= _onUpdateStatusChanged;
+                if (_onRequestDownloadUpdate != null) client.RequestDownloadUpdate -= _onRequestDownloadUpdate;
+                if (_onRequestApplyUpdate != null) client.RequestApplyUpdate -= _onRequestApplyUpdate;
+                if (_onUpdateErrorChanged != null) client.ErrorStatusChanged -= _onUpdateErrorChanged;
+                client.Dispose();
+            }
+
+            try { _updateShutdownCts.Dispose(); } catch (ObjectDisposedException) { }
+            try { _requestDownloadUpdateCts.Dispose(); } catch (ObjectDisposedException) { }
+            try { _requestApplyUpdateCts.Dispose(); } catch (ObjectDisposedException) { }
         }
 
         // ====== Start 逻辑 ======

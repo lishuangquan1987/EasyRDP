@@ -2,6 +2,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\EasyRDP.Core\EasyRDP.Core.csproj" />
+    <ProjectReference Include="..\..\aly\client\aly-client-sdk\AlyClient.CSharpSDK\AlyClient.CSharpSDK\AlyClient.CSharpSDK.csproj" />
     <ProjectReference Include="..\..\EasyDesk\src\EasyDesk.Core\EasyDesk.Core.csproj" />
     <ProjectReference Include="..\..\EasyDesk\src\EasyDesk.Windows\EasyDesk.Windows.csproj" />
   </ItemGroup>
@@ -50,5 +51,42 @@
   <ItemGroup>
     <Content Include="NLog.config" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
+
+  <!-- ===== aly 自动更新部署 =====
+       将 aly-client.exe / client.json / version.json 部署到输出目录旁的 UpdateFolder/，
+       并把共享配置 .updator/shared.json 复制到应用目录（ApplicationFolder）内。
+       net40 与 net8.0-windows 两个目标的 OutDir 均为 bin\Debug\<TFM>\，
+       UpdateFolder 统一收敛到 bin\Debug\UpdateFolder（客户端配置指向 net8.0-windows 主程序）。 -->
+  <!-- 仅在具体 TFM 的内层构建执行（外层多目标构建无 TargetFramework/OutDir） -->
+  <Target Name="DeployAlyUpdateFiles" BeforeTargets="Build" Condition="'$(TargetFramework)' != ''">
+    <!-- 属性在目标执行期求值，确保 $(OutDir) 已由 SDK 计算完毕 -->
+    <PropertyGroup>
+      <AlyUpdateFolder Condition="'$(AlyUpdateFolder)' == ''">$(OutDir)..\UpdateFolder\</AlyUpdateFolder>
+      <AlyClientVersion Condition="'$(AlyClientVersion)' == ''">v0.1.3</AlyClientVersion>
+      <AlyUpdaterSourceExe Condition="'$(AlyUpdaterSourceExe)' == ''">..\..\aly\client\aly-client\aly-client.exe</AlyUpdaterSourceExe>
+    </PropertyGroup>
+
+    <MakeDir Directories="$(AlyUpdateFolder)" />
+    <MakeDir Directories="$(OutDir).updator" />
+
+    <!-- aly-client.exe：应用目录（供 updater 自更新）与 UpdateFolder（运行入口）各一份 -->
+    <Copy SourceFiles="$(AlyUpdaterSourceExe)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(AlyUpdaterSourceExe)" DestinationFolder="$(AlyUpdateFolder)" SkipUnchangedFiles="true" />
+
+    <!-- client.json：主程序相对路径 + 需要关闭的进程名（仅首次生成，避免覆盖运行期自定义配置） -->
+    <WriteLinesToFile Condition="!Exists('$(AlyUpdateFolder)client.json')"
+                      File="$(AlyUpdateFolder)client.json"
+                      Lines="{&quot;main_exe_relative_path&quot;: &quot;../net8.0-windows/EasyRDP.Server.Wpf.exe&quot;,&quot;must_close_process_name&quot;: [&quot;EasyRDP.Server.Wpf&quot;]}"
+                      Overwrite="false" />
+
+    <!-- version.json：当前版本状态（仅首次生成，保留下载/应用中的状态机） -->
+    <WriteLinesToFile Condition="!Exists('$(AlyUpdateFolder)version.json')"
+                      File="$(AlyUpdateFolder)version.json"
+                      Lines="{&quot;version_previous&quot;: &quot;&quot;,&quot;version&quot;: &quot;1.0.0&quot;,&quot;version_status&quot;: &quot;applied&quot;}"
+                      Overwrite="false" />
+
+    <!-- shared.json：服务端地址/项目名/忽略规则（作为构建产物的一部分随版本上传） -->
+    <Copy SourceFiles="UpdateConfig\shared.json" DestinationFolder="$(OutDir).updator" SkipUnchangedFiles="true" />
+  </Target>
 
 </Project>

@@ -49,6 +49,14 @@ namespace EasyRDP.Server.Wpf
             {
                 NLog.LogManager.GetCurrentClassLogger().Warn(ex, "Save settings on close failed");
             }
+            try
+            {
+                _vm.CleanupUpdateClient();
+            }
+            catch (Exception ex)
+            {
+                NLog.LogManager.GetCurrentClassLogger().Warn(ex, "Cleanup aly update client failed");
+            }
             base.OnClosing(e);
         }
     }

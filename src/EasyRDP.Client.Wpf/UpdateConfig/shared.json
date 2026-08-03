@@ -1,0 +1,11 @@
+{
+  "server_url": "http://127.0.0.1:2000",
+  "project_name": "easyrdp-client",
+  "ignore_folders": [
+    "Log",
+    "Logs"
+  ],
+  "ignore_files": [],
+  "un_copy_folders": [],
+  "un_copy_files": []
+}
