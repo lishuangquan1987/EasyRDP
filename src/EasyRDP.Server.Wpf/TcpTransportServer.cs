@@ -28,6 +28,8 @@ namespace EasyRDP.Server.Wpf
         private readonly object _lock = new object();
         // 对已断开会话写入失败的总次数（用于限频日志，避免断连竞态刷屏）
         private long _sendFailCount;
+        // 对已移除会话的 SendTo 调用计数（会话移除后到流线程停止前可能仍有少量调用）
+        private long _sendNotFoundCount;
 
         public event EventHandler<ConnectionEventArgs> ClientConnected;
         public event EventHandler<ConnectionEventArgs> ClientDisconnected;
@@ -90,11 +92,12 @@ namespace EasyRDP.Server.Wpf
             {
                 if (!_clients.TryGetValue(sessionId, out client))
                 {
-                    // 静默返回会导致调用方无法察觉 bug（如把 sessionId 误传成 0）。
-                    // Warn 日志记录目标 sessionId 和数据大小，便于诊断"消息发不到对端"类问题。
-                    // 正常断连竞态也会触发此日志，但 Warn 级别足以帮助定位问题。
-                    Logger.Warn("SendTo session {0} not found — dropping {1} bytes (client may have disconnected or sessionId bug)",
-                        sessionId, data != null ? data.Length : 0);
+                    // 正常断连竞态（会话已移除、流线程尚未停止）也会触发此路径：
+                    // 限频记录，避免每条视频/光标帧都向日志写一条 Warn。
+                    long n = Interlocked.Increment(ref _sendNotFoundCount);
+                    if (n == 1 || n % 100 == 0)
+                        Logger.Warn("SendTo session {0} not found — dropping {1} bytes (client may have disconnected or sessionId bug)",
+                            sessionId, data != null ? data.Length : 0);
                     return;
                 }
                 sessionLock = _sessionLocks[sessionId];
