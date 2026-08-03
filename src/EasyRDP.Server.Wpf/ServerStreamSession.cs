@@ -101,7 +101,9 @@ namespace EasyRDP.Server.Wpf
             _captureService = captureService;
             _sendTo = sendTo;
             _cursorTracker = cursorTracker;
-            FrameDelayMs = 33; // ~30fps default
+            // 16ms ≈ 60fps 起步（采集已是 60fps）：编码跟不上时 D11 自适应会把帧间隔回调，
+            // 低延迟优先于低帧率 —— 端到端画面延迟主要由帧周期决定。
+            FrameDelayMs = 16; // ~60fps default
             KeyframeInterval = 30;
             // 1080p 屏幕内容：12Mbps 动态滚动场景仍可见色度/文字边缘瑕疵，
             // 15Mbps + 屏幕内容模式 + QP 上限 36 + 关闭去块滤波后更接近 VNC 观感；
@@ -526,10 +528,28 @@ namespace EasyRDP.Server.Wpf
                     }
                     else
                     {
-                        _sendQueueDrops++;
-                        if (_sendQueueDrops == 1 || _sendQueueDrops % 30 == 0)
-                            Logger.Warn("Session {0}: send queue full, frame dropped (seq={1}), total drops={2}",
-                                _sessionId, vfm.SequenceNumber, _sendQueueDrops);
+                        // 发送瓶颈：丢弃最旧的非关键帧、保留最新帧（实时语义：丢帧优于延迟）。
+                        // 若最旧的待发帧是关键帧则保留它（解码端依赖关键帧恢复），改丢新帧。
+                        if (_sendQueue.Count > 0 && _sendQueue.Peek().IsKeyframe)
+                        {
+                            // 保留关键帧，丢弃新帧（队列维持容量上限不变）
+                            _sendQueueDrops++;
+                            if (_sendQueueDrops == 1 || _sendQueueDrops % 30 == 0)
+                                Logger.Warn("Session {0}: send queue full, new frame dropped to preserve keyframe (seq={1}), total drops={2}",
+                                    _sessionId, vfm.SequenceNumber, _sendQueueDrops);
+                        }
+                        else
+                        {
+                            // 丢弃最旧的非关键帧，入队最新帧
+                            if (_sendQueue.Count > 0)
+                                _sendQueue.Dequeue();
+                            _sendQueueDrops++;
+                            if (_sendQueueDrops == 1 || _sendQueueDrops % 30 == 0)
+                                Logger.Warn("Session {0}: send queue full, oldest frame dropped (seq={1}), total drops={2}",
+                                    _sessionId, vfm.SequenceNumber, _sendQueueDrops);
+                            _sendQueue.Enqueue(fts);
+                            Monitor.Pulse(_lock);
+                        }
                     }
                 }
             }

@@ -47,12 +47,12 @@ namespace EasyRDP.Client.Wpf
         private CursorUpdateMessage _pendingCursor;
         // 是否已记录过"首次收到含形状的光标更新"（诊断用，避免 60Hz 刷屏）
         private bool _cursorShapeLogged;
-        // 解码队列：接收线程入队，解码线程出队（单消费者保证 H264 解码顺序）
+        // 解码信箱：单槽"最新帧优先"。接收线程入队时覆盖未解码的旧帧，
+        // 解码线程始终处理最新帧 —— 积压上限固定为 1 帧，端到端延迟不会随解码慢而膨胀。
+        // （H264 允许丢帧，解码器等下一个关键帧即可恢复，实时语义：丢帧优于延迟。）
         private readonly object _decodeLock = new object();
-        private readonly System.Collections.Generic.Queue<VideoFrameMessage> _decodeQueue
-            = new System.Collections.Generic.Queue<VideoFrameMessage>();
-        private const int MaxDecodeQueue = 4;
-        private int _decodeQueueDrops;
+        private VideoFrameMessage _pendingDecodeFrame;
+        private int _decodeFrameDrops;
 
         /// <summary>服务端分辨率变化事件（解码线程触发，用于同步客户端坐标映射与显示尺寸）。</summary>
         public event Action<int, int> ResolutionChanged;
@@ -179,7 +179,7 @@ namespace EasyRDP.Client.Wpf
             _renderThread?.Join(3000);
             lock (_decodeLock)
             {
-                _decodeQueue.Clear();
+                _pendingDecodeFrame = null;
             }
 
             _decoder?.Dispose();
@@ -372,26 +372,36 @@ namespace EasyRDP.Client.Wpf
         }
 
         /// <summary>
-        /// 视频帧入队（接收线程）。队列满时丢弃最旧帧、保留最新帧，
-        /// 避免解码积压导致端到端延迟增长（实时语义：丢帧优于延迟）。
+        /// 视频帧入队（接收线程）。单槽覆盖式：只保留最新未解码帧，
+        /// 避免解码积压导致端到端延迟增长；待解码的关键帧不被普通帧覆盖，
+        /// 防止解码器因丢关键帧而等到下一个 IDR 才恢复。
         /// </summary>
         private void EnqueueVideoFrame(VideoFrameMessage msg)
         {
             lock (_decodeLock)
             {
-                if (_decodeQueue.Count >= MaxDecodeQueue)
+                // 覆盖规则：无待解码帧直接入槽；新帧是关键帧则必入；
+                // 否则仅在待解码帧不是关键帧时覆盖（保留关键帧，避免解码器等下一个 IDR）
+                bool replace = _pendingDecodeFrame == null
+                    || msg.IsKeyframe
+                    || !_pendingDecodeFrame.IsKeyframe;
+                if (!replace)
+                    return; // 待解码关键帧不因普通帧被覆盖，直接跳过新帧
+                if (_pendingDecodeFrame != null)
                 {
-                    _decodeQueue.Dequeue();
-                    _decodeQueueDrops++;
-                    if (_decodeQueueDrops == 1 || _decodeQueueDrops % 60 == 0)
-                        Logger.Warn("Decode queue full, oldest frame dropped (total drops={0})", _decodeQueueDrops);
+                    _decodeFrameDrops++;
+                    if (_decodeFrameDrops == 1 || _decodeFrameDrops % 60 == 0)
+                        Logger.Warn("Decode mailbox overwritten, stale frame dropped (total drops={0})", _decodeFrameDrops);
                 }
-                _decodeQueue.Enqueue(msg);
+                _pendingDecodeFrame = msg;
                 Monitor.Pulse(_decodeLock);
             }
         }
 
-        /// <summary>解码线程主循环：按序解码视频帧，保持接收线程对控制消息的低延迟响应。</summary>
+        /// <summary>
+        /// 解码线程主循环：始终处理最新帧，保持接收线程对控制消息的低延迟响应。
+        /// 单消费者 + 顺序覆盖保证解码顺序单调递增。
+        /// </summary>
         private void DecodeLoop()
         {
             while (_running)
@@ -399,11 +409,12 @@ namespace EasyRDP.Client.Wpf
                 VideoFrameMessage msg;
                 lock (_decodeLock)
                 {
-                    while (_decodeQueue.Count == 0 && _running)
+                    while (_pendingDecodeFrame == null && _running)
                         Monitor.Wait(_decodeLock, 100);
                     if (!_running) break;
-                    if (_decodeQueue.Count == 0) continue;
-                    msg = _decodeQueue.Dequeue();
+                    if (_pendingDecodeFrame == null) continue;
+                    msg = _pendingDecodeFrame;
+                    _pendingDecodeFrame = null;
                 }
 
                 try
