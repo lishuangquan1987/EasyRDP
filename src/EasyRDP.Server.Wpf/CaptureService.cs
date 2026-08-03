@@ -90,6 +90,7 @@ namespace EasyRDP.Server.Wpf
         private void CaptureLoop()
         {
             int captureCount = 0;
+            int errorCount = 0;
             // 只捕获主屏：会话握手尺寸/编码器尺寸/鼠标坐标空间均以主屏为准，
             // 捕获整个虚拟桌面会导致帧尺寸超过会话预分配缓冲（全部丢帧=黑屏），
             // 且多显示器时鼠标坐标与画面内容错位。IncludeCursor=false：
@@ -113,11 +114,21 @@ namespace EasyRDP.Server.Wpf
                     {
                         System.Runtime.InteropServices.Marshal.FreeHGlobal(frame.Scan0);
                     }
+                    // 捕获成功后重置错误计数：每次故障突发都能记录首条警告
+                    if (errorCount > 0)
+                    {
+                        Logger.Info("CaptureLoop: recovered after {0} errors", errorCount);
+                        errorCount = 0;
+                    }
                 }
                 catch (Exception ex)
                 {
-                    Logger.Error(ex, "Capture error — frame skipped (captureCount={0})", captureCount);
-                    // Capture error — skip frame
+                    // 桌面不可用（锁屏/RDP 断开等）时每次捕获都会失败：
+                    // 限频记录，避免 60fps 刷爆日志文件；捕获线程持续重试，桌面恢复后自动继续。
+                    errorCount++;
+                    if (errorCount == 1 || errorCount % 60 == 0)
+                        Logger.Warn(ex, "Capture error — frame skipped (captureCount={0}, errors={1})",
+                            captureCount, errorCount);
                 }
 
                 Thread.Sleep(_frameIntervalMs);
