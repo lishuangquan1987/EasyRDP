@@ -121,6 +121,11 @@
                 </StackPanel>
 
                 <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                    <!-- aly 自动更新：发现/下载/应用更新时显示状态，点击确认下载或应用 -->
+                    <Button Content="{Binding AlyClientUpdateStr}" Style="{StaticResource LightButtonStyle}"
+                            Command="{Binding CheckUpdateCommand}" Margin="0,0,6,0"
+                            Visibility="{Binding IsUpdatePanelVisible, Converter={StaticResource BoolToVis}}"
+                            ToolTip="点击确认下载/应用新版本"/>
                     <Button Content="Fullscreen" Style="{StaticResource LightButtonStyle}"
                             Command="{Binding FullscreenCommand}" Margin="0,0,6,0"
                             ToolTip="切换全屏/窗口模式（F11）"/>
@@ -143,12 +148,23 @@
         <!-- ====== 中间：桌面显示区 ====== -->
         <Border Grid.Row="2" Background="Black"
                 MouseMove="RenderImage_MouseMove"
-                MouseDown="RenderImage_MouseDown"
-                MouseUp="RenderImage_MouseUp"
+                PreviewMouseDown="RenderImage_PreviewMouseDown"
+                PreviewMouseUp="RenderImage_PreviewMouseUp"
                 MouseWheel="RenderImage_MouseWheel"
                 Focusable="True">
             <Grid>
-                <Image x:Name="RenderImage" Source="{Binding RenderBitmap}" Stretch="Uniform"/>
+                <!-- Fant 高质量缩放：远程分辨率与窗口尺寸不一致时，线性插值会糊化文字/
+                     代码高亮边缘，Fant（双三次变体）在放大/缩小时保留更多细节。 -->
+                <Image x:Name="RenderImage" Source="{Binding RenderBitmap}" Stretch="Uniform"
+                       RenderOptions.BitmapScalingMode="Fant"/>
+
+                <!-- 远程光标叠加层：显示服务端光标形状/位置，盖住本地箭头光标。
+                     不参与命中测试，鼠标事件仍由 RenderImage 处理。 -->
+                <Image x:Name="RemoteCursorImage"
+                       HorizontalAlignment="Left" VerticalAlignment="Top"
+                       Stretch="None" IsHitTestVisible="False"
+                       RenderOptions.BitmapScalingMode="NearestNeighbor"
+                       Visibility="Collapsed"/>
 
                 <!-- 文件剪贴板传输进度条：叠加在桌面显示区顶部 -->
                 <Border HorizontalAlignment="Center" VerticalAlignment="Top"

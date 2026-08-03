@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
+using AlyClient.CSharpSDK;
 using EasyRDP.Core.Protocol;
 using EasyRDP.Core.Rendering;
 using EasyRDP.Core.Transport;
@@ -63,6 +64,9 @@ namespace EasyRDP.Client.Wpf
         private int _frameRate;
         private string _codecName = "—";
         private WriteableBitmap? _renderBitmap;
+        // 远程屏幕尺寸（握手时记录）：用于把远程光标坐标映射到本地显示区
+        private int _remoteScreenWidth;
+        private int _remoteScreenHeight;
         // 剪贴板轮询：检测本地剪贴板变化，发送到服务端
         private DispatcherTimer? _clipboardTimer;
         private string _lastClipboardText = "";
@@ -103,6 +107,9 @@ namespace EasyRDP.Client.Wpf
             ResetKeysCommand = new RelayCommand(ReleaseModifierKeys);
             SaveProfileCommand = new RelayCommand(SaveProfile);
             DeleteProfileCommand = new RelayCommand(DeleteProfile, () => SelectedProfile != null);
+            CheckUpdateCommand = new RelayCommand(CheckUpdate,
+                () => AlyClientStatus == AlyClientStatus.DiscoveredUpdate
+                    || AlyClientStatus == AlyClientStatus.DownloadedUpdate);
 
             // 启动时恢复已保存的多服务器配置
             _profileStore = new ConnectionProfileStore();
@@ -114,6 +121,160 @@ namespace EasyRDP.Client.Wpf
                 var last = FindProfile(lastProfileName);
                 SelectedProfile = last ?? Profiles[0];
             }
+
+            // 启动 aly 自动更新后台检查（检查 → 下载 → 应用）
+            InitializeUpdateClient();
+        }
+
+        // ====== 自动更新（aly） ======
+
+        private AlyUpdateClient? _alyUpdateClient;
+        private CancellationTokenSource _requestDownloadUpdateCts = new CancellationTokenSource();
+        private CancellationTokenSource _requestApplyUpdateCts = new CancellationTokenSource();
+        private readonly CancellationTokenSource _updateShutdownCts = new CancellationTokenSource();
+        private Action<AlyClientStatus, string>? _onUpdateStatusChanged;
+        private Action<string>? _onRequestDownloadUpdate;
+        private Action<string>? _onRequestApplyUpdate;
+        private Action<string>? _onUpdateErrorChanged;
+
+        /// <summary>当前更新状态（None=无更新）。</summary>
+        private AlyClientStatus _alyClientStatus = AlyClientStatus.None;
+        public AlyClientStatus AlyClientStatus
+        {
+            get { return _alyClientStatus; }
+            private set
+            {
+                if (_alyClientStatus == value) return;
+                _alyClientStatus = value;
+                OnPropertyChanged(nameof(AlyClientStatus));
+                IsUpdatePanelVisible = value != AlyClientStatus.None;
+                CheckUpdateCommand.RaiseCanExecuteChanged();
+            }
+        }
+
+        /// <summary>更新状态提示文本（如 "Found new version: v1.0.1"）。</summary>
+        private string _alyClientUpdateStr = string.Empty;
+        public string AlyClientUpdateStr
+        {
+            get { return _alyClientUpdateStr; }
+            private set
+            {
+                if (_alyClientUpdateStr == value) return;
+                _alyClientUpdateStr = value;
+                OnPropertyChanged(nameof(AlyClientUpdateStr));
+            }
+        }
+
+        /// <summary>是否有更新提示需要展示（status != None）。</summary>
+        private bool _isUpdatePanelVisible;
+        public bool IsUpdatePanelVisible
+        {
+            get { return _isUpdatePanelVisible; }
+            private set
+            {
+                if (_isUpdatePanelVisible == value) return;
+                _isUpdatePanelVisible = value;
+                OnPropertyChanged(nameof(IsUpdatePanelVisible));
+            }
+        }
+
+        /// <summary>确认下载/应用更新的命令（仅在等待用户确认时可用）。</summary>
+        public RelayCommand CheckUpdateCommand { get; private set; }
+
+        /// <summary>
+        /// 初始化 aly 更新客户端：启动后台循环（检查 → 下载 → 应用），
+        /// 并将 SDK 线程上的状态事件转发到 UI 线程。
+        /// </summary>
+        private void InitializeUpdateClient()
+        {
+            _alyUpdateClient = new AlyUpdateClient();
+            // 事件处理委托保存为字段，便于 CleanupUpdateClient 退订
+            _onUpdateStatusChanged = (status, tips) =>
+            {
+                try
+                {
+                    _dispatcher.BeginInvoke(() =>
+                    {
+                        AlyClientStatus = status;
+                        AlyClientUpdateStr = tips ?? string.Empty;
+                    });
+                }
+                catch (Exception ex)
+                {
+                    Logger.Warn(ex, "aly update status marshal failed");
+                }
+            };
+            _alyUpdateClient.StatusChanged += _onUpdateStatusChanged;
+
+            // 非强制更新：阻塞更新循环，直到用户在 UI 上点击确认（CheckUpdate 取消对应的 CTS）
+            _onRequestDownloadUpdate = newVersion =>
+            {
+                // 捕获令牌（struct）：源 CTS 被取消/替换/Dispose 后仍可安全读取状态
+                var confirmationToken = _requestDownloadUpdateCts.Token;
+                var shutdownToken = _updateShutdownCts.Token;
+                while (!confirmationToken.IsCancellationRequested && !shutdownToken.IsCancellationRequested)
+                    Thread.Sleep(500);
+            };
+            _alyUpdateClient.RequestDownloadUpdate += _onRequestDownloadUpdate;
+
+            _onRequestApplyUpdate = newVersion =>
+            {
+                var confirmationToken = _requestApplyUpdateCts.Token;
+                var shutdownToken = _updateShutdownCts.Token;
+                while (!confirmationToken.IsCancellationRequested && !shutdownToken.IsCancellationRequested)
+                    Thread.Sleep(500);
+            };
+            _alyUpdateClient.RequestApplyUpdate += _onRequestApplyUpdate;
+
+            _onUpdateErrorChanged = msg =>
+            {
+                if (!string.IsNullOrEmpty(msg))
+                    Logger.Warn("aly update error: {0}", msg);
+            };
+            _alyUpdateClient.ErrorStatusChanged += _onUpdateErrorChanged;
+        }
+
+        /// <summary>根据当前状态确认"下载"或"应用"更新。</summary>
+        private void CheckUpdate()
+        {
+            if (AlyClientStatus == AlyClientStatus.DiscoveredUpdate)
+                ResetUpdateConfirmation(ref _requestDownloadUpdateCts);
+            else if (AlyClientStatus == AlyClientStatus.DownloadedUpdate)
+                ResetUpdateConfirmation(ref _requestApplyUpdateCts);
+            else
+                Logger.Warn("CheckUpdate called in unexpected state: {0}", AlyClientStatus);
+        }
+
+        /// <summary>取消当前确认等待，并为下一个更新周期准备新的确认令牌。</summary>
+        private static void ResetUpdateConfirmation(ref CancellationTokenSource cts)
+        {
+            // 等待循环持有的是 Token（struct），此处可安全 Cancel + Dispose 旧实例
+            var old = cts;
+            cts = new CancellationTokenSource();
+            try { old.Cancel(); } catch (ObjectDisposedException) { }
+            try { old.Dispose(); } catch (ObjectDisposedException) { }
+        }
+
+        /// <summary>停止自动更新后台检查并释放资源（窗口关闭时调用）。</summary>
+        public void CleanupUpdateClient()
+        {
+            // 先解除可能阻塞的确认等待，再停止后台循环
+            try { _updateShutdownCts.Cancel(); } catch (ObjectDisposedException) { }
+
+            var client = _alyUpdateClient;
+            _alyUpdateClient = null;
+            if (client != null)
+            {
+                if (_onUpdateStatusChanged != null) client.StatusChanged -= _onUpdateStatusChanged;
+                if (_onRequestDownloadUpdate != null) client.RequestDownloadUpdate -= _onRequestDownloadUpdate;
+                if (_onRequestApplyUpdate != null) client.RequestApplyUpdate -= _onRequestApplyUpdate;
+                if (_onUpdateErrorChanged != null) client.ErrorStatusChanged -= _onUpdateErrorChanged;
+                client.Dispose();
+            }
+
+            try { _updateShutdownCts.Dispose(); } catch (ObjectDisposedException) { }
+            try { _requestDownloadUpdateCts.Dispose(); } catch (ObjectDisposedException) { }
+            try { _requestApplyUpdateCts.Dispose(); } catch (ObjectDisposedException) { }
         }
 
         /// <summary>已保存的服务器配置列表。</summary>
@@ -230,6 +391,22 @@ namespace EasyRDP.Client.Wpf
         public string FrameRateText
         {
             get { return _frameRate > 0 ? string.Format("{0} FPS", _frameRate) : "—"; }
+        }
+
+        /// <summary>远程光标更新事件（接收线程触发，订阅者需 marshal 到 UI 线程）。
+        /// 光标形状数据是 Windows AND/XOR 掩码格式（来自 EasyDesk WindowsCursorCapturer）。</summary>
+        public event Action<CursorInfo>? RemoteCursorChanged;
+
+        /// <summary>远程屏幕宽度（握手时记录）。</summary>
+        public int RemoteScreenWidth
+        {
+            get { return _remoteScreenWidth; }
+        }
+
+        /// <summary>远程屏幕高度（握手时记录）。</summary>
+        public int RemoteScreenHeight
+        {
+            get { return _remoteScreenHeight; }
         }
 
         /// <summary>文件剪贴板是否正在传输，控制进度条可见性。</summary>
@@ -381,7 +558,9 @@ namespace EasyRDP.Client.Wpf
             }
 
             _transport = new TcpTransportClient();
-            _transport.OnLog = (msg) => _dispatcher.Invoke(() => StatusText = msg);
+            // 异步更新状态栏：OnLog 可能在接收线程触发，同步 Invoke 会阻塞接收线程
+            // （TCP 接收缓冲可能被填满反压服务端），且 UI 繁忙时造成额外等待。
+            _transport.OnLog = (msg) => _dispatcher.BeginInvoke(() => StatusText = msg);
 
             Logger.Info("Connecting to {0}:{1}...", host, port);
             bool connected = await Task.Run(() => _transport.Connect(host, port, ConnectTimeoutMs));
@@ -421,7 +600,9 @@ namespace EasyRDP.Client.Wpf
                 if (_disconnecting) return;
                 string message = args != null ? args.Message : "Unknown stream error";
                 Logger.Error("Stream FatalError: {0}", message);
-                _dispatcher.Invoke(() =>
+                // BeginInvoke：同步 Invoke 会让接收线程阻塞等 UI，UI 若正在 Stop/Join
+                // 渲染线程则互相等待（死锁），异步调度即可避免。
+                _dispatcher.BeginInvoke(() =>
                 {
                     if (_disconnecting) return;
                     SetBusy(false, "Stream error: " + message);
@@ -475,6 +656,11 @@ namespace EasyRDP.Client.Wpf
 
             _streamSession.RenderTarget = _renderTarget;
             _streamSession.InitPipeline(handshakeRes.Codec, handshakeRes.ScreenWidth, handshakeRes.ScreenHeight);
+            _remoteScreenWidth = handshakeRes.ScreenWidth;
+            _remoteScreenHeight = handshakeRes.ScreenHeight;
+            // 订阅远程光标更新（形状 + 位置）：WpfRenderTarget.UpdateCursor 在接收线程触发，
+            // MainWindow 订阅 RemoteCursorChanged 后在 UI 线程渲染光标叠加层
+            _renderTarget.CursorChanged += OnRemoteCursorChanged;
             // 订阅服务端→客户端剪贴板同步事件：服务端用户复制 → 客户端自动设置本地剪贴板
             _streamSession.ClipboardReceived += OnClipboardReceivedFromServer;
             // 订阅文件剪贴板同步事件：服务端用户复制文件 → 客户端写入临时目录并设置 CF_HDROP
@@ -495,6 +681,9 @@ namespace EasyRDP.Client.Wpf
                 handshakeRes.Codec, handshakeRes.ScreenWidth, handshakeRes.ScreenHeight);
             _running = true;
             IsConnected = true;
+            // 回放握手期间缓冲的初始光标状态（含形状位图）：此时光标事件已挂接、IsConnected 已置位，
+            // MainWindow 能正常渲染远程光标，否则客户端只更新位置、永远没有光标位图可显示。
+            _streamSession?.FlushPendingCursor();
             CodecName = handshakeRes.Codec.ToString();
             FrameSize = string.Format("{0}x{1}", handshakeRes.ScreenWidth, handshakeRes.ScreenHeight);
 
@@ -504,7 +693,8 @@ namespace EasyRDP.Client.Wpf
             {
                 if (_disconnecting) return; // 防止重入
                 _transport.Disconnected -= onDisconnected;
-                _dispatcher.Invoke(() => Stop());
+                // BeginInvoke：不阻塞传输接收线程，避免 Stop 期间 Join 与接收线程互等
+                _dispatcher.BeginInvoke(() => Stop());
             };
             _transport.Disconnected += onDisconnected;
 
@@ -513,9 +703,11 @@ namespace EasyRDP.Client.Wpf
             long lastFrameCount = 0;
             _fpsTimer.Tick += (s, ev) =>
             {
-                if (_frameBuffer != null)
+                // 读会话的真实帧计数：VM 自己的 _frameBuffer 在连接流程中从不被写入，
+                // 旧实现 FPS 恒为 0。
+                if (_streamSession != null)
                 {
-                    long current = _frameBuffer.FrameCount;
+                    long current = _streamSession.FrameCount;
                     FrameRate = (int)(current - lastFrameCount);
                     lastFrameCount = current;
                 }
@@ -619,12 +811,15 @@ namespace EasyRDP.Client.Wpf
             // 用 System.Threading.Timer（线程池），即使 UI 线程卡住或窗口最小化也能可靠触发。
             _heartbeatTimer = new Timer(state =>
             {
-                if (_transport == null || !_running) return;
+                // 捕获局部变量：Stop() 会把 _transport 置 null，定时器回调可能在
+                // Stop 返回后仍触发，局部引用避免 NullReferenceException。
+                var transport = _transport;
+                if (transport == null || !_running) return;
                 try
                 {
                     // Keepalive 消息 payload 为空，仅用于刷新服务端 _lastActivity
                     MessageReassembler.FragAndSend(0, (byte)MessageType.Keepalive, new byte[0],
-                        (sid, data) => _transport.Send(data), 0);
+                        (sid, data) => transport.Send(data), 0);
                 }
                 catch (Exception ex)
                 {
@@ -706,7 +901,10 @@ namespace EasyRDP.Client.Wpf
                 var provider = new FileClipboardProvider(transferId, filePaths,
                     (sid, payload) =>
                     {
-                        MessageReassembler.FragAndSend(0, (byte)MessageType.ClipFileContentsRes, payload,
+                        // 单完整帧发送：并发响应的分片若交错且共用 frameId=0，
+                        // 接收端重组器会把不同响应的分片混在一起导致 payload 损坏（下载失败 → 无粘贴菜单）。
+                        // 每个响应作为完整帧发送，线上交错时互不干扰。
+                        MessageReassembler.SendSingleFragment(0, (byte)MessageType.ClipFileContentsRes, payload,
                             (s, d) => transport.Send(d), 0);
                     });
                 _streamSession?.SetFileClipboardProvider(provider);
@@ -1063,18 +1261,41 @@ namespace EasyRDP.Client.Wpf
 
             if (_fpsTimer != null) { _fpsTimer.Stop(); _fpsTimer = null; }
             if (_clipboardTimer != null) { _clipboardTimer.Stop(); _clipboardTimer = null; }
-            if (_heartbeatTimer != null) { _heartbeatTimer.Dispose(); _heartbeatTimer = null; }
+            if (_heartbeatTimer != null)
+            {
+                // 等待在途回调结束再置空，避免回调与 Stop 竞态访问 _transport
+                var waitHandle = new ManualResetEvent(false);
+                try
+                {
+                    _heartbeatTimer.Dispose(waitHandle);
+                    waitHandle.WaitOne(1000);
+                }
+                catch { }
+                finally { waitHandle.Dispose(); }
+                _heartbeatTimer = null;
+            }
 
             _running = false;
-            _streamSession?.Stop();
+            // 顺序修复：先断开传输（停止接收线程产生新消息），再停止会话。
+            // 旧顺序反过来：会话 Stop 时接收线程仍可能在 ProcessVideoFrame 中调用
+            // _decoder.Decode，而 Stop 已把 _decoder 置 null → AccessViolation。
             _transport?.Disconnect();
+            _streamSession?.Stop();
             _transport = null;
             _streamSession = null;
             _inputSession = null;
 
+            // 释放鼠标捕获（右键按下期间断开时可能仍持有捕获）
+            try { System.Windows.Input.Mouse.Capture(null); } catch { }
+
+            // 断连/停止时强制退出全屏：全屏置顶窗口在断开后若保持全屏，
+            // 会盖住整个桌面且用户无法把其他窗口切到前台（历史上只能重启电脑）。
+            ExitFullscreen();
+
             // 清理渲染资源
             if (_renderTarget != null)
             {
+                _renderTarget.CursorChanged -= OnRemoteCursorChanged;
                 try { _renderTarget.Dispose(); } catch { }
                 _renderTarget = null;
             }
@@ -1097,6 +1318,14 @@ namespace EasyRDP.Client.Wpf
             SetBusy(false, "Disconnected");
         }
 
+        /// <summary>远程光标更新回调（接收线程）→ 转发为 RemoteCursorChanged 事件。</summary>
+        private void OnRemoteCursorChanged(CursorInfo cursor)
+        {
+            var handler = RemoteCursorChanged;
+            if (handler != null)
+                handler(cursor);
+        }
+
         // ====== 输入事件处理（由 View 代码后置调用） ======
 
         public void HandleMouseMove(double imageX, double imageY, double imageW, double imageH)
@@ -1113,9 +1342,10 @@ namespace EasyRDP.Client.Wpf
             if (_inputSession == null || !_running) return;
             // WPF MouseButton: Left=0 Right=1 Middle=2 XButton1=3 XButton2=4，
             // EasyDesk MouseButton: Left=1 Right=2 Middle=3 XButton1=4 XButton2=5，
-            // 直接 +1 即可一一对应。旧实现把中键映射成 4（XButton1），属于映射 bug。
+            // 显式映射避免依赖枚举值相邻性（+1 脆弱）。
             _inputSession.FlushPendingMouse(); // 先落地最新光标位置，保证点击位置准确
-            int btn = (int)changedButton + 1;
+            int btn = MapMouseButton(changedButton);
+            if (btn == 0) return;
             var msg = new InputEventMessage { Type = InputEventType.MouseDown, KeyCode = btn };
             _inputSession.SendInput(msg);
         }
@@ -1124,9 +1354,24 @@ namespace EasyRDP.Client.Wpf
         {
             if (_inputSession == null || !_running) return;
             _inputSession.FlushPendingMouse();
-            int btn = (int)changedButton + 1;
+            int btn = MapMouseButton(changedButton);
+            if (btn == 0) return;
             var msg = new InputEventMessage { Type = InputEventType.MouseUp, KeyCode = btn };
             _inputSession.SendInput(msg);
+        }
+
+        /// <summary>WPF MouseButton → EasyDesk MouseButton 显式映射（左=1 右=2 中=3 X1=4 X2=5）。</summary>
+        private static int MapMouseButton(System.Windows.Input.MouseButton button)
+        {
+            switch (button)
+            {
+                case System.Windows.Input.MouseButton.Left: return 1;
+                case System.Windows.Input.MouseButton.Right: return 2;
+                case System.Windows.Input.MouseButton.Middle: return 3;
+                case System.Windows.Input.MouseButton.XButton1: return 4;
+                case System.Windows.Input.MouseButton.XButton2: return 5;
+                default: return 0;
+            }
         }
 
         public void HandleMouseWheel(int delta)
@@ -1227,24 +1472,22 @@ namespace EasyRDP.Client.Wpf
         {
             var window = Application.Current?.MainWindow as MainWindow;
             if (window == null) return;
-            if (window.WindowStyle == WindowStyle.None)
-            {
-                // 退出全屏：恢复边框、窗口状态、显示顶/底栏
-                window.WindowStyle = WindowStyle.SingleBorderWindow;
-                window.WindowState = WindowState.Normal;
-                window.Topmost = false;
-                window.SetFullscreenUI(false);
-                Logger.Info("Exited fullscreen");
-            }
-            else
-            {
-                // 进入全屏：无边框 + 最大化 + 置顶（盖住任务栏）+ 隐藏顶/底栏
-                window.WindowStyle = WindowStyle.None;
-                window.WindowState = WindowState.Maximized;
-                window.Topmost = true;
-                window.SetFullscreenUI(true);
-                Logger.Info("Entered fullscreen");
-            }
+            window.SetFullscreenMode(!window.IsFullscreenMode);
+            Logger.Info(window.IsFullscreenMode ? "Entered fullscreen" : "Exited fullscreen");
+        }
+
+        /// <summary>
+        /// 退出全屏并恢复普通窗口（断开连接时也会调用，保证用户始终能切走）。
+        /// 全屏窗口的尺寸/位置由 View 层 WM_GETMINMAXINFO 钩子管理，
+        /// ViewModel 只负责请求状态切换。
+        /// </summary>
+        public void ExitFullscreen()
+        {
+            var window = Application.Current?.MainWindow as MainWindow;
+            if (window == null || !window.IsFullscreenMode)
+                return;
+            window.SetFullscreenMode(false);
+            Logger.Info("Exited fullscreen");
         }
 
         // ====== INotifyPropertyChanged ======

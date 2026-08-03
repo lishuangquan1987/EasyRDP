@@ -13,6 +13,9 @@ namespace EasyRDP.Core.Protocol
     {
         private static readonly Logger Logger = LogManager.GetCurrentClassLogger();
 
+        /// <summary>解码尺寸上限（像素）：防 SPS 伪造超大分辨率导致 OOM/堆破坏，覆盖 8K。</summary>
+        private const int MaxDimension = 8192;
+
         private IntPtr _decoder;
         private H264Native.DecodeFrameDelegate _decodeFrame;
         private int _width;
@@ -106,8 +109,12 @@ namespace EasyRDP.Core.Protocol
         /// <summary>解码一帧 H264 数据，返回 BGRA32 像素。</summary>
         public DecodeResult Decode(byte[] data)
         {
-            int expectedSize = _width * _height * 4;
-            if (expectedSize <= 0)
+            long expectedSize = (long)_width * _height * 4;
+            // 防整数溢出：尺寸来自对端 SPS/握手，必须用 long 计算并加上限校验，
+            // 否则 w*h*4 溢出为负会绕过缓冲区大小检查（潜在堆破坏）。
+            // 上限按维度（≤8192，覆盖 8K）而非总字节：帧缓冲大小与线上 payload 上限无关，
+            // 用 MaxSafePayloadSize(10MB) 会误杀 1440p(≈14.7MB)/4K(≈33MB) 正常分辨率。
+            if (expectedSize <= 0 || _width > MaxDimension || _height > MaxDimension)
                 return new DecodeResult { Status = DecodeStatus.Failed };
 
             byte[] outputBuffer = new byte[expectedSize];
@@ -172,9 +179,10 @@ namespace EasyRDP.Core.Protocol
                     return new DecodeResult { Status = DecodeStatus.Failed };
                 }
 
-                // 期望的 BGRA 缓冲区大小
-                int expectedBgraSize = w * h * 4;
-                if (outputBuffer.Length < expectedBgraSize)
+                // 期望的 BGRA 缓冲区大小（long 运算防溢出；w/h 来自 H.264 SPS，属不可信输入）
+                long expectedBgraSize = (long)w * h * 4;
+                if (expectedBgraSize > outputBuffer.Length
+                    || w > MaxDimension || h > MaxDimension)
                 {
                     Logger.Warn("Output buffer too small: got={0} expected={1} (w={2} h={3})",
                         outputBuffer.Length, expectedBgraSize, w, h);

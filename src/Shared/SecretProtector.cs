@@ -59,7 +59,10 @@ namespace EasyRDP.Shared
                     {
                         byte[] encrypted = new byte[output.cbData];
                         Marshal.Copy(output.pbData, encrypted, 0, output.cbData);
-                        return Convert.ToBase64String(encrypted);
+                        string result = Convert.ToBase64String(encrypted);
+                        Array.Clear(encrypted, 0, encrypted.Length);
+                        Array.Clear(plain, 0, plain.Length);
+                        return result;
                     }
                     finally
                     {
@@ -106,7 +109,10 @@ namespace EasyRDP.Shared
                     {
                         byte[] decrypted = new byte[output.cbData];
                         Marshal.Copy(output.pbData, decrypted, 0, output.cbData);
-                        return Encoding.UTF8.GetString(decrypted);
+                        string result = Encoding.UTF8.GetString(decrypted);
+                        Array.Clear(decrypted, 0, decrypted.Length);
+                        Array.Clear(encrypted, 0, encrypted.Length);
+                        return result;
                     }
                     finally
                     {

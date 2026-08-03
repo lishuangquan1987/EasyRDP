@@ -64,7 +64,18 @@ namespace EasyRDP.Core.Transport
                     Logger.Warn("FramingBuffer: discarding {0} bytes — no valid frame magic found, first {1} bytes: {2}",
                         _bufferPos, dumpLen, hex);
                 }
-                _bufferPos = 0; // No valid frame start found, discard all
+                // 保留末位 magic 字节：TCP 分片边界可能把帧头拆开，末位 0xE5 可能是下一帧的
+                // Magic 起始。整段丢弃会把帧头永久丢失（下一 Feed 从 Type 字节开始，永远拼不回帧）。
+                if (_bufferPos > 0 && _buffer[_bufferPos - 1] == Constants.FrameMagic)
+                {
+                    if (_bufferPos > 1)
+                        _buffer[0] = _buffer[_bufferPos - 1];
+                    _bufferPos = 1;
+                }
+                else
+                {
+                    _bufferPos = 0; // No valid frame start found, discard all
+                }
                 return false;
             }
 
@@ -106,7 +117,13 @@ namespace EasyRDP.Core.Transport
             {
                 int totalFull = fragCount > 1 ? (fragCount - 1) * Constants.FragmentSize : 0;
                 fragDataLen = (int)totalPayloadLen - totalFull;
-                if (fragDataLen > Constants.FragmentSize) fragDataLen = Constants.FragmentSize;
+                // 单分片消息（fragCount=1）允许 payload 超过 FragmentSize：
+                // 例如光标位图消息（32x32 光标约 4.3KB）以单分片发送，此时整个帧只有这一个分片，
+                // fragDataLen 必须等于 totalPayloadLen。若仍按 1400 截断，帧会被截短、
+                // 剩余字节成为流中的垃圾导致失步，光标更新（CRC 不匹配）被静默丢弃。
+                // 多分片消息的末片长度恒 ≤ FragmentSize，此截断仅对多分片场景保留。
+                if (fragCount > 1 && fragDataLen > Constants.FragmentSize)
+                    fragDataLen = Constants.FragmentSize;
             }
             if (fragDataLen < 0) fragDataLen = 0;
 

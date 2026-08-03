@@ -17,6 +17,7 @@ namespace EasyRDP.Server.Wpf
     /// </summary>
     public class CursorTracker : ICursorTracker
     {
+        private static readonly NLog.Logger Logger = NLog.LogManager.GetCurrentClassLogger();
         private readonly ICursorCapturer _capturer;
         private Thread _pollThread;
         private volatile bool _running;
@@ -30,6 +31,9 @@ namespace EasyRDP.Server.Wpf
         private int _lastX, _lastY;
         private byte[] _lastShapeData;
         private bool _hasLastState;
+        // 最近一次含形状的完整 CursorUpdateMessage payload（供新会话 Start() 时补发初始状态）
+        private byte[] _lastFullPayload;
+        private long _logCount;
 
         public int IntervalMs
         {
@@ -71,6 +75,27 @@ namespace EasyRDP.Server.Wpf
                 concrete.StopInternal();
                 _sessions.Remove(concrete);
             }
+        }
+
+        /// <summary>
+        /// 向新启动的会话补发最近一次含形状的完整光标状态（位置 + 热区 + 位图）。
+        /// 全局 _hasLastState 只代表"轮询线程已工作过"，不代表新会话已拿到初始位图；
+        /// 服务端先于客户端连接运行时，首轮带形状的广播发生在 0 个会话上，之后新会话
+        /// 只会收到纯位置更新（RgbaPixels=null），客户端将永远没有光标位图可渲染。
+        /// </summary>
+        internal void SendInitialState(CursorTrackerSession session)
+        {
+            byte[] payload;
+            lock (_lock)
+            {
+                payload = _lastFullPayload;
+            }
+            if (payload != null)
+            {
+                session.SendCursorUpdate(payload);
+                Logger.Info("CursorTracker: sent initial cursor state ({0} bytes) to new session", payload.Length);
+            }
+            // payload 为 null（服务端刚启动、尚未首次轮询）时由首次轮询（firstUpdate）广播覆盖。
         }
 
         /// <summary>启动 60Hz 轮询线程。</summary>
@@ -115,9 +140,12 @@ namespace EasyRDP.Server.Wpf
                 {
                     PollOnce();
                 }
-                catch
+                catch (Exception ex)
                 {
-                    // 单次轮询失败，跳过
+                    // 单次轮询失败，记录日志后跳过（不刷屏）
+                    _logCount++;
+                    if (_logCount == 1 || _logCount % 60 == 0)
+                        Logger.Warn(ex, "CursorTracker PollOnce failed (total={0})", _logCount);
                 }
                 Thread.Sleep(_intervalMs);
             }
@@ -134,6 +162,10 @@ namespace EasyRDP.Server.Wpf
             bool positionChanged = !_hasLastState || x != _lastX || y != _lastY;
             bool shapeChanged = _enableShape && _hasLastState
                 && !ArraysEqual(shapeData, _lastShapeData);
+            // 首次轮询（_hasLastState=false）必须携带形状数据：
+            // 否则客户端永远拿不到初始光标位图，只会更新位置（表现就是"鼠标永远是箭头"）。
+            bool firstUpdate = !_hasLastState;
+            bool includeShape = _enableShape && (firstUpdate || shapeChanged);
 
             if (!positionChanged && !shapeChanged)
             {
@@ -153,14 +185,23 @@ namespace EasyRDP.Server.Wpf
                 Visible = true,
                 X = x,
                 Y = y,
-                Width = shapeChanged && shapeData != null ? rawInfo.Width : 0,
-                Height = shapeChanged && shapeData != null ? rawInfo.Height : 0,
-                HotX = shapeChanged ? rawInfo.HotspotX : 0,
-                HotY = shapeChanged ? rawInfo.HotspotY : 0,
-                RgbaPixels = shapeChanged ? shapeData : null
+                Width = includeShape && shapeData != null ? rawInfo.Width : 0,
+                Height = includeShape && shapeData != null ? rawInfo.Height : 0,
+                HotX = includeShape ? rawInfo.HotspotX : 0,
+                HotY = includeShape ? rawInfo.HotspotY : 0,
+                RgbaPixels = includeShape ? shapeData : null
             };
 
             byte[] payload = msg.Pack();
+
+            // 缓存最近一次含形状的完整状态，供之后新启动的会话立即补发（SendInitialState）
+            if (includeShape)
+            {
+                lock (_lock)
+                {
+                    _lastFullPayload = payload;
+                }
+            }
 
             // 分发给所有活跃会话
             List<CursorTrackerSession> snapshot;
@@ -195,6 +236,7 @@ namespace EasyRDP.Server.Wpf
     /// </summary>
     public class CursorTrackerSession : ICursorTrackerSession
     {
+        private readonly object _sendLock = new object();
         private readonly CursorTracker _owner;
         private Action<uint, byte[]> _sendTo;
         private uint _sessionId;
@@ -209,14 +251,20 @@ namespace EasyRDP.Server.Wpf
         /// <summary>注入本会话的发送回调。</summary>
         public void AttachSendTo(Action<uint, byte[]> sendTo, uint sessionId)
         {
-            _sendTo = sendTo;
-            _sessionId = sessionId;
+            lock (_sendLock)
+            {
+                _sendTo = sendTo;
+                _sessionId = sessionId;
+            }
         }
 
         /// <summary>启动本会话的光标追踪。</summary>
         public void Start()
         {
             _running = true;
+            // 新会话立即补发最近一次完整光标状态（含形状位图）：
+            // 否则服务端已运行多时的新客户端只会收到纯位置更新，永远无法渲染出光标。
+            _owner.SendInitialState(this);
         }
 
         /// <summary>停止本会话的光标追踪（仅设标记，不移除列表）。</summary>
@@ -234,11 +282,18 @@ namespace EasyRDP.Server.Wpf
         /// <summary>由 CursorTracker 调用，发送光标更新。</summary>
         internal void SendCursorUpdate(byte[] payload)
         {
-            if (!_running || _sendTo == null) return;
+            Action<uint, byte[]> sendTo;
+            uint sessionId;
+            lock (_sendLock)
+            {
+                if (!_running || _sendTo == null) return;
+                sendTo = _sendTo;
+                sessionId = _sessionId;
+            }
             // 光标消息始终单分片，直接构建线格式发送，不经过 FragAndSend
             // 使用 frameId=0 避免与视频流的 FrameId 命名空间碰撞
             byte[] wire = BuildCursorWire(payload);
-            _sendTo(_sessionId, wire);
+            sendTo(sessionId, wire);
         }
 
         private static byte[] BuildCursorWire(byte[] payload)

@@ -103,7 +103,10 @@ namespace EasyRDP.Server.Wpf
             _cursorTracker = cursorTracker;
             FrameDelayMs = 33; // ~30fps default
             KeyframeInterval = 30;
-            TargetBitrate = 2000000;
+            // 1080p 屏幕内容：12Mbps 动态滚动场景仍可见色度/文字边缘瑕疵，
+            // 15Mbps + 屏幕内容模式 + QP 上限 36 + 关闭去块滤波后更接近 VNC 观感；
+            // 局域网下带宽充裕，22.5M 上限码率由编码器 iMaxBitrate 兜底。
+            TargetBitrate = 15000000;
         }
 
         public void Start(uint sessionId, CodecId codec)
@@ -130,8 +133,10 @@ namespace EasyRDP.Server.Wpf
             {
                 // Get screen dimensions
                 var bounds = _captureService.GetPrimaryScreen();
-                _lastW = bounds.Width;
-                _lastH = bounds.Height;
+                // OpenH264 I420 要求偶数宽高：奇数显示器分辨率向上取偶（最后一列/行像素补零），
+                // 客户端按同一尺寸解码渲染，避免奇数尺寸导致的 U/V 平面越界。
+                _lastW = (bounds.Width + 1) & ~1;
+                _lastH = (bounds.Height + 1) & ~1;
 
                 _encoder.Initialize(_lastW, _lastH, TargetBitrate);
 
@@ -297,12 +302,35 @@ namespace EasyRDP.Server.Wpf
             byte[] targetBuf = _captureBufs[bufIdx];
             if (targetBuf == null || targetBuf.Length < frameSize)
             {
+                if (frameSize > _lastW * _lastH * 4)
+                {
+                    // 防御：捕获尺寸超过会话预分配上限（分辨率变化但尚未重初始化）时丢弃
+                    lock (_lock) { _captureBufInUse[bufIdx] = false; }
+                    return;
+                }
                 targetBuf = new byte[frameSize];
                 _captureBufs[bufIdx] = targetBuf;
             }
 
             // Copy pixels
-            System.Runtime.InteropServices.Marshal.Copy(frame.Scan0, targetBuf, 0, frameSize);
+            if (frame.Width == _lastW && frame.Height == _lastH)
+            {
+                System.Runtime.InteropServices.Marshal.Copy(frame.Scan0, targetBuf, 0, frameSize);
+            }
+            else
+            {
+                // 奇数分辨率取偶：逐行复制到 _lastW（偶数）行距布局并补零，
+                // 否则编码器按 _lastW*4 的 stride 读取会错位整帧。
+                Array.Clear(targetBuf, 0, targetBuf.Length);
+                int srcStride = frame.Width * 4;
+                int dstStride = _lastW * 4;
+                for (int row = 0; row < frame.Height; row++)
+                {
+                    IntPtr srcPtr = new IntPtr(frame.Scan0.ToInt64() + (long)row * srcStride);
+                    int dstOffset = row * dstStride;
+                    System.Runtime.InteropServices.Marshal.Copy(srcPtr, targetBuf, dstOffset, srcStride);
+                }
+            }
 
             // Enqueue（缓冲已选中并标记占用，队列只可能被编码线程消耗，入队必然成功）
             lock (_lock)
@@ -343,6 +371,18 @@ namespace EasyRDP.Server.Wpf
                     if (frame.Pixels == null) break; // sentinel
                 }
 
+                // 丢弃已过期的旧帧：队列中还有更新帧时，当前出队的是最旧的，
+                // 直接释放并继续取最新帧 → 画面延迟 ≈ 1 个截屏周期而非队列深度×帧间隔。
+                // 实时桌面场景"最新帧优先"，牺牲少量平滑换取更低的端到端延迟。
+                lock (_lock)
+                {
+                    if (!_stopping && _frameQueue.Count > 0)
+                    {
+                        _captureBufInUse[frame.BufferIndex] = false;
+                        continue;
+                    }
+                }
+
                 if (encodeLoopIter == 1 || encodeLoopIter % 100 == 0)
                     Logger.Info("Session {0}: EncodeLoop iter={1} dequeued frame res={2}x{3} bgraLen={4}",
                         _sessionId, encodeLoopIter, frame.Width, frame.Height, frame.Pixels.Length);
@@ -366,8 +406,8 @@ namespace EasyRDP.Server.Wpf
                 {
                     Logger.Info("Session {0}: resolution changed {1}x{2} -> {3}x{4}",
                         _sessionId, _lastW, _lastH, frame.Width, frame.Height);
-                    _lastW = frame.Width;
-                    _lastH = frame.Height;
+                    _lastW = (frame.Width + 1) & ~1;
+                    _lastH = (frame.Height + 1) & ~1;
                     resolutionChanged = true;
                 }
 
@@ -426,7 +466,7 @@ namespace EasyRDP.Server.Wpf
                         if (avgMs > 33)
                             FrameDelayMs = Math.Min(FrameDelayMs + 5, 120);
                         else if (avgMs < 20)
-                            FrameDelayMs = Math.Max(FrameDelayMs - 5, 33);
+                            FrameDelayMs = Math.Max(FrameDelayMs - 5, 16);
                     }
                 }
 
@@ -454,8 +494,9 @@ namespace EasyRDP.Server.Wpf
                 // Build VideoFrameMessage with H264 data only
                 var vfm = new VideoFrameMessage
                 {
-                    Width = frame.Width,
-                    Height = frame.Height,
+                    // 用编码器实际尺寸（取偶后），保证客户端解码缓冲与 SPS 一致
+                    Width = result.Width,
+                    Height = result.Height,
                     IsKeyframe = result.IsKeyframe,
                     SequenceNumber = _sequenceNumber++,
                     Data = result.Data
@@ -473,7 +514,12 @@ namespace EasyRDP.Server.Wpf
                 // Enqueue to send queue
                 lock (_lock)
                 {
-                    if (_sendQueue.Count < _sendQueueCapacity)
+                    if (_stopping)
+                    {
+                        // Stop 已清空队列并推入 sentinel：不再入队，避免孤儿帧堆积
+                        _sendQueueDrops++;
+                    }
+                    else if (_sendQueue.Count < _sendQueueCapacity)
                     {
                         _sendQueue.Enqueue(fts);
                         Monitor.Pulse(_lock);

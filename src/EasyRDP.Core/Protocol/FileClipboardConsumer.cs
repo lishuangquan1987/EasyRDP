@@ -68,7 +68,9 @@ namespace EasyRDP.Core.Protocol
 
             public void Dispose()
             {
-                Done.Dispose();
+                // 不能 Dispose 事件：接收线程可能在 Cancel/超时路径同时调用 Done.Set()，
+                // Dispose 与 Set 并发会抛 ObjectDisposedException 杀死接收线程。
+                // 该对象生命周期短，等待者用完即释放引用，交给 GC 回收即可。
             }
         }
 #endif
@@ -158,6 +160,16 @@ namespace EasyRDP.Core.Protocol
                 kv.Value.Done.Set();
             }
             _net40Pending.Clear();
+#else
+            // netstandard2.0/net8 路径：取消所有 in-flight 的 TaskCompletionSource，
+            // 让 await tcs.Task 立即抛 TaskCanceledException 退出，
+            // 否则断连后下载线程最多还要挂 30 秒等 RequestTimeoutMs 超时。
+            foreach (var kv in _pendingRequests)
+            {
+                TaskCompletionSource<byte[]> tcs;
+                if (_pendingRequests.TryRemove(kv.Key, out tcs))
+                    tcs.TrySetCanceled();
+            }
 #endif
         }
 
@@ -289,6 +301,14 @@ namespace EasyRDP.Core.Protocol
 
                     // 等待窗口空位：最多 Concurrency 个 in-flight
                     semaphore.Wait();
+
+                    // 等待许可期间可能已被 Cancel/失败：拿到许可后再次检查，
+                    // 否则会在取消后仍发起一个多余的文件块请求
+                    if (_cancelled || Thread.VolatileRead(ref failedFlag) == 1)
+                    {
+                        semaphore.Release();
+                        break;
+                    }
 
                     long reqPos = (long)chunkIdx * ChunkSize;
                     int toRead = (int)Math.Min(ChunkSize, fileSize - reqPos);
