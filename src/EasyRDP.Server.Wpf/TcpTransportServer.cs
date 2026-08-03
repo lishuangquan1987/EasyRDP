@@ -26,6 +26,8 @@ namespace EasyRDP.Server.Wpf
         private uint _nextSessionId = 1;
         private volatile bool _running;
         private readonly object _lock = new object();
+        // 对已断开会话写入失败的总次数（用于限频日志，避免断连竞态刷屏）
+        private long _sendFailCount;
 
         public event EventHandler<ConnectionEventArgs> ClientConnected;
         public event EventHandler<ConnectionEventArgs> ClientDisconnected;
@@ -99,6 +101,10 @@ namespace EasyRDP.Server.Wpf
             }
             lock (sessionLock)
             {
+                // 对端已关闭时跳过写入（Connected 为惰性标志，仅用于减少无效调用，
+                // 真正的断连竞态仍由下面的异常兜底）
+                if (!client.Connected)
+                    return;
                 try
                 {
                     NetworkStream stream = client.GetStream();
@@ -106,6 +112,22 @@ namespace EasyRDP.Server.Wpf
                 }
                 catch (Exception ex)
                 {
+                    // 对端断开导致的写入失败是正常断连竞态（视频/光标线程仍可能在发送）：
+                    // 限频记录并异步触发清理，避免每帧都向日志框刷一条错误。
+                    if (!client.Connected)
+                    {
+                        long n = Interlocked.Increment(ref _sendFailCount);
+                        if (n == 1 || n % 100 == 0)
+                            Logger.Warn("SendTo session {0} failed: client disconnected ({1})", sessionId, ex.Message);
+                        try
+                        {
+                            // 立即关闭 socket，让接收线程干净退出（避免其 finally 再报 Receive error）
+                            client.Close();
+                            System.Threading.ThreadPool.QueueUserWorkItem(s => Disconnect(sessionId));
+                        }
+                        catch { }
+                        return;
+                    }
                     Logger.Error(ex, "SendTo session {0} failed: {1}", sessionId, ex.Message);
                     Log("SendTo " + sessionId + " failed: " + ex.Message);
                 }
@@ -232,8 +254,16 @@ namespace EasyRDP.Server.Wpf
             }
             catch (Exception ex)
             {
-                Logger.Error(ex, "Receive error session {0}", sessionId);
-                Log("Receive error session " + sessionId + ": " + ex.Message);
+                // socket 被 SendTo 断连竞态清理或对端主动关闭：属正常断连，不按异常刷错误日志
+                if (!client.Connected)
+                {
+                    Logger.Info("Session {0} receive loop ended: socket closed", sessionId);
+                }
+                else
+                {
+                    Logger.Error(ex, "Receive error session {0}", sessionId);
+                    Log("Receive error session " + sessionId + ": " + ex.Message);
+                }
             }
             finally
             {

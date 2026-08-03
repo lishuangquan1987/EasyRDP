@@ -126,8 +126,6 @@ namespace EasyRDP.Server.Wpf
             _running = true;
             _transportServer.Start(port);
 
-            _cursorTracker.Start();
-
             _heartbeatThread = new Thread(HeartbeatLoop);
             _heartbeatThread.IsBackground = true;
             _heartbeatThread.Start();
@@ -135,6 +133,57 @@ namespace EasyRDP.Server.Wpf
             // 启动剪贴板 STA 线程
             if (_clipboardThread != null && !_clipboardThread.IsAlive)
                 _clipboardThread.Start();
+        }
+
+        /// <summary>
+        /// 首个会话接入时启动屏幕捕获与光标追踪（空闲时不捕获）：
+        /// 避免无客户端时 60fps 截屏/光标轮询浪费 CPU/GPU，
+        /// 也避免 DXGI Desktop Duplication 常驻导致本机光标渲染异常。
+        /// </summary>
+        private void EnsureCaptureRunning()
+        {
+            try { _cursorTracker.Start(); }
+            catch (Exception ex) { LogCaptureStartFailure("CursorTracker start failed", ex); }
+            if (_captureService != null && !_captureService.IsRunning)
+            {
+                try { _captureService.Start(); }
+                catch (Exception ex) { LogCaptureStartFailure("CaptureService start failed", ex); }
+            }
+        }
+
+        private bool _captureStartFailureLogged;
+
+        /// <summary>启动失败只记一次日志，避免无 GPU 等降级环境下每次接入都刷警告。</summary>
+        private void LogCaptureStartFailure(string message, Exception ex)
+        {
+            if (_captureStartFailureLogged) return;
+            _captureStartFailureLogged = true;
+            Logger.Warn(ex, message);
+        }
+
+        /// <summary>
+        /// 最后一个会话断开后停止屏幕捕获与光标追踪。
+        /// </summary>
+        private void StopCaptureIfIdle()
+        {
+            lock (_lock)
+            {
+                if (_activeCount > 0)
+                    return;
+            }
+            try { _cursorTracker.StopAll(); }
+            catch (Exception ex) { Logger.Warn(ex, "CursorTracker stop failed"); }
+            if (_captureService != null)
+            {
+                try { _captureService.Stop(); }
+                catch (Exception ex) { Logger.Warn(ex, "CaptureService stop failed"); }
+            }
+            // 停止期间可能已有新会话接入（TOCTOU）：重新检查并恢复捕获
+            lock (_lock)
+            {
+                if (_activeCount > 0)
+                    EnsureCaptureRunning();
+            }
         }
 
         public void Stop()
@@ -182,6 +231,11 @@ namespace EasyRDP.Server.Wpf
             Logger.Info("TransportHost stopped");
 
             _cursorTracker.StopAll();
+            if (_captureService != null)
+            {
+                try { _captureService.Stop(); }
+                catch (Exception ex) { Logger.Warn(ex, "CaptureService stop failed"); }
+            }
             _transportServer.Stop();
             _heartbeatThread?.Join(2000);
             _clipboardThread?.Join(2000);
@@ -1130,6 +1184,10 @@ namespace EasyRDP.Server.Wpf
                     _activeCount++;
                 }
 
+                // 首个会话时启动捕获/光标（幂等；必须在 streamSession.Start 之前，
+                // 否则编码线程收不到帧、光标会话无轮询线程）
+                EnsureCaptureRunning();
+
                 // Start — may throw if encoder init fails
                 streamSession.Start(e.SessionId, negotiated.Value);
 
@@ -1240,6 +1298,9 @@ namespace EasyRDP.Server.Wpf
 
             _transportServer.Disconnect(sessionId);
             Logger.Info("Session {0} disconnected", sessionId);
+
+            // 无会话后停止捕获与光标追踪（服务端保持监听，等待下一客户端）
+            StopCaptureIfIdle();
         }
 
         private void HeartbeatLoop()

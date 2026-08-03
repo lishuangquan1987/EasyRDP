@@ -326,7 +326,8 @@ namespace EasyRDP.Server.Wpf
                 var clipboard = factory.CreateClipboardService();
 
                 _captureService = new CaptureService(capturer);
-                _captureService.Start();
+                // 捕获与光标追踪由 TransportHost 在首个客户端会话接入时惰性启动、
+                // 最后一个会话断开时停止：无客户端时不截屏，避免资源浪费与本机光标异常。
 
                 _transportServer = new TcpTransportServer();
                 _transportServer.OnLog = (msg) => _dispatcher.Invoke(() => AddLog(msg));

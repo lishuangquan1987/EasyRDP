@@ -23,6 +23,8 @@ namespace EasyRDP.Server.Wpf
         private volatile bool _running;
         private volatile int _intervalMs = 16; // ~60Hz
         private volatile bool _enableShape = true;
+        // 生命周期锁：Start/StopAll 在并发会话接入/断开下必须串行（防止检查-执行竞态产生双线程）
+        private readonly object _lifecycleLock = new object();
         private readonly object _lock = new object();
         private readonly List<CursorTrackerSession> _sessions = new List<CursorTrackerSession>();
         private bool _disposed;
@@ -101,27 +103,33 @@ namespace EasyRDP.Server.Wpf
         /// <summary>启动 60Hz 轮询线程。</summary>
         public void Start()
         {
-            if (_running) return;
-            _running = true;
-            _pollThread = new Thread(PollLoop);
-            _pollThread.IsBackground = true;
-            _pollThread.Start();
+            lock (_lifecycleLock)
+            {
+                if (_running) return;
+                _running = true;
+                _pollThread = new Thread(PollLoop);
+                _pollThread.IsBackground = true;
+                _pollThread.Start();
+            }
         }
 
         /// <summary>停止所有客户端的光标追踪并结束线程。</summary>
         public void StopAll()
         {
-            _running = false;
-            if (_pollThread != null)
+            lock (_lifecycleLock)
             {
-                _pollThread.Join(2000);
-                _pollThread = null;
-            }
-            lock (_lock)
-            {
-                foreach (var s in _sessions)
-                    s.StopInternal();
-                _sessions.Clear();
+                _running = false;
+                if (_pollThread != null)
+                {
+                    _pollThread.Join(2000);
+                    _pollThread = null;
+                }
+                lock (_lock)
+                {
+                    foreach (var s in _sessions)
+                        s.StopInternal();
+                    _sessions.Clear();
+                }
             }
         }
 

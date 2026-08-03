@@ -20,6 +20,8 @@ namespace EasyRDP.Server.Wpf
         private Thread _captureThread;
         private volatile bool _running;
         private int _frameIntervalMs = 16; // ~60fps
+        // 生命周期锁：Start/Stop 在并发会话接入/断开下必须串行（防止检查-执行竞态产生双线程）
+        private readonly object _lifecycleLock = new object();
 
         /// <summary>Gets whether the capture loop is currently running.</summary>
         public bool IsRunning { get { return _running; } }
@@ -43,29 +45,35 @@ namespace EasyRDP.Server.Wpf
         /// <summary>Starts the capture thread if not already running.</summary>
         public void Start()
         {
-            if (_running) return;
-            Logger.Info("CaptureService starting with interval={0}ms", _frameIntervalMs);
-            _running = true;
-            _captureThread = new Thread(CaptureLoop);
-            _captureThread.IsBackground = true;
-            _captureThread.Start();
+            lock (_lifecycleLock)
+            {
+                if (_running) return;
+                Logger.Info("CaptureService starting with interval={0}ms", _frameIntervalMs);
+                _running = true;
+                _captureThread = new Thread(CaptureLoop);
+                _captureThread.IsBackground = true;
+                _captureThread.Start();
+            }
         }
 
         /// <summary>Stops the capture thread and waits for it to terminate.</summary>
         public void Stop()
         {
-            Logger.Info("CaptureService stopping");
-            _running = false;
-            if (_captureThread != null)
+            lock (_lifecycleLock)
             {
-                if (!_captureThread.Join(3000))
+                Logger.Info("CaptureService stopping");
+                _running = false;
+                if (_captureThread != null)
                 {
-                    Logger.Warn("Capture thread timeout (3s) — abandoned");
-                    // Timeout — thread stuck, abandon
+                    if (!_captureThread.Join(3000))
+                    {
+                        Logger.Warn("Capture thread timeout (3s) — abandoned");
+                        // Timeout — thread stuck, abandon
+                    }
+                    _captureThread = null;
                 }
-                _captureThread = null;
+                Logger.Info("CaptureService stopped");
             }
-            Logger.Info("CaptureService stopped");
         }
 
         public DesktopBounds GetPrimaryScreen()
@@ -82,11 +90,16 @@ namespace EasyRDP.Server.Wpf
         private void CaptureLoop()
         {
             int captureCount = 0;
+            // 只捕获主屏：会话握手尺寸/编码器尺寸/鼠标坐标空间均以主屏为准，
+            // 捕获整个虚拟桌面会导致帧尺寸超过会话预分配缓冲（全部丢帧=黑屏），
+            // 且多显示器时鼠标坐标与画面内容错位。IncludeCursor=false：
+            // DXGI/BitBlt 捕获均不含光标，光标由 CursorTracker 叠加层单独同步。
+            var options = new CaptureOptions { IncludeCursor = false, TargetDisplay = 0 };
             while (_running)
             {
                 try
                 {
-                    ScreenFrame frame = _capturer.CaptureScreen();
+                    ScreenFrame frame = _capturer.CaptureScreen(options);
                     captureCount++;
                     var handler = FrameCaptured;
                     if (handler != null)
