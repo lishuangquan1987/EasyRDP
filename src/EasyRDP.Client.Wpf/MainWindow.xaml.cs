@@ -315,6 +315,7 @@ public partial class MainWindow : Window
         // 热区偏移按视频缩放比例换算（与 UpdateCursorPosition 一致）
         double scaleX = rect.Width / _vm.RemoteScreenWidth;
         double scaleY = rect.Height / _vm.RemoteScreenHeight;
+        ResizeRemoteCursor(scaleX, scaleY);
         RemoteCursorImage.Margin = new Thickness(
             _localCursorX - _cursorHotX * scaleX,
             _localCursorY - _cursorHotY * scaleY,
@@ -328,10 +329,23 @@ public partial class MainWindow : Window
         if (rect.IsEmpty) return;
         double scaleX = rect.Width / _vm.RemoteScreenWidth;
         double scaleY = rect.Height / _vm.RemoteScreenHeight;
+        ResizeRemoteCursor(scaleX, scaleY);
         RemoteCursorImage.Margin = new Thickness(
             rect.X + remoteX * scaleX - _cursorHotX * scaleX,
             rect.Y + remoteY * scaleY - _cursorHotY * scaleY,
             0, 0);
+    }
+
+    /// <summary>
+    /// 按视频缩放比例调整光标叠加层尺寸：光标形状与画面内容等比例缩放，
+    /// 避免客户端窗口与远程分辨率不一致时光标形状偏大/偏小造成错位感。
+    /// </summary>
+    private void ResizeRemoteCursor(double scaleX, double scaleY)
+    {
+        if (_cursorBitmap == null) return;
+        RemoteCursorImage.Width = _cursorBitmap.PixelWidth * scaleX;
+        RemoteCursorImage.Height = _cursorBitmap.PixelHeight * scaleY;
+        RemoteCursorImage.Stretch = Stretch.Fill;
     }
 
     /// <summary>计算 RenderImage 在 Uniform 拉伸下实际渲染的矩形（处理黑边 letterbox）。</summary>
