@@ -21,13 +21,14 @@ namespace EasyRDP.Client.Wpf
         private int _sendFrameId = 1000;
 
         // 鼠标移动节流：WPF MouseMove 频率可达 100Hz+，每个事件都发一个分片会打满链路。
-        // 这里只保留最新坐标，由定时器按 ~60Hz 合并发送，交互延迟增加 <16ms。
+        // 这里只保留最新坐标，由定时器按 ~120Hz 合并发送，交互延迟增加 <8ms。
         private readonly object _mouseLock = new object();
         private bool _hasPendingMouse;
         private int _pendingMouseX;
         private int _pendingMouseY;
         private Timer _mouseFlushTimer;
-        private const int MouseFlushIntervalMs = 16;
+        // 8ms ≈ 120Hz 合并发送：降低输入链路延迟（16ms 时鼠标回显最多多等 16ms）
+        private const int MouseFlushIntervalMs = 8;
 
         public void Start(ITransportClient transport, int screenWidth, int screenHeight)
         {
@@ -88,7 +89,7 @@ namespace EasyRDP.Client.Wpf
         }
 
         /// <summary>
-        /// 记录待发送的鼠标坐标（节流队列），由内部定时器按 ~60Hz 合并发送。
+        /// 记录待发送的鼠标坐标（节流队列），由内部定时器按 ~120Hz 合并发送。
         /// 比 WPF 原始事件频率低一个数量级，同时保证坐标始终是最新的。
         /// </summary>
         public void QueueMouseMove(int x, int y)

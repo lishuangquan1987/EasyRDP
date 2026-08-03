@@ -669,6 +669,8 @@ namespace EasyRDP.Client.Wpf
             _streamSession.FileClipboardProgress += OnFileClipboardProgress;
             // 订阅图片剪贴板同步事件：服务端用户复制图片 → 客户端设置 CF_DIB
             _streamSession.ImageClipboardReceived += OnImageClipboardReceivedFromServer;
+            // 订阅服务端分辨率变化：同步坐标映射与显示尺寸，避免映射陈旧导致鼠标落点偏移
+            _streamSession.ResolutionChanged += OnRemoteResolutionChanged;
 
             // 必须在 InitPipeline（调用 Resize）之后才赋值 Bitmap
             RenderBitmap = _renderTarget.Bitmap;
@@ -1154,6 +1156,25 @@ namespace EasyRDP.Client.Wpf
                     Logger.Warn(ex, "Image clipboard set from server failed");
                 }
             });
+        }
+
+        /// <summary>
+        /// 服务端分辨率变化回调（解码线程触发）：更新输入坐标映射与显示尺寸，
+        /// 避免 ClientInputSession 仍按旧分辨率映射导致远程鼠标落点偏移。
+        /// 属性变更与坐标映射均在 UI 线程执行（BeginInvoke 异步调度，避免解码线程阻塞）。
+        /// </summary>
+        private void OnRemoteResolutionChanged(int width, int height)
+        {
+            _dispatcher.BeginInvoke(new Action(() =>
+            {
+                _remoteScreenWidth = width;
+                _remoteScreenHeight = height;
+                OnPropertyChanged(nameof(RemoteScreenWidth));
+                OnPropertyChanged(nameof(RemoteScreenHeight));
+                _inputSession?.OnResolutionChanged(width, height);
+                FrameSize = string.Format("{0}x{1}", width, height);
+                Logger.Info("Remote resolution changed: {0}x{1}", width, height);
+            }));
         }
 
         /// <summary>计算字节数组的前 N 字节的简单哈希（用于图片签名，非加密用途）。</summary>

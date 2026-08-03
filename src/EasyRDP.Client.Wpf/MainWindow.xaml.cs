@@ -254,6 +254,14 @@ public partial class MainWindow : Window
                 HideRemoteCursor();
                 return;
             }
+            // 无可见的远程光标位图时回退到本地光标，避免"鼠标看不见"：
+            // 服务端光标被应用隐藏/捕获失败时会发送空形状（Width=0）且恒为 Visible=true，
+            // 此时远程叠加层无可渲染内容，隐藏本地光标会导致用户完全看不到鼠标。
+            if (_cursorBitmap == null)
+            {
+                HideRemoteCursor();
+                return;
+            }
 
             _lastRemoteCursorX = cursor.X;
             _lastRemoteCursorY = cursor.Y;
