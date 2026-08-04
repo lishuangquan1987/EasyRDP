@@ -6,6 +6,7 @@ using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using System.Windows.Threading;
 using EasyRDP.Core.Rendering;
 using NLog;
 
@@ -39,6 +40,8 @@ public partial class MainWindow : Window
     private bool _remoteCursorVisible;
     private int _cursorHotX;
     private int _cursorHotY;
+    // 点击位置标记（诊断）及其隐藏定时器
+    private DispatcherTimer _clickMarkerTimer;
     // 剪贴板监听窗口句柄（OnSourceInitialized 注册，OnClosing 注销）
     private IntPtr _clipboardListenerHwnd;
 
@@ -468,6 +471,11 @@ public partial class MainWindow : Window
     /// <summary>窗口关闭前停止 aly 自动更新后台循环，避免阻塞线程残留。</summary>
     protected override void OnClosing(CancelEventArgs e)
     {
+        if (_clickMarkerTimer != null)
+        {
+            try { _clickMarkerTimer.Stop(); } catch { }
+            _clickMarkerTimer = null;
+        }
         if (_clipboardListenerHwnd != IntPtr.Zero)
         {
             try { RemoveClipboardFormatListener(_clipboardListenerHwnd); }
@@ -509,6 +517,12 @@ public partial class MainWindow : Window
         // 按下瞬间刷新本地位置并发送最新坐标：快速移动时点击落点精确到按下瞬间，
         // 不再依赖按下前最后一次 MouseMove 的旧坐标
         RefreshLocalCursorPosition(e);
+        ShowClickMarker(_localCursorX, _localCursorY);
+        // 诊断：点击瞬间的本地坐标与最近回显坐标（差值即"可见光标 vs 实际落点"偏差）
+        Logger.Debug("Click down local=({0:F0},{1:F0}) size={2:F0}x{3:F0} lastEcho=({4},{5})",
+            _localCursorX, _localCursorY,
+            RenderImage.ActualWidth, RenderImage.ActualHeight,
+            _lastRemoteCursorX, _lastRemoteCursorY);
         _vm.HandleMouseDown(e.ChangedButton);
     }
 
@@ -518,6 +532,27 @@ public partial class MainWindow : Window
         RefreshLocalCursorPosition(e);
         _vm.HandleMouseUp(e.ChangedButton);
         Mouse.Capture(null);
+    }
+
+    /// <summary>
+    /// 在按下位置显示红点标记 1.5 秒（诊断用）：用户点击后可直接对照红点
+    /// 与远端操作生效位置，量化残余水平偏移。
+    /// </summary>
+    private void ShowClickMarker(double x, double y)
+    {
+        if (_clickMarkerTimer == null)
+        {
+            _clickMarkerTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1.5) };
+            _clickMarkerTimer.Tick += (s, e) =>
+            {
+                _clickMarkerTimer.Stop();
+                ClickMarker.Visibility = Visibility.Collapsed;
+            };
+        }
+        ClickMarker.Margin = new Thickness(x - 5, y - 5, 0, 0);
+        ClickMarker.Visibility = Visibility.Visible;
+        _clickMarkerTimer.Stop();
+        _clickMarkerTimer.Start();
     }
 
     /// <summary>

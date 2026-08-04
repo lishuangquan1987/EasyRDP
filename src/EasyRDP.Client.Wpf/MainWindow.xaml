@@ -166,6 +166,14 @@
                        RenderOptions.BitmapScalingMode="NearestNeighbor"
                        Visibility="Collapsed"/>
 
+                <!-- 点击位置标记（诊断）：点击后红点在按下位置显示 1.5 秒，
+                     便于肉眼核对"可见光标"与"实际落点"是否一致 -->
+                <Ellipse x:Name="ClickMarker"
+                         Width="10" Height="10"
+                         Fill="#E6FFFFFF" Stroke="#FFFF3B30" StrokeThickness="1.5"
+                         HorizontalAlignment="Left" VerticalAlignment="Top"
+                         IsHitTestVisible="False" Visibility="Collapsed"/>
+
                 <!-- 文件剪贴板传输进度条：叠加在桌面显示区顶部 -->
                 <Border HorizontalAlignment="Center" VerticalAlignment="Top"
                         Margin="0,12,0,0" Padding="20,10"

@@ -18,6 +18,9 @@ namespace EasyRDP.Server.Wpf
         // 鼠标移动诊断计数：每 20 条记录一次请求坐标（Debug），
         // 与 CursorTracker 的回显位置对比可定位"远端光标偏移"问题。
         private int _mouseMoveLogCounter;
+        // 最近一次客户端请求的鼠标位置（点击诊断用：点击落点 = 光标所在位置）
+        private int _lastRequestedX;
+        private int _lastRequestedY;
 
         public ServerInputSession(IInputSimulator inputSimulator)
         {
@@ -40,14 +43,20 @@ namespace EasyRDP.Server.Wpf
                         _inputSimulator.SendKeyUp((VirtualKeyCode)msg.KeyCode);
                         return true;
                     case InputEventType.MouseMove:
+                        _lastRequestedX = msg.X;
+                        _lastRequestedY = msg.Y;
                         if ((_mouseMoveLogCounter++ % 20) == 0)
                             Logger.Debug("MouseMove requested=({0},{1})", msg.X, msg.Y);
                         _inputSimulator.SendMouseMove(msg.X, msg.Y, true);
                         return true;
                     case InputEventType.MouseDown:
+                        Logger.Debug("MouseDown button={0} at lastRequested=({1},{2})",
+                            msg.KeyCode, _lastRequestedX, _lastRequestedY);
                         _inputSimulator.SendMouseButton((MouseButton)msg.KeyCode, true);
                         return true;
                     case InputEventType.MouseUp:
+                        Logger.Debug("MouseUp button={0} at lastRequested=({1},{2})",
+                            msg.KeyCode, _lastRequestedX, _lastRequestedY);
                         _inputSimulator.SendMouseButton((MouseButton)msg.KeyCode, false);
                         return true;
                     case InputEventType.MouseWheel:

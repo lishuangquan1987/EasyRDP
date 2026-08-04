@@ -27,6 +27,9 @@ namespace EasyRDP.Client.Wpf
         private bool _hasPendingMouse;
         private int _pendingMouseX;
         private int _pendingMouseY;
+        // 最近一次实际发送给服务端的鼠标坐标（诊断用，点击时与本地位置/回显对比）
+        private int _lastSentMouseX;
+        private int _lastSentMouseY;
         private Timer _mouseFlushTimer;
         // 8ms ≈ 120Hz 合并发送：降低输入链路延迟（16ms 时鼠标回显最多多等 16ms）
         private const int MouseFlushIntervalMs = 8;
@@ -119,9 +122,22 @@ namespace EasyRDP.Client.Wpf
                 x = _pendingMouseX;
                 y = _pendingMouseY;
                 _hasPendingMouse = false;
+                // 记录即将发送的坐标（与发送同一临界区，供诊断读取）
+                _lastSentMouseX = x;
+                _lastSentMouseY = y;
             }
             SendInput(new InputEventMessage { Type = InputEventType.MouseMove, X = x, Y = y });
             Volatile.Write(ref _lastMouseSendTicks, Stopwatch.GetTimestamp());
+        }
+
+        /// <summary>获取最近一次发送给服务端的鼠标坐标（诊断用，线程安全读）。</summary>
+        public void GetLastSentMouse(out int x, out int y)
+        {
+            lock (_mouseLock)
+            {
+                x = _lastSentMouseX;
+                y = _lastSentMouseY;
+            }
         }
 
         /// <summary>把客户端控件坐标映射到服务端屏幕坐标。</summary>

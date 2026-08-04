@@ -1465,6 +1465,10 @@ namespace EasyRDP.Client.Wpf
             if (btn == 0) return;
             var msg = new InputEventMessage { Type = InputEventType.MouseDown, KeyCode = btn };
             _inputSession.SendInput(msg);
+            // 诊断：点击时实际发送给服务端的映射坐标（与本地位置/回显对比定位水平偏移）
+            int sentX, sentY;
+            _inputSession.GetLastSentMouse(out sentX, out sentY);
+            Logger.Debug("Click down button={0} mapped=({1},{2})", changedButton, sentX, sentY);
         }
 
         public void HandleMouseUp(System.Windows.Input.MouseButton changedButton)
@@ -1475,6 +1479,9 @@ namespace EasyRDP.Client.Wpf
             if (btn == 0) return;
             var msg = new InputEventMessage { Type = InputEventType.MouseUp, KeyCode = btn };
             _inputSession.SendInput(msg);
+            int sentX, sentY;
+            _inputSession.GetLastSentMouse(out sentX, out sentY);
+            Logger.Debug("Click up button={0} mapped=({1},{2})", changedButton, sentX, sentY);
         }
 
         /// <summary>WPF MouseButton → EasyDesk MouseButton 显式映射（左=1 右=2 中=3 X1=4 X2=5）。</summary>
