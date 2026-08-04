@@ -149,7 +149,7 @@ namespace EasyRDP.Core.Protocol
                 Marshal.WriteInt32(pParam, H264Native.SEncParamExtOffsets.IMultipleThreadIdc, 0);
                 // 单 slice（SM_SINGLE_SLICE=0）：OpenH264 内部会把线程数钳制为
                 // min(CPU 核数, slice 数)=1，即单线程编码——弱机上没有 4 线程的
-                // 同步开销，640x360 单线程编码约 20~40ms/帧，满足交互需求。
+                // 同步开销，且无 slice 边界画质损失（全分辨率 1080p 画质优先）。
                 // 注意不能使用 SM_RASTER_MULTI_SLICE(2) 自动分片：1080p 会自动切成 68 个
                 // slice（每 MB 行一个），超过 OpenH264 的 35 片上限导致 InitializeExt 失败。
                 Marshal.WriteInt32(pParam, layer0 + 32, 0);

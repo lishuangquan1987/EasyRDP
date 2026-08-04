@@ -57,9 +57,9 @@ namespace EasyRDP.Server.Wpf
         private Queue<long> _encodeTimes = new Queue<long>();
         private long _encodeSum;
         private const int AdaptiveWindow = 30;
-        // 编码分辨率上限与 CaptureService.CaptureMaxWidth 共用同一常量：
-        // 截屏直接按该尺寸 StretchBlt 缩放，编码器不再做第二遍软件缩放。
-        // 画质偏软，可按机器性能上调（如 960/1280）。
+        // 编码分辨率上限与 CaptureService.CaptureMaxWidth 共用同一常量。
+        // 0 = 不降分辨率（当前默认，用户明确要求全分辨率画面）；
+        // >0 时截屏直接按该尺寸 StretchBlt 缩放，编码器不再做第二遍软件缩放。
         private const int MaxEncodeWidth = CaptureService.CaptureMaxWidth;
 
         // D12 global load
@@ -154,7 +154,7 @@ namespace EasyRDP.Server.Wpf
                 // OpenH264 I420 要求偶数宽高：向上取偶。
                 int encodeW = bounds.Width;
                 int encodeH = bounds.Height;
-                if (encodeW > MaxEncodeWidth)
+                if (MaxEncodeWidth > 0 && encodeW > MaxEncodeWidth)
                 {
                     encodeH = Math.Max(1, (int)((long)encodeH * MaxEncodeWidth / encodeW));
                     encodeW = MaxEncodeWidth;
@@ -422,7 +422,7 @@ namespace EasyRDP.Server.Wpf
                 // 编码分辨率计算 + 编码器重建
                 int newEncodeW = _contentW;
                 int newEncodeH = _contentH;
-                if (newEncodeW > MaxEncodeWidth)
+                if (MaxEncodeWidth > 0 && newEncodeW > MaxEncodeWidth)
                 {
                     newEncodeH = Math.Max(1, (int)((long)newEncodeH * MaxEncodeWidth / newEncodeW));
                     newEncodeW = MaxEncodeWidth;

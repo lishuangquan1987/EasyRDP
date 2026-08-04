@@ -23,10 +23,10 @@ namespace EasyRDP.Server.Wpf
         private Thread _captureThread;
         private volatile bool _running;
         private int _frameIntervalMs = 16; // ~60fps
-        // 捕获分辨率上限：与 ServerStreamSession.MaxEncodeWidth 保持一致（640x360）。
-        // 用 GDI StretchBlt 一步完成“截屏 + 降采样”，避免全分辨率 8MB 拷贝和
-        // 编码线程上的托管软件缩放（Win7 32 位每帧 130~190ms 的主要来源）。
-        public const int CaptureMaxWidth = 640;
+        // 捕获/编码分辨率上限：0 = 不降分辨率，按屏幕原生分辨率捕获与编码
+        // （用户明确要求不降低远程画面清晰度）。>0 时用 GDI StretchBlt 一步
+        // 完成“截屏 + 降采样”（弱机可调低提速，如 1280/960）。
+        public const int CaptureMaxWidth = 0;
         // 生命周期锁：Start/Stop 在并发会话接入/断开下必须串行（防止检查-执行竞态产生双线程）
         private readonly object _lifecycleLock = new object();
 
@@ -145,7 +145,7 @@ namespace EasyRDP.Server.Wpf
                     screenH = primary.Height;
                     int newW = screenW;
                     int newH = screenH;
-                    if (newW > CaptureMaxWidth)
+                    if (CaptureMaxWidth > 0 && newW > CaptureMaxWidth)
                     {
                         newH = Math.Max(1, (int)((long)newH * CaptureMaxWidth / newW));
                         newW = CaptureMaxWidth;
