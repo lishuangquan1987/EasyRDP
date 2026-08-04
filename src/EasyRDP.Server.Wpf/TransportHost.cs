@@ -50,6 +50,77 @@ namespace EasyRDP.Server.Wpf
         private readonly Thread _clipboardThread;
         private readonly System.Collections.Concurrent.ConcurrentQueue<string> _clipboardQueue = new System.Collections.Concurrent.ConcurrentQueue<string>();
         private readonly AutoResetEvent _clipboardSignal = new AutoResetEvent(false);
+        // 剪贴板变化通知信号：由 AddClipboardFormatListener（WM_CLIPBOARDUPDATE）触发，
+        // 替代每 800ms 轮询 —— 只有复制/剪切发生时才会读取本机剪贴板。
+        private readonly AutoResetEvent _clipboardChangeSignal = new AutoResetEvent(false);
+        private IntPtr _clipboardListenerHwnd;
+        private IntPtr _clipboardPrevWndProc;
+        private ClipboardWndProcDelegate _clipboardWndProcDelegate;
+        private System.Runtime.InteropServices.GCHandle _clipboardDelegateHandle;
+
+        // ── 剪贴板变化通知（替代轮询）：AddClipboardFormatListener / WM_CLIPBOARDUPDATE ──
+        private const int GWL_WNDPROC = -4;
+        private const uint WM_CLIPBOARDUPDATE = 0x031D;
+        private const uint QS_ALLINPUT = 0x04FF;
+        private const uint PM_REMOVE = 0x0001;
+        private const uint MWMO_INPUTAVAILABLE = 0x0004;
+        private static readonly IntPtr HWND_MESSAGE = new IntPtr(-3);
+
+        private delegate IntPtr ClipboardWndProcDelegate(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint = "SetWindowLongW", SetLastError = true)]
+        private static extern IntPtr SetWindowLong32(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
+        [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW", SetLastError = true)]
+        private static extern IntPtr SetWindowLongPtr64(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern IntPtr CallWindowProc(IntPtr lpPrevWndFunc, IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+        [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr CreateWindowEx(uint dwExStyle, string lpClassName, string lpWindowName,
+            uint dwStyle, int x, int y, int w, int h, IntPtr hWndParent, IntPtr hMenu, IntPtr hInstance, IntPtr lpParam);
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern bool DestroyWindow(IntPtr hWnd);
+        [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+        private static extern bool AddClipboardFormatListener(IntPtr hWnd);
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern bool RemoveClipboardFormatListener(IntPtr hWnd);
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+        private static extern IntPtr GetModuleHandle(string lpModuleName);
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern uint MsgWaitForMultipleObjectsEx(uint nCount, IntPtr[] pHandles,
+            uint dwMilliseconds, uint dwWakeMask, uint dwFlags);
+
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        private struct NativePoint
+        {
+            public int X;
+            public int Y;
+        }
+
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        private struct NativeMsg
+        {
+            public IntPtr Hwnd;
+            public uint Message;
+            public IntPtr WParam;
+            public IntPtr LParam;
+            public uint Time;
+            public NativePoint Pt;
+        }
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern bool PeekMessage(out NativeMsg lpMsg, IntPtr hWnd,
+            uint wMsgFilterMin, uint wMsgFilterMax, uint wRemoveMsg);
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern bool TranslateMessage(ref NativeMsg lpMsg);
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern IntPtr DispatchMessage(ref NativeMsg lpMsg);
+
+        private static IntPtr SetWindowLongPtr(IntPtr hWnd, int nIndex, IntPtr dwNewLong)
+        {
+            if (IntPtr.Size == 8)
+                return SetWindowLongPtr64(hWnd, nIndex, dwNewLong);
+            return SetWindowLong32(hWnd, nIndex, dwNewLong);
+        }
         // 服务端本地剪贴板上次文本，用于检测变化 + 避免回环（客户端发来的文本设置后不再发回）
         private string _lastServerClipboardText = "";
         // 服务端本地剪贴板上次文件列表签名（拼接路径），用于检测变化 + 避免回环
@@ -193,6 +264,7 @@ namespace EasyRDP.Server.Wpf
 
             // 唤醒剪贴板线程使其退出
             _clipboardSignal.Set();
+            _clipboardChangeSignal.Set();
 
             // Stop all sessions
             lock (_lock)
@@ -252,23 +324,17 @@ namespace EasyRDP.Server.Wpf
             Logger.Info("ClipboardLoop started (STA thread, service={0})",
                 _clipboardService != null ? "yes" : "null");
 
-            // 启动时读取一次本地剪贴板，作为 _lastServerClipboardText 初始值
-            try
+            // 创建剪贴板变化监听（WM_CLIPBOARDUPDATE），替代轮询：
+            // 复制/剪切发生时系统通知本窗口，不再周期性 OpenClipboard。
+            CreateClipboardListener();
+
+            IntPtr[] waitHandles = new IntPtr[]
             {
-                if (_clipboardService != null && _clipboardService.ContainsText())
-                {
-                    _lastServerClipboardText = _clipboardService.GetText() ?? "";
-                    Logger.Info("Clipboard initial read: len={0}", _lastServerClipboardText.Length);
-                }
-                else
-                {
-                    Logger.Info("Clipboard initial: no text");
-                }
-            }
-            catch (Exception ex)
-            {
-                Logger.Warn(ex, "Clipboard initial read failed");
-            }
+                _clipboardSignal.SafeWaitHandle.DangerousGetHandle(),
+                _clipboardChangeSignal.SafeWaitHandle.DangerousGetHandle()
+            };
+            // 会话接入瞬间补发一次既有剪贴板内容（事件驱动不会为已存在内容触发通知）
+            bool prevHasSession = false;
 
             while (_running)
             {
@@ -331,26 +397,118 @@ namespace EasyRDP.Server.Wpf
                         }
                     }
 
-                    // 4) 检查本地剪贴板变化（服务端用户复制 → 发送到客户端）。
-                    //    无会话时跳过：本地轮询会周期性 OpenClipboard，与用户本机
-                    //    Ctrl+V（粘贴同样要 OpenClipboard）碰撞会使其失效；
-                    //    空闲时服务端不应触碰本机剪贴板。
+                    // 4) 本地剪贴板变化由 WM_CLIPBOARDUPDATE 通知驱动：
+                    //    仅在有会话且确实发生复制/剪切时才读取（延迟 150ms，
+                    //    避免复制方仍持有剪贴板导致 OpenClipboard 失败），
+                    //    不再每 800ms 轮询干扰本机剪贴板。
                     bool hasSession;
                     lock (_lock)
                     {
                         hasSession = _sessions.Count > 0;
                     }
-                    if (hasSession)
+                    bool sessionJustAttached = hasSession && !prevHasSession;
+                    prevHasSession = hasSession;
+                    if (hasSession && (sessionJustAttached || _clipboardChangeSignal.WaitOne(0)))
+                    {
+                        // 延迟 150ms 让复制方释放剪贴板，期间继续泵消息（不阻塞 WM_QUIT 等）
+                        MsgWaitForMultipleObjectsEx(0, null, 150, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
                         CheckServerClipboardChange();
+                    }
                 }
                 catch (Exception ex)
                 {
                     Logger.Warn(ex, "ClipboardLoop error");
                 }
 
-                // 800ms 间隔：与客户端轮询频率一致，足够及时
-                _clipboardSignal.WaitOne(800);
+                // 等待队列入队信号 / 剪贴板变化通知 / 窗口消息（最长 2s 兜底）。
+                // 必须泵消息，WM_CLIPBOARDUPDATE 才会投递到监听窗口。
+                uint waitResult = MsgWaitForMultipleObjectsEx(
+                    2, waitHandles, 2000, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+                if (waitResult == 0xFFFFFFFF) // WAIT_FAILED
+                {
+                    Logger.Warn("MsgWaitForMultipleObjectsEx failed (err={0})",
+                        System.Runtime.InteropServices.Marshal.GetLastWin32Error());
+                    Thread.Sleep(200);
+                }
+                else if (waitResult == 2) // WAIT_OBJECT_0 + nCount：有窗口消息待处理
+                {
+                    NativeMsg msg;
+                    while (PeekMessage(out msg, IntPtr.Zero, 0, 0, PM_REMOVE))
+                    {
+                        if (msg.Message == 0x0012) break; // WM_QUIT
+                        TranslateMessage(ref msg);
+                        DispatchMessage(ref msg);
+                    }
+                }
             }
+            DestroyClipboardListener();
+            Logger.Info("ClipboardLoop exited");
+        }
+
+        /// <summary>
+        /// 创建隐藏消息窗口并注册剪贴板变化监听（Vista+，Win7 可用）。
+        /// 必须在 STA 线程（ClipboardLoop）创建；必须由同一线程泵消息。
+        /// </summary>
+        private void CreateClipboardListener()
+        {
+            try
+            {
+                IntPtr hWnd = CreateWindowEx(0, "STATIC", "EasyRDPClipboardListener", 0,
+                    0, 0, 0, 0, HWND_MESSAGE, IntPtr.Zero, GetModuleHandle(null), IntPtr.Zero);
+                if (hWnd == IntPtr.Zero)
+                {
+                    Logger.Warn("CreateClipboardListener: CreateWindowEx failed (err={0})",
+                        System.Runtime.InteropServices.Marshal.GetLastWin32Error());
+                    return;
+                }
+                // 立即记录句柄，确保后续步骤抛异常时 DestroyClipboardListener 能清理
+                _clipboardListenerHwnd = hWnd;
+                _clipboardWndProcDelegate = delegate(IntPtr h, uint msg, IntPtr w, IntPtr l)
+                {
+                    if (msg == WM_CLIPBOARDUPDATE)
+                    {
+                        try { _clipboardChangeSignal.Set(); } catch { }
+                        return IntPtr.Zero;
+                    }
+                    return CallWindowProc(_clipboardPrevWndProc, h, msg, w, l);
+                };
+                _clipboardDelegateHandle = System.Runtime.InteropServices.GCHandle.Alloc(_clipboardWndProcDelegate);
+                IntPtr proc = System.Runtime.InteropServices.Marshal.GetFunctionPointerForDelegate(_clipboardWndProcDelegate);
+                _clipboardPrevWndProc = SetWindowLongPtr(hWnd, GWL_WNDPROC, proc);
+                // STATIC 窗口必有默认 WndProc，返回零说明子类化失败
+                if (_clipboardPrevWndProc == IntPtr.Zero)
+                {
+                    Logger.Warn("SetWindowLongPtr failed (err={0}) — 剪贴板监听不可用",
+                        System.Runtime.InteropServices.Marshal.GetLastWin32Error());
+                    DestroyClipboardListener();
+                    return;
+                }
+                if (!AddClipboardFormatListener(hWnd))
+                {
+                    Logger.Warn("AddClipboardFormatListener failed (err={0}) — 剪贴板变化将无法通知",
+                        System.Runtime.InteropServices.Marshal.GetLastWin32Error());
+                }
+                Logger.Info("Clipboard change listener created (WM_CLIPBOARDUPDATE)");
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn(ex, "CreateClipboardListener failed");
+            }
+        }
+
+        /// <summary>释放剪贴板监听窗口与委托句柄。</summary>
+        private void DestroyClipboardListener()
+        {
+            if (_clipboardListenerHwnd != IntPtr.Zero)
+            {
+                try { RemoveClipboardFormatListener(_clipboardListenerHwnd); } catch { }
+                try { DestroyWindow(_clipboardListenerHwnd); } catch { }
+                _clipboardListenerHwnd = IntPtr.Zero;
+            }
+            if (_clipboardDelegateHandle.IsAllocated)
+                _clipboardDelegateHandle.Free();
+            _clipboardPrevWndProc = IntPtr.Zero;
+            _clipboardWndProcDelegate = null;
         }
 
         /// <summary>
