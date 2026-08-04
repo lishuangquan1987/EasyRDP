@@ -331,8 +331,17 @@ namespace EasyRDP.Server.Wpf
                         }
                     }
 
-                    // 4) 检查本地剪贴板变化（服务端用户复制 → 发送到客户端）
-                    CheckServerClipboardChange();
+                    // 4) 检查本地剪贴板变化（服务端用户复制 → 发送到客户端）。
+                    //    无会话时跳过：本地轮询会周期性 OpenClipboard，与用户本机
+                    //    Ctrl+V（粘贴同样要 OpenClipboard）碰撞会使其失效；
+                    //    空闲时服务端不应触碰本机剪贴板。
+                    bool hasSession;
+                    lock (_lock)
+                    {
+                        hasSession = _sessions.Count > 0;
+                    }
+                    if (hasSession)
+                        CheckServerClipboardChange();
                 }
                 catch (Exception ex)
                 {

@@ -16,6 +16,9 @@ namespace EasyRDP.Server.Wpf
     {
         private static readonly Logger Logger = LogManager.GetCurrentClassLogger();
 
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern int GetSystemMetrics(int nIndex);
+
         private readonly IScreenCapturer _capturer;
         private Thread _captureThread;
         private volatile bool _running;
@@ -48,6 +51,29 @@ namespace EasyRDP.Server.Wpf
             lock (_lifecycleLock)
             {
                 if (_running) return;
+                // 屏幕指标诊断：输入绝对坐标映射依赖显示布局与 DPI 感知状态。
+                // 若 GetSystemMetrics(SM_CXSCREEN) 与捕获物理尺寸不一致，
+                // 说明进程 DPI 未感知（逻辑像素 vs 物理像素），鼠标落点会整体偏移。
+                try
+                {
+                    DesktopBounds primary = _capturer.GetPrimaryScreen();
+                    Logger.Info("Screen primary: {0}x{1} at ({2},{3})",
+                        primary.Width, primary.Height, primary.X, primary.Y);
+                    DesktopBounds[] all = _capturer.GetAllScreens();
+                    foreach (DesktopBounds s in all)
+                    {
+                        Logger.Info("Screen monitor: {0}x{1} at ({2},{3}) primary={4}",
+                            s.Width, s.Height, s.X, s.Y, s.IsPrimary);
+                    }
+                    Logger.Info("SystemMetrics: primary={0}x{1} virtual=({2},{3}) {4}x{5}",
+                        GetSystemMetrics(0), GetSystemMetrics(1),
+                        GetSystemMetrics(76), GetSystemMetrics(77),
+                        GetSystemMetrics(78), GetSystemMetrics(79));
+                }
+                catch (Exception ex)
+                {
+                    Logger.Warn(ex, "Screen metrics log failed");
+                }
                 Logger.Info("CaptureService starting with interval={0}ms", _frameIntervalMs);
                 _running = true;
                 _captureThread = new Thread(CaptureLoop);

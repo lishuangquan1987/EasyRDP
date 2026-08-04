@@ -15,6 +15,9 @@ namespace EasyRDP.Server.Wpf
         private static readonly Logger Logger = LogManager.GetCurrentClassLogger();
         private readonly IInputSimulator _inputSimulator;
         private bool _disposed;
+        // 鼠标移动诊断计数：每 20 条记录一次请求坐标（Debug），
+        // 与 CursorTracker 的回显位置对比可定位"远端光标偏移"问题。
+        private int _mouseMoveLogCounter;
 
         public ServerInputSession(IInputSimulator inputSimulator)
         {
@@ -37,6 +40,8 @@ namespace EasyRDP.Server.Wpf
                         _inputSimulator.SendKeyUp((VirtualKeyCode)msg.KeyCode);
                         return true;
                     case InputEventType.MouseMove:
+                        if ((_mouseMoveLogCounter++ % 20) == 0)
+                            Logger.Debug("MouseMove requested=({0},{1})", msg.X, msg.Y);
                         _inputSimulator.SendMouseMove(msg.X, msg.Y, true);
                         return true;
                     case InputEventType.MouseDown:

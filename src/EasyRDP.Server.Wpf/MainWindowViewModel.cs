@@ -157,6 +157,8 @@ namespace EasyRDP.Server.Wpf
         // aly-client.exe 崩溃时错误消息包含整段 Go 堆栈，且每 ~5 秒重试一次：
         // 限频 + 截断，避免日志文件被堆栈刷爆。用 long ticks + Interlocked 保证 x86 下原子。
         private long _lastAlyErrorLoggedTicks;
+        // aly-client.exe 连续崩溃计数：达到阈值后停止更新轮询（避免进程崩溃风暴）
+        private int _alyConsecutiveErrors;
 
         /// <summary>当前更新状态（None=无更新）。</summary>
         private AlyClientStatus _alyClientStatus = AlyClientStatus.None;
@@ -249,24 +251,63 @@ namespace EasyRDP.Server.Wpf
 
             _onUpdateErrorChanged = msg =>
             {
-                if (!string.IsNullOrEmpty(msg))
+                if (string.IsNullOrEmpty(msg))
                 {
-                    long nowTicks = DateTime.UtcNow.Ticks;
-                    long lastTicks = System.Threading.Interlocked.Read(ref _lastAlyErrorLoggedTicks);
-                    if (lastTicks != 0
-                        && (nowTicks - lastTicks) / TimeSpan.TicksPerSecond < 60)
-                        return;
-                    if (System.Threading.Interlocked.CompareExchange(
-                        ref _lastAlyErrorLoggedTicks, nowTicks, lastTicks) != lastTicks)
-                        return;
-                    string firstLine = msg;
-                    int nl = msg.IndexOf('\n');
-                    if (nl > 0)
-                        firstLine = msg.Substring(0, nl);
-                    Logger.Warn("aly update error: {0}", firstLine);
+                    System.Threading.Interlocked.Exchange(ref _alyConsecutiveErrors, 0);
+                    return;
                 }
+                int current = System.Threading.Interlocked.Increment(ref _alyConsecutiveErrors);
+                if (current >= 3)
+                {
+                    // aly-client.exe 连续崩溃（本机 Go 1.10/386 二进制访问违例）：
+                    // 停止更新轮询，避免每 ~5 秒一次的进程崩溃风暴。
+                    DisableAlyUpdateClient();
+                    return;
+                }
+                long nowTicks = DateTime.UtcNow.Ticks;
+                long lastTicks = System.Threading.Interlocked.Read(ref _lastAlyErrorLoggedTicks);
+                if (lastTicks != 0
+                    && (nowTicks - lastTicks) / TimeSpan.TicksPerSecond < 60)
+                    return;
+                if (System.Threading.Interlocked.CompareExchange(
+                    ref _lastAlyErrorLoggedTicks, nowTicks, lastTicks) != lastTicks)
+                    return;
+                string firstLine = msg;
+                int nl = msg.IndexOf('\n');
+                if (nl > 0)
+                    firstLine = msg.Substring(0, nl);
+                Logger.Warn("aly update error: {0}", firstLine);
             };
             _alyUpdateClient.ErrorStatusChanged += _onUpdateErrorChanged;
+        }
+
+        /// <summary>
+        /// 线程安全地停用 aly 更新客户端（SDK 后台线程触发，可并发调用）：
+        /// 原子取出引用、退订全部事件、解除确认等待、释放资源并隐藏更新状态。
+        /// </summary>
+        private void DisableAlyUpdateClient()
+        {
+            AlyUpdateClient client = System.Threading.Interlocked.Exchange(ref _alyUpdateClient, null);
+            if (client == null)
+                return;
+            if (_onUpdateStatusChanged != null) client.StatusChanged -= _onUpdateStatusChanged;
+            if (_onRequestDownloadUpdate != null) client.RequestDownloadUpdate -= _onRequestDownloadUpdate;
+            if (_onRequestApplyUpdate != null) client.RequestApplyUpdate -= _onRequestApplyUpdate;
+            if (_onUpdateErrorChanged != null) client.ErrorStatusChanged -= _onUpdateErrorChanged;
+            try { _updateShutdownCts.Cancel(); } catch (ObjectDisposedException) { }
+            try { client.Dispose(); }
+            catch (Exception ex) { Logger.Warn(ex, "aly update client dispose failed"); }
+            System.Threading.Interlocked.Exchange(ref _alyConsecutiveErrors, 0);
+            Logger.Warn("aly update disabled after consecutive crashes");
+            try
+            {
+                _dispatcher.BeginInvoke(new Action(() =>
+                {
+                    AlyClientStatus = AlyClientStatus.None;
+                    AlyClientUpdateStr = string.Empty;
+                }));
+            }
+            catch (Exception ex) { Logger.Warn(ex, "aly update status reset failed"); }
         }
 
         /// <summary>根据当前状态确认"下载"或"应用"更新。</summary>
