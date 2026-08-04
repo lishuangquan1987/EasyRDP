@@ -26,12 +26,21 @@ public partial class MainWindow : Window
 
     private const int WM_GETMINMAXINFO = 0x0024;
     private const uint MONITOR_DEFAULTTONEAREST = 0x00000002;
+    // 剪贴板变化通知（及时性）：WM_CLIPBOARDUPDATE（Vista/Win7 起可用）
+    private const int WM_CLIPBOARDUPDATE = 0x031D;
+
+    [DllImport("user32.dll")]
+    private static extern bool AddClipboardFormatListener(IntPtr hwnd);
+    [DllImport("user32.dll")]
+    private static extern bool RemoveClipboardFormatListener(IntPtr hwnd);
 
     // 远程光标叠加状态
     private WriteableBitmap? _cursorBitmap;
     private bool _remoteCursorVisible;
     private int _cursorHotX;
     private int _cursorHotY;
+    // 剪贴板监听窗口句柄（OnSourceInitialized 注册，OnClosing 注销）
+    private IntPtr _clipboardListenerHwnd;
 
     [DllImport("user32.dll")]
     private static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint dwFlags);
@@ -144,7 +153,16 @@ public partial class MainWindow : Window
     {
         var source = (HwndSource)HwndSource.FromVisual(this);
         if (source != null)
+        {
             source.AddHook(WndProc);
+            // 注册剪贴板变化监听：复制/剪切时收到 WM_CLIPBOARDUPDATE，及时同步到服务端
+            try
+            {
+                AddClipboardFormatListener(source.Handle);
+                _clipboardListenerHwnd = source.Handle;
+            }
+            catch (Exception ex) { Logger.Warn(ex, "AddClipboardFormatListener failed"); }
+        }
     }
 
     /// <summary>
@@ -155,6 +173,12 @@ public partial class MainWindow : Window
     /// </summary>
     private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
     {
+        if (msg == WM_CLIPBOARDUPDATE)
+        {
+            // 及时通知 ViewModel 检查并同步剪贴板（UI 线程）
+            _vm.NotifyLocalClipboardChanged();
+            return IntPtr.Zero;
+        }
         if (msg == WM_GETMINMAXINFO && _fullscreen)
         {
             IntPtr hMonitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
@@ -443,6 +467,12 @@ public partial class MainWindow : Window
     /// <summary>窗口关闭前停止 aly 自动更新后台循环，避免阻塞线程残留。</summary>
     protected override void OnClosing(CancelEventArgs e)
     {
+        if (_clipboardListenerHwnd != IntPtr.Zero)
+        {
+            try { RemoveClipboardFormatListener(_clipboardListenerHwnd); }
+            catch (Exception ex) { Logger.Warn(ex, "RemoveClipboardFormatListener failed"); }
+            _clipboardListenerHwnd = IntPtr.Zero;
+        }
         try
         {
             _vm.CleanupUpdateClient();

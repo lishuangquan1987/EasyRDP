@@ -1,5 +1,6 @@
 #nullable disable
 using System;
+using System.Diagnostics;
 using System.Threading;
 using EasyRDP.Core.Protocol;
 using EasyRDP.Core.Session;
@@ -29,6 +30,9 @@ namespace EasyRDP.Client.Wpf
         private Timer _mouseFlushTimer;
         // 8ms ≈ 120Hz 合并发送：降低输入链路延迟（16ms 时鼠标回显最多多等 16ms）
         private const int MouseFlushIntervalMs = 8;
+        // 距上次发送超过该阈值时，QueueMouseMove 立即发送最新坐标（首次移动不等定时器，提升及时性）
+        private static readonly long ImmediateFlushTicks = Stopwatch.Frequency / 125;
+        private long _lastMouseSendTicks;
 
         public void Start(ITransportClient transport, int screenWidth, int screenHeight)
         {
@@ -100,6 +104,9 @@ namespace EasyRDP.Client.Wpf
                 _pendingMouseY = y;
                 _hasPendingMouse = true;
             }
+            // 及时性：距上次发送已超过 ~8ms 时立即发送，连续快速移动仍由定时器合并发送
+            if (Stopwatch.GetTimestamp() - Volatile.Read(ref _lastMouseSendTicks) >= ImmediateFlushTicks)
+                FlushPendingMouse();
         }
 
         /// <summary>立即发送待处理的鼠标移动（在鼠标按键/滚轮事件前调用，保证点击位置准确）。</summary>
@@ -114,6 +121,7 @@ namespace EasyRDP.Client.Wpf
                 _hasPendingMouse = false;
             }
             SendInput(new InputEventMessage { Type = InputEventType.MouseMove, X = x, Y = y });
+            Volatile.Write(ref _lastMouseSendTicks, Stopwatch.GetTimestamp());
         }
 
         /// <summary>把客户端控件坐标映射到服务端屏幕坐标。</summary>

@@ -794,76 +794,20 @@ namespace EasyRDP.Client.Wpf
             {
                 Logger.Warn(ex, "Clipboard initial read failed");
             }
-            _clipboardTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(800) };
-            int clipboardPollCount = 0;
+            // 剪贴板变化改为及时通知：MainWindow 注册 AddClipboardFormatListener，
+            // 收到 WM_CLIPBOARDUPDATE 后调用 NotifyLocalClipboardChanged()；
+            // 定时器降为 5 秒兜底（监听不可用时仍能同步，且远低于原先 800ms 的干扰频率）。
+            _clipboardTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(5000) };
+            int clipboardTimerTickCount = 0;
             _clipboardTimer.Tick += (s, ev) =>
             {
-                if (_transport == null || !_running) return;
-                clipboardPollCount++;
-                try
-                {
-                    bool hasText = Clipboard.ContainsText();
-                    bool hasFiles = Clipboard.ContainsFileDropList();
-                    bool hasImage = Clipboard.ContainsImage();
-                    // 每 30 次轮询（约 24 秒）记录一次状态，确认 timer 在工作
-                    if (clipboardPollCount % 30 == 0)
-                        Logger.Debug("Clipboard poll #{0}: hasText={1} hasFiles={2} hasImage={3} lastTextLen={4}",
-                            clipboardPollCount, hasText, hasFiles, hasImage, _lastClipboardText.Length);
-
-                    // 优先处理文件剪贴板（CF_HDROP）：用户右键复制文件时触发
-                    if (hasFiles)
-                    {
-                        // Owner Flag 防回环：剪贴板若是客户端从服务端同步过来并打上 SideClient 标记的，
-                        // 跳过不回传，避免回环。本地用户复制时 owner=SideNone，正常发送。
-                        byte owner = EasyRDP.Core.ClipboardOwnerHelper.GetOwnerFlag();
-                        if (owner == EasyRDP.Core.ClipboardOwnerHelper.SideClient)
-                        {
-                            return; // 远程同步过来的，不回传
-                        }
-
-                        var dropList = Clipboard.GetFileDropList();
-                        string[] files = new string[dropList.Count];
-                        dropList.CopyTo(files, 0);
-                        string sig = string.Join("|", files);
-                        if (sig != _lastClipboardFilesSig)
-                        {
-                            Logger.Info("File clipboard changed: count={0}", files.Length);
-                            _lastClipboardFilesSig = sig;
-                            SendFileClipboardToServer(files);
-                        }
-                        // 文件覆盖了图片：清空图片签名，避免下次复制相同图片时误判为"没变化"
-                        _lastClipboardImageSig = "";
-                        return; // 文件和文本/图片不会同时在剪贴板上
-                    }
-                    _lastClipboardFilesSig = "";
-
-                    // 图片剪贴板（CF_DIB）：用户截图/复制图片时触发
-                    if (hasImage)
-                    {
-                        CheckImageClipboardChange();
-                        // 图片覆盖了文件：_lastClipboardFilesSig 已在上方 hasFiles=false 分支清空
-                        return; // 图片和文本不会同时在剪贴板上
-                    }
-                    _lastClipboardImageSig = "";
-
-                    if (!hasText) return;
-                    string current = Clipboard.GetText() ?? "";
-                    if (current != _lastClipboardText)
-                    {
-                        Logger.Info("Clipboard changed: oldLen={0} newLen={1}",
-                            _lastClipboardText.Length, current.Length);
-                        _lastClipboardText = current;
-                        SendClipboardSync(current);
-                    }
-                }
-                catch (Exception ex)
-                {
-                    // 剪贴板被其他进程锁定时会抛 ExternalException — 之前是静默吞掉，导致问题无法定位
-                    Logger.Warn(ex, "Clipboard poll #{0} failed", clipboardPollCount);
-                }
+                clipboardTimerTickCount++;
+                if (clipboardTimerTickCount % 12 == 0) // 每 ~60 秒一条心跳，确认监控仍在工作
+                    Logger.Debug("Clipboard fallback timer tick #{0}", clipboardTimerTickCount);
+                CheckLocalClipboard();
             };
             _clipboardTimer.Start();
-            Logger.Info("Clipboard poller started (interval=800ms)");
+            Logger.Info("Clipboard listener + fallback timer started (interval=5000ms)");
 
             // 启动心跳：每 10 秒发一次 Keepalive 消息。服务端 _lastActivity 收到任何客户端消息即更新，
             // 30s 不活动服务端会发 Keepalive 探测，45s 不活动判定超时主动断开。
@@ -1074,6 +1018,90 @@ namespace EasyRDP.Client.Wpf
             if (bytes < 1024 * 1024) return string.Format("{0:F1} KB", bytes / 1024.0);
             if (bytes < 1024L * 1024 * 1024) return string.Format("{0:F1} MB", bytes / (1024.0 * 1024));
             return string.Format("{0:F2} GB", bytes / (1024.0 * 1024 * 1024));
+        }
+
+        /// <summary>
+        /// 检查本地剪贴板变化（文本/文件/图片），变化时同步到服务端。
+        /// 由 WM_CLIPBOARDUPDATE 通知（及时）或 5 秒兜底定时器触发；必须在 STA/UI 线程调用。
+        /// </summary>
+        private bool _checkingClipboard;
+
+        private void CheckLocalClipboard()
+        {
+            if (_transport == null || !_running) return;
+            // 重入保护：剪贴板 API 内部可能泵消息，WM_CLIPBOARDUPDATE 可能在检查中途再次进入
+            if (_checkingClipboard) return;
+            _checkingClipboard = true;
+            try
+            {
+                bool hasText = Clipboard.ContainsText();
+                bool hasFiles = Clipboard.ContainsFileDropList();
+                bool hasImage = Clipboard.ContainsImage();
+
+                // 优先处理文件剪贴板（CF_HDROP）：用户右键复制文件时触发
+                if (hasFiles)
+                {
+                    // Owner Flag 防回环：剪贴板若是客户端从服务端同步过来并打上 SideClient 标记的，
+                    // 跳过不回传，避免回环。本地用户复制时 owner=SideNone，正常发送。
+                    byte owner = EasyRDP.Core.ClipboardOwnerHelper.GetOwnerFlag();
+                    if (owner == EasyRDP.Core.ClipboardOwnerHelper.SideClient)
+                    {
+                        return; // 远程同步过来的，不回传
+                    }
+
+                    var dropList = Clipboard.GetFileDropList();
+                    string[] files = new string[dropList.Count];
+                    dropList.CopyTo(files, 0);
+                    string sig = string.Join("|", files);
+                    if (sig != _lastClipboardFilesSig)
+                    {
+                        Logger.Info("File clipboard changed: count={0}", files.Length);
+                        _lastClipboardFilesSig = sig;
+                        SendFileClipboardToServer(files);
+                    }
+                    // 文件覆盖了图片：清空图片签名，避免下次复制相同图片时误判为"没变化"
+                    _lastClipboardImageSig = "";
+                    return; // 文件和文本/图片不会同时在剪贴板上
+                }
+                _lastClipboardFilesSig = "";
+
+                // 图片剪贴板（CF_DIB）：用户截图/复制图片时触发
+                if (hasImage)
+                {
+                    CheckImageClipboardChange();
+                    return; // 图片和文本不会同时在剪贴板上
+                }
+                _lastClipboardImageSig = "";
+
+                if (!hasText) return;
+                string current = Clipboard.GetText() ?? "";
+                if (current != _lastClipboardText)
+                {
+                    Logger.Info("Clipboard changed: oldLen={0} newLen={1}",
+                        _lastClipboardText.Length, current.Length);
+                    _lastClipboardText = current;
+                    SendClipboardSync(current);
+                }
+            }
+            catch (Exception ex)
+            {
+                // 剪贴板被其他进程锁定时会抛 ExternalException — 记录但不停摆
+                Logger.Warn(ex, "Clipboard check failed");
+            }
+            finally
+            {
+                _checkingClipboard = false;
+            }
+        }
+
+        /// <summary>
+        /// 剪贴板变化通知入口：MainWindow 收到 WM_CLIPBOARDUPDATE 后调用（UI 线程）。
+        /// 及时性优于定时轮询：复制/剪切后立即同步到服务端。
+        /// </summary>
+        public void NotifyLocalClipboardChanged()
+        {
+            // CheckLocalClipboard 内部已捕获所有异常
+            CheckLocalClipboard();
         }
 
         /// <summary>
