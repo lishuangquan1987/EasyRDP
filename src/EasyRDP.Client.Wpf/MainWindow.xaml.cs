@@ -229,6 +229,9 @@ public partial class MainWindow : Window
         if (propertyName == nameof(MainWindowViewModel.IsConnected) && !_vm.IsConnected)
         {
             HideRemoteCursor();
+            // 断连后清除本地位置标记：重连时先以服务端回显位置兜底，
+            // 直到用户下一次移动鼠标重新锚定本地位置
+            _hasLocalCursorPos = false;
         }
             if (propertyName == nameof(MainWindowViewModel.IsConnected))
             {
@@ -391,8 +394,6 @@ public partial class MainWindow : Window
     private void HideRemoteCursor()
     {
         _remoteCursorVisible = false;
-        // 重置本地位置标记：重连后先以回显位置显示，直到下一次本地鼠标移动重新锚定
-        _hasLocalCursorPos = false;
         RemoteCursorImage.Visibility = Visibility.Collapsed;
         RenderImage.Cursor = null;
     }
@@ -487,13 +488,7 @@ public partial class MainWindow : Window
     /// <summary>将鼠标事件路由到 ViewModel。</summary>
     private void RenderImage_MouseMove(object sender, MouseEventArgs e)
     {
-        var pos = e.GetPosition(RenderImage);
-        // 记录本地鼠标位置并零延迟定位光标叠加层（指针显示不等待服务端回显）
-        _hasLocalCursorPos = true;
-        _localCursorX = pos.X;
-        _localCursorY = pos.Y;
-        _vm.HandleMouseMove(pos.X, pos.Y, RenderImage.ActualWidth, RenderImage.ActualHeight);
-        PositionRemoteCursorAtLocal();
+        RefreshLocalCursorPosition(e);
     }
 
     /// <summary>
@@ -511,14 +506,34 @@ public partial class MainWindow : Window
         {
             Mouse.Capture((IInputElement)sender);
         }
+        // 按下瞬间刷新本地位置并发送最新坐标：快速移动时点击落点精确到按下瞬间，
+        // 不再依赖按下前最后一次 MouseMove 的旧坐标
+        RefreshLocalCursorPosition(e);
         _vm.HandleMouseDown(e.ChangedButton);
     }
 
     /// <summary>将鼠标释放事件路由到 ViewModel，并释放鼠标捕获。</summary>
     private void RenderImage_PreviewMouseUp(object sender, MouseButtonEventArgs e)
     {
+        RefreshLocalCursorPosition(e);
         _vm.HandleMouseUp(e.ChangedButton);
         Mouse.Capture(null);
+    }
+
+    /// <summary>
+    /// 用当前鼠标事件位置刷新本地光标锚点并同步给服务端。
+    /// 光标叠加层始终锚定本地位置（零延迟），服务端回显坐标只在尚未跟踪到
+    /// 本地鼠标时兜底，绝不用于交互中的光标显示，避免"光标可见位置"与
+    /// "点击落点"相差 150~200px（回显滞后造成的视觉错位）。
+    /// </summary>
+    private void RefreshLocalCursorPosition(MouseEventArgs e)
+    {
+        var pos = e.GetPosition(RenderImage);
+        _hasLocalCursorPos = true;
+        _localCursorX = pos.X;
+        _localCursorY = pos.Y;
+        _vm.HandleMouseMove(pos.X, pos.Y, RenderImage.ActualWidth, RenderImage.ActualHeight);
+        PositionRemoteCursorAtLocal();
     }
 
     /// <summary>将滚轮事件路由到 ViewModel。</summary>

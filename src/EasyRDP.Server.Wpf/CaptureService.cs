@@ -23,6 +23,10 @@ namespace EasyRDP.Server.Wpf
         private Thread _captureThread;
         private volatile bool _running;
         private int _frameIntervalMs = 16; // ~60fps
+        // 捕获分辨率上限：与 ServerStreamSession.MaxEncodeWidth 保持一致（640x360）。
+        // 用 GDI StretchBlt 一步完成“截屏 + 降采样”，避免全分辨率 8MB 拷贝和
+        // 编码线程上的托管软件缩放（Win7 32 位每帧 130~190ms 的主要来源）。
+        public const int CaptureMaxWidth = 640;
         // 生命周期锁：Start/Stop 在并发会话接入/断开下必须串行（防止检查-执行竞态产生双线程）
         private readonly object _lifecycleLock = new object();
 
@@ -78,6 +82,9 @@ namespace EasyRDP.Server.Wpf
                 _running = true;
                 _captureThread = new Thread(CaptureLoop);
                 _captureThread.IsBackground = true;
+                // 降优先级：截屏是后台任务，不能让编码/输入处理等关键线程饿死
+                // （Win7 弱机 CPU 饱和时，输入响应延迟主要来自线程调度竞争）。
+                _captureThread.Priority = ThreadPriority.BelowNormal;
                 _captureThread.Start();
             }
         }
@@ -122,11 +129,68 @@ namespace EasyRDP.Server.Wpf
             // 且多显示器时鼠标坐标与画面内容错位。IncludeCursor=false：
             // DXGI/BitBlt 捕获均不含光标，光标由 CursorTracker 叠加层单独同步。
             var options = new CaptureOptions { IncludeCursor = false, TargetDisplay = 0 };
+
+            // 计算目标捕获分辨率：屏幕尺寸超限时等比例缩小（宽高取偶数满足 I420）。
+            // 直接按目标分辨率 StretchBlt，编码线程不再做托管软件缩放。
+            int screenX = 0, screenY = 0, screenW = 0, screenH = 0;
+            int targetW = 0, targetH = 0;
+            Func<bool> refreshCaptureBounds = delegate
+            {
+                try
+                {
+                    DesktopBounds primary = _capturer.GetPrimaryScreen();
+                    screenX = primary.X;
+                    screenY = primary.Y;
+                    screenW = primary.Width;
+                    screenH = primary.Height;
+                    int newW = screenW;
+                    int newH = screenH;
+                    if (newW > CaptureMaxWidth)
+                    {
+                        newH = Math.Max(1, (int)((long)newH * CaptureMaxWidth / newW));
+                        newW = CaptureMaxWidth;
+                    }
+                    newW = (newW + 1) & ~1;
+                    newH = (newH + 1) & ~1;
+                    if (newW != targetW || newH != targetH)
+                        Logger.Info("CaptureLoop: target resolution {0}x{1} (screen {2}x{3})",
+                            newW, newH, screenW, screenH);
+                    targetW = newW;
+                    targetH = newH;
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    Logger.Warn(ex, "CaptureLoop: failed to compute capture bounds, falling back to CaptureScreen");
+                    targetW = 0;
+                    targetH = 0;
+                    return false;
+                }
+            };
+            refreshCaptureBounds();
+            // 约每 10 秒（60fps × 600 次）重新读取屏幕边界，应对运行中分辨率切换/显示器热插拔
+            int boundsRefreshCounter = 0;
+
             while (_running)
             {
                 try
                 {
-                    ScreenFrame frame = _capturer.CaptureScreen(options);
+                    if (++boundsRefreshCounter >= 600)
+                    {
+                        boundsRefreshCounter = 0;
+                        refreshCaptureBounds();
+                    }
+                    ScreenFrame frame;
+                    if (targetW > 0 && targetH > 0)
+                    {
+                        // StretchBlt 一步完成截屏 + 缩放：内容坐标空间不变，仅降低像素量
+                        frame = _capturer.CaptureScaled(
+                            screenX, screenY, screenW, screenH, targetW, targetH);
+                    }
+                    else
+                    {
+                        frame = _capturer.CaptureScreen(options);
+                    }
                     captureCount++;
                     var handler = FrameCaptured;
                     if (handler != null)

@@ -204,6 +204,9 @@ namespace EasyRDP.Server.Wpf
 
                     var thread = new Thread(() => ReceiveLoop(sessionId, client));
                     thread.IsBackground = true;
+                    // 输入消息（鼠标移动/点击/键盘）都在接收线程处理：
+                    // 弱机 CPU 饱和时提权保证输入及时处理，避免右键/点击延迟到秒级
+                    thread.Priority = ThreadPriority.AboveNormal;
                     lock (_lock) { _receiveThreads[sessionId] = thread; }
                     thread.Start();
                 }

@@ -143,16 +143,17 @@ namespace EasyRDP.Core.Protocol
                 // 关闭环内去块滤波：屏幕内容（文字/代码边缘）的锐利度优先于块效应平滑，
                 // 与 VNC 逐像素观感更接近（VNC 无去块滤波）。
                 Marshal.WriteInt32(pParam, H264Native.SEncParamExtOffsets.ILoopFilterDisableIdc, 1);
-                // 多线程编码：1080p 单线程编码约 35-70ms/帧（FPS 上限 ~15），
-                // iMultipleThreadIdc=4 让 OpenH264 按行分片并行编码，编码时间可降到 ~1/2~1/3。
-                // 屏幕内容模式支持多线程（RustDesk/WebRTC 均如此配置），bUseLoadBalancing 默认开启。
-                Marshal.WriteInt32(pParam, H264Native.SEncParamExtOffsets.IMultipleThreadIdc, 4);
-                // 多线程编码必须配合多 slice：uiSliceMode=SM_FIXEDSLCNUM_SLICE(1)，
-                // uiSliceNum=4 与 iMultipleThreadIdc=4 对应（offset +36 = uiSliceNum）。
+                // 多线程编码：iMultipleThreadIdc=0（自动）由 OpenH264 按 CPU 核心数选择。
+                // 旧实现硬编码 4 线程：强机（16 核）收益明显，但弱机（Win7 双核/单核 32 位）
+                // 上 4 线程 + 4 slice 的同步开销反而拖慢编码。
+                Marshal.WriteInt32(pParam, H264Native.SEncParamExtOffsets.IMultipleThreadIdc, 0);
+                // 单 slice（SM_SINGLE_SLICE=0）：OpenH264 内部会把线程数钳制为
+                // min(CPU 核数, slice 数)=1，即单线程编码——弱机上没有 4 线程的
+                // 同步开销，640x360 单线程编码约 20~40ms/帧，满足交互需求。
                 // 注意不能使用 SM_RASTER_MULTI_SLICE(2) 自动分片：1080p 会自动切成 68 个
                 // slice（每 MB 行一个），超过 OpenH264 的 35 片上限导致 InitializeExt 失败。
-                Marshal.WriteInt32(pParam, layer0 + 32, 1);
-                Marshal.WriteInt32(pParam, layer0 + 36, 4);
+                Marshal.WriteInt32(pParam, layer0 + 32, 0);
+                Marshal.WriteInt32(pParam, layer0 + 36, 1);
 
                 var init = H264Native.GetVTableDelegate<H264Native.InitializeExtDelegate>(
                     _encoder, H264Native.VTABLE_SLOT_INITIALIZE_EXT);

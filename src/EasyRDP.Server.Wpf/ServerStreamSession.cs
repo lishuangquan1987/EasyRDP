@@ -57,9 +57,10 @@ namespace EasyRDP.Server.Wpf
         private Queue<long> _encodeTimes = new Queue<long>();
         private long _encodeSum;
         private const int AdaptiveWindow = 30;
-        // 编码分辨率上限：超出则等比降采样后编码（内容坐标空间不变，仅降低像素量）。
-        // Win7 BitBlt 机器 1080p 软件编码可达 200~660ms/帧，降到 1280x720 约提速 2.25 倍。
-        private const int MaxEncodeWidth = 1280;
+        // 编码分辨率上限与 CaptureService.CaptureMaxWidth 共用同一常量：
+        // 截屏直接按该尺寸 StretchBlt 缩放，编码器不再做第二遍软件缩放。
+        // 画质偏软，可按机器性能上调（如 960/1280）。
+        private const int MaxEncodeWidth = CaptureService.CaptureMaxWidth;
 
         // D12 global load
         private volatile int _globalLoadLevel;
@@ -70,6 +71,11 @@ namespace EasyRDP.Server.Wpf
         private int _captureQueueDrops;
         private long _framesEncoded;
         private long _framesSent;
+        // 静态帧检测：上次成功编码的 BGRA 缓冲，用于跳过内容未变化的帧
+        // （光标由 CursorTracker 单独同步、不在画面内，鼠标移动不会触发视频重编码）。
+        private byte[] _prevBgra;
+        // 连续跳过的帧数：恢复编码时强制关键帧，避免长间隔后解码漂移
+        private int _framesSkipped;
 
         // Cursor session
         private ICursorTrackerSession _cursorSession;
@@ -193,6 +199,9 @@ namespace EasyRDP.Server.Wpf
             // Start threads
             _encodeThread = new Thread(EncodeLoop);
             _encodeThread.IsBackground = true;
+            // 降优先级：编码是吞吐型后台任务，弱机 CPU 饱和时不能抢占输入处理线程，
+            // 否则远端右键/点击响应会延迟到秒级。
+            _encodeThread.Priority = ThreadPriority.BelowNormal;
             _encodeThread.Start();
 
             _sendThread = new Thread(SendLoop);
@@ -263,6 +272,8 @@ namespace EasyRDP.Server.Wpf
                 _encoder.Dispose();
             }
             _encoder = null;
+            // 释放静态帧缓存，便于会话对象被复用时状态干净
+            _prevBgra = null;
 
             _running = false;
             Logger.Info("Session {0}: stream stopped", _sessionId);
@@ -397,7 +408,7 @@ namespace EasyRDP.Server.Wpf
                 }
                 lastEncodeTimestamp = Stopwatch.GetTimestamp();
 
-                // Check content size change????=?????????????????????
+                // 内容尺寸变化检测（如显示器分辨率切换）
                 bool resolutionChanged = false;
                 if (frame.Width != _contentW || frame.Height != _contentH)
                 {
@@ -408,7 +419,7 @@ namespace EasyRDP.Server.Wpf
                     resolutionChanged = true;
                 }
 
-                // ??????????????????? + ???????????????????
+                // 编码分辨率计算 + 编码器重建
                 int newEncodeW = _contentW;
                 int newEncodeH = _contentH;
                 if (newEncodeW > MaxEncodeWidth)
@@ -418,7 +429,13 @@ namespace EasyRDP.Server.Wpf
                 }
                 newEncodeW = (newEncodeW + 1) & ~1;
                 newEncodeH = (newEncodeH + 1) & ~1;
-                if (resolutionChanged && (newEncodeW != _lastW || newEncodeH != _lastH))
+                if (resolutionChanged)
+                {
+                    // 分辨率变化后旧帧缓存失效，重置静态帧检测
+                    _prevBgra = null;
+                    _framesSkipped = 0;
+                }
+                if (newEncodeW != _lastW || newEncodeH != _lastH)
                 {
                     _lastW = newEncodeW;
                     _lastH = newEncodeH;
@@ -428,6 +445,7 @@ namespace EasyRDP.Server.Wpf
                 }
 
                 bool forceKey = resolutionChanged
+                    || _framesSkipped > 0
                     || (_sequenceNumber % KeyframeInterval == 0);
 
                 Logger.Debug("Session {0}: calling Encode seq={1} forceKey={2} res={3}x{4} bgraLen={5}",
@@ -435,9 +453,11 @@ namespace EasyRDP.Server.Wpf
 
                 long encodeStart = Stopwatch.GetTimestamp();
                 EncodedFrame result;
+                byte[] pixelsToEncode = null;
+                int compareLen = _lastW * _lastH * 4;
                 try
                 {
-                    byte[] pixelsToEncode = frame.Pixels;
+                    pixelsToEncode = frame.Pixels;
                     if (frame.Width != _lastW || frame.Height != _lastH)
                     {
                         // 降采样到编码分辨率（内容坐标空间不变，仅降低像素量提速）
@@ -445,6 +465,17 @@ namespace EasyRDP.Server.Wpf
                             _encodeBuf, _lastW, _lastH);
                         pixelsToEncode = _encodeBuf;
                     }
+
+                    // 静态帧跳过：内容未变化时不编码不发送。Win7 弱机每帧编码
+                    // 100~300ms，静止桌面占绝大多数帧——跳过可把延迟预算留给真正变化。
+                    // 注意只比较 encode 尺寸范围（frame 缓冲按全分辨率预分配，尾部是旧数据）。
+                    if (_prevBgra != null && ByteArraysEqual(pixelsToEncode, _prevBgra, compareLen))
+                    {
+                        _framesSkipped++;
+                        lock (_lock) { _captureBufInUse[frame.BufferIndex] = false; }
+                        continue;
+                    }
+
                     result = _encoder.Encode(pixelsToEncode, forceKey);
                 }
                 catch (Exception ex)
@@ -460,7 +491,29 @@ namespace EasyRDP.Server.Wpf
                 long encodeEnd = Stopwatch.GetTimestamp();
                 double encodeMs = (encodeEnd - encodeStart) * 1000.0 / Stopwatch.Frequency;
 
-                // Encode 返回后像素缓冲不再被引用，释放所有权供下一帧截屏复用
+                // 编码失败：丢弃此帧，不发送任何数据（不再回退到原始像素），
+                // 也不更新静态帧参考（失败的帧从未发给客户端，不能作为下次比对基准）
+                if (result.Data == null || result.Data.Length == 0)
+                {
+                    _consecutiveEncodeFailures++;
+                    if (_consecutiveEncodeFailures == 1 || _consecutiveEncodeFailures % 30 == 0)
+                        Logger.Warn("Session {0}: encode failed (seq={1}), frame dropped. Consecutive failures={2}, encodeMs={3:F1}",
+                            _sessionId, _sequenceNumber, _consecutiveEncodeFailures, encodeMs);
+                    if (_consecutiveEncodeFailures == 30)
+                        RaiseFatal("Encoder failed repeatedly (" + _consecutiveEncodeFailures + " frames)");
+                    lock (_lock) { _captureBufInUse[frame.BufferIndex] = false; }
+                    continue;
+                }
+
+                // 编码成功后、释放像素缓冲所有权之前，先拷贝当前帧用于下次静态帧比对。
+                // 顺序不能颠倒：缓冲释放后截屏线程可能立刻复用并覆盖该数组，
+                // 再拷贝会读到新旧混合数据，导致静态帧检测误判。
+                if (_prevBgra == null || _prevBgra.Length != compareLen)
+                    _prevBgra = new byte[compareLen];
+                Buffer.BlockCopy(pixelsToEncode, 0, _prevBgra, 0, compareLen);
+                _framesSkipped = 0;
+
+                // 拷贝完成后像素缓冲不再被引用，释放所有权供下一帧截屏复用
                 lock (_lock) { _captureBufInUse[frame.BufferIndex] = false; }
 
                 Logger.Debug("Session {0}: Encode returned seq={1} dataLen={2} keyframe={3} encodeMs={4:F1}",
@@ -485,18 +538,6 @@ namespace EasyRDP.Server.Wpf
                         else if (avgMs < 20)
                             FrameDelayMs = Math.Max(FrameDelayMs - 5, 16);
                     }
-                }
-
-                // 编码失败：丢弃此帧，不发送任何数据（不再回退到原始像素）
-                if (result.Data == null || result.Data.Length == 0)
-                {
-                    _consecutiveEncodeFailures++;
-                    if (_consecutiveEncodeFailures == 1 || _consecutiveEncodeFailures % 30 == 0)
-                        Logger.Warn("Session {0}: encode failed (seq={1}), frame dropped. Consecutive failures={2}, encodeMs={3:F1}",
-                            _sessionId, _sequenceNumber, _consecutiveEncodeFailures, encodeMs);
-                    if (_consecutiveEncodeFailures == 30)
-                        RaiseFatal("Encoder failed repeatedly (" + _consecutiveEncodeFailures + " frames)");
-                    continue;
                 }
 
                 _consecutiveEncodeFailures = 0;
@@ -653,6 +694,21 @@ namespace EasyRDP.Server.Wpf
                     dst[doff + 3] = (byte)(a / cnt);
                 }
             }
+        }
+
+        /// <summary>
+        /// 比较两个 BGRA 缓冲的前 length 字节是否完全一致（静态帧检测用）。
+        /// 首字节不同即提前返回，内容变化时开销极小。
+        /// </summary>
+        private static bool ByteArraysEqual(byte[] a, byte[] b, int length)
+        {
+            if (a == null || b == null) return false;
+            if (a.Length < length || b.Length < length) return false;
+            for (int i = 0; i < length; i++)
+            {
+                if (a[i] != b[i]) return false;
+            }
+            return true;
         }
 
         /// <summary>触发一次 FatalError（不可恢复故障，TransportHost 据此断开会话）。</summary>

@@ -109,6 +109,8 @@ namespace EasyRDP.Server.Wpf
                 _running = true;
                 _pollThread = new Thread(PollLoop);
                 _pollThread.IsBackground = true;
+                // 降优先级：光标轮询是后台任务，避免与输入处理/编码竞争 CPU
+                _pollThread.Priority = ThreadPriority.BelowNormal;
                 _pollThread.Start();
             }
         }
