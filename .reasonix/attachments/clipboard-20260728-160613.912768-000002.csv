@@ -1,0 +1,2 @@
+enabled,name,desc,type,value.type,scaleoffset.type,scale,offset,unit,listen,listen.sampling.interval,data.tag.addr
+true,通道-1,TestTag,READ,FLOAT,DEFINED_BY_VALUE_TYPE,,,,false,1000,%DB1.DBD0:REAL
