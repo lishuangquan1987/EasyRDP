@@ -45,6 +45,10 @@ namespace EasyRDP.Server.Wpf
         private readonly byte[][] _captureBufs = new byte[2][];
         private readonly bool[] _captureBufInUse = new bool[2];
         private int _lastW, _lastH;
+        // 内容坐标空间尺寸（帧尺寸，可能大于编码尺寸）
+        private int _contentW, _contentH;
+        // 编码降采样缓冲：捕获帧全分辨率存入 _captureBufs，编码前降采样到 _lastW×_lastH
+        private byte[] _encodeBuf;
 
         // Sequence
         private long _sequenceNumber;
@@ -53,6 +57,9 @@ namespace EasyRDP.Server.Wpf
         private Queue<long> _encodeTimes = new Queue<long>();
         private long _encodeSum;
         private const int AdaptiveWindow = 30;
+        // 编码分辨率上限：超出则等比降采样后编码（内容坐标空间不变，仅降低像素量）。
+        // Win7 BitBlt 机器 1080p 软件编码可达 200~660ms/帧，降到 1280x720 约提速 2.25 倍。
+        private const int MaxEncodeWidth = 1280;
 
         // D12 global load
         private volatile int _globalLoadLevel;
@@ -135,15 +142,25 @@ namespace EasyRDP.Server.Wpf
             {
                 // Get screen dimensions
                 var bounds = _captureService.GetPrimaryScreen();
-                // OpenH264 I420 要求偶数宽高：奇数显示器分辨率向上取偶（最后一列/行像素补零），
-                // 客户端按同一尺寸解码渲染，避免奇数尺寸导致的 U/V 平面越界。
-                _lastW = (bounds.Width + 1) & ~1;
-                _lastH = (bounds.Height + 1) & ~1;
+                _contentW = bounds.Width;
+                _contentH = bounds.Height;
+                // 编码分辨率：主屏尺寸超出上限时等比降采样（内容坐标空间不变，仅提速）。
+                // OpenH264 I420 要求偶数宽高：向上取偶。
+                int encodeW = bounds.Width;
+                int encodeH = bounds.Height;
+                if (encodeW > MaxEncodeWidth)
+                {
+                    encodeH = Math.Max(1, (int)((long)encodeH * MaxEncodeWidth / encodeW));
+                    encodeW = MaxEncodeWidth;
+                }
+                _lastW = (encodeW + 1) & ~1;
+                _lastH = (encodeH + 1) & ~1;
+                _encodeBuf = new byte[_lastW * _lastH * 4];
 
                 _encoder.Initialize(_lastW, _lastH, TargetBitrate);
 
-                // Pre-allocate double buffers
-                int size = _lastW * _lastH * 4;
+                // Pre-allocate double buffers（按主屏全分辨率；降采样在编码线程完成）
+                int size = bounds.Width * bounds.Height * 4;
                 _captureBufs[0] = new byte[size];
                 _captureBufs[1] = new byte[size];
                 _captureBufInUse[0] = false;
@@ -304,35 +321,13 @@ namespace EasyRDP.Server.Wpf
             byte[] targetBuf = _captureBufs[bufIdx];
             if (targetBuf == null || targetBuf.Length < frameSize)
             {
-                if (frameSize > _lastW * _lastH * 4)
-                {
-                    // 防御：捕获尺寸超过会话预分配上限（分辨率变化但尚未重初始化）时丢弃
-                    lock (_lock) { _captureBufInUse[bufIdx] = false; }
-                    return;
-                }
+                // 按捕获帧实际尺寸分配（编码降采样由编码线程完成，不在此裁剪）
                 targetBuf = new byte[frameSize];
                 _captureBufs[bufIdx] = targetBuf;
             }
 
-            // Copy pixels
-            if (frame.Width == _lastW && frame.Height == _lastH)
-            {
-                System.Runtime.InteropServices.Marshal.Copy(frame.Scan0, targetBuf, 0, frameSize);
-            }
-            else
-            {
-                // 奇数分辨率取偶：逐行复制到 _lastW（偶数）行距布局并补零，
-                // 否则编码器按 _lastW*4 的 stride 读取会错位整帧。
-                Array.Clear(targetBuf, 0, targetBuf.Length);
-                int srcStride = frame.Width * 4;
-                int dstStride = _lastW * 4;
-                for (int row = 0; row < frame.Height; row++)
-                {
-                    IntPtr srcPtr = new IntPtr(frame.Scan0.ToInt64() + (long)row * srcStride);
-                    int dstOffset = row * dstStride;
-                    System.Runtime.InteropServices.Marshal.Copy(srcPtr, targetBuf, dstOffset, srcStride);
-                }
-            }
+            // 原样拷贝捕获帧（含奇数分辨率；取偶/降采样由编码线程统一处理）
+            System.Runtime.InteropServices.Marshal.Copy(frame.Scan0, targetBuf, 0, frameSize);
 
             // Enqueue（缓冲已选中并标记占用，队列只可能被编码线程消耗，入队必然成功）
             lock (_lock)
@@ -402,20 +397,32 @@ namespace EasyRDP.Server.Wpf
                 }
                 lastEncodeTimestamp = Stopwatch.GetTimestamp();
 
-                // Check resolution change
+                // Check content size change????=?????????????????????
                 bool resolutionChanged = false;
-                if (frame.Width != _lastW || frame.Height != _lastH)
+                if (frame.Width != _contentW || frame.Height != _contentH)
                 {
-                    Logger.Info("Session {0}: resolution changed {1}x{2} -> {3}x{4}",
-                        _sessionId, _lastW, _lastH, frame.Width, frame.Height);
-                    _lastW = (frame.Width + 1) & ~1;
-                    _lastH = (frame.Height + 1) & ~1;
+                    Logger.Info("Session {0}: content changed {1}x{2} -> {3}x{4}",
+                        _sessionId, _contentW, _contentH, frame.Width, frame.Height);
+                    _contentW = frame.Width;
+                    _contentH = frame.Height;
                     resolutionChanged = true;
                 }
 
-                // Encode — H264 only, no raw pixel fallback
-                if (resolutionChanged)
+                // ??????????????????? + ???????????????????
+                int newEncodeW = _contentW;
+                int newEncodeH = _contentH;
+                if (newEncodeW > MaxEncodeWidth)
                 {
+                    newEncodeH = Math.Max(1, (int)((long)newEncodeH * MaxEncodeWidth / newEncodeW));
+                    newEncodeW = MaxEncodeWidth;
+                }
+                newEncodeW = (newEncodeW + 1) & ~1;
+                newEncodeH = (newEncodeH + 1) & ~1;
+                if (resolutionChanged && (newEncodeW != _lastW || newEncodeH != _lastH))
+                {
+                    _lastW = newEncodeW;
+                    _lastH = newEncodeH;
+                    _encodeBuf = new byte[_lastW * _lastH * 4];
                     _encoder.Reset();
                     _encoder.Initialize(_lastW, _lastH, TargetBitrate);
                 }
@@ -430,7 +437,15 @@ namespace EasyRDP.Server.Wpf
                 EncodedFrame result;
                 try
                 {
-                    result = _encoder.Encode(frame.Pixels, forceKey);
+                    byte[] pixelsToEncode = frame.Pixels;
+                    if (frame.Width != _lastW || frame.Height != _lastH)
+                    {
+                        // 降采样到编码分辨率（内容坐标空间不变，仅降低像素量提速）
+                        DownscaleBgra(frame.Pixels, frame.Width, frame.Height,
+                            _encodeBuf, _lastW, _lastH);
+                        pixelsToEncode = _encodeBuf;
+                    }
+                    result = _encoder.Encode(pixelsToEncode, forceKey);
                 }
                 catch (Exception ex)
                 {
@@ -596,6 +611,48 @@ namespace EasyRDP.Server.Wpf
         private int GetPendingFrames()
         {
             lock (_lock) return _sendQueue.Count;
+        }
+
+        /// <summary>
+        /// 盒式滤波降采样 BGRA 帧到目标尺寸（编码提速用）。
+        /// 内容坐标空间不变：降采样仅减少编码像素量，客户端按原内容空间映射。
+        /// </summary>
+        private static void DownscaleBgra(byte[] src, int srcW, int srcH,
+            byte[] dst, int dstW, int dstH)
+        {
+            int dstBytes = dstW * dstH * 4;
+            if (src == null || dst == null || dst.Length < dstBytes)
+                return;
+            for (int dy = 0; dy < dstH; dy++)
+            {
+                int sy0 = dy * srcH / dstH;
+                int sy1 = Math.Max(sy0 + 1, (dy + 1) * srcH / dstH);
+                for (int dx = 0; dx < dstW; dx++)
+                {
+                    int sx0 = dx * srcW / dstW;
+                    int sx1 = Math.Max(sx0 + 1, (dx + 1) * srcW / dstW);
+                    int b = 0, g = 0, r = 0, a = 0;
+                    int cnt = 0;
+                    for (int sy = sy0; sy < sy1; sy++)
+                    {
+                        int rowBase = sy * srcW * 4;
+                        for (int sx = sx0; sx < sx1; sx++)
+                        {
+                            int off = rowBase + sx * 4;
+                            b += src[off];
+                            g += src[off + 1];
+                            r += src[off + 2];
+                            a += src[off + 3];
+                            cnt++;
+                        }
+                    }
+                    int doff = (dy * dstW + dx) * 4;
+                    dst[doff] = (byte)(b / cnt);
+                    dst[doff + 1] = (byte)(g / cnt);
+                    dst[doff + 2] = (byte)(r / cnt);
+                    dst[doff + 3] = (byte)(a / cnt);
+                }
+            }
         }
 
         /// <summary>触发一次 FatalError（不可恢复故障，TransportHost 据此断开会话）。</summary>

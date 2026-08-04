@@ -1256,22 +1256,14 @@ namespace EasyRDP.Client.Wpf
         }
 
         /// <summary>
-        /// 服务端分辨率变化回调（解码线程触发）：更新输入坐标映射与显示尺寸，
-        /// 避免 ClientInputSession 仍按旧分辨率映射导致远程鼠标落点偏移。
-        /// 属性变更与坐标映射均在 UI 线程执行（BeginInvoke 异步调度，避免解码线程阻塞）。
+        /// 视频编码尺寸变化回调（解码线程触发）。
+        /// 只影响渲染：坐标映射空间保持握手时的主屏尺寸 —— 服务端可能对编码分辨率
+        /// 降采样提速（如 1920x1080 内容编码为 1280x720），视频像素 ≠ 内容坐标空间，
+        /// 因此不能按视频尺寸更新 RemoteScreenWidth/ClientInputSession 的映射。
         /// </summary>
         private void OnRemoteResolutionChanged(int width, int height)
         {
-            _dispatcher.BeginInvoke(new Action(() =>
-            {
-                _remoteScreenWidth = width;
-                _remoteScreenHeight = height;
-                OnPropertyChanged(nameof(RemoteScreenWidth));
-                OnPropertyChanged(nameof(RemoteScreenHeight));
-                _inputSession?.OnResolutionChanged(width, height);
-                FrameSize = string.Format("{0}x{1}", width, height);
-                Logger.Info("Remote resolution changed: {0}x{1}", width, height);
-            }));
+            Logger.Info("Video encode resolution changed: {0}x{1} (mapping space unchanged)", width, height);
         }
 
         /// <summary>计算字节数组的前 N 字节的简单哈希（用于图片签名，非加密用途）。</summary>
