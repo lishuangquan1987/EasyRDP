@@ -238,21 +238,25 @@ namespace EasyRDP.Core.Protocol
                     }
                 }
 
-                // 最终进度报告（100%）
+                // 最终进度报告：按实际完成量上报（失败时不虚报 100%，
+                // 否则 UI 会停在"传输中 100%"；onFinish 会立即清除传输状态）
                 if (!_cancelled && totalSize > 0)
                 {
+                    // 循环已结束，无并发写；直接读取实际完成量
+                    long finalDownloaded = totalDownloaded;
                     try
                     {
                         var handler = ProgressChanged;
-                        if (handler != null) handler(totalSize, totalSize);
+                        if (handler != null) handler(finalDownloaded, totalSize);
                     }
                     catch { }
                 }
 
-                if (!_cancelled && localPaths.Count > 0)
+                // 无论成功失败都通知完成（空数组=全部失败），让 UI 清除"传输中"状态
+                if (!_cancelled)
                 {
-                    Logger.Info("FileClipboardConsumer download complete: transferId={0} files={1}",
-                        _transferId, localPaths.Count);
+                    Logger.Info("FileClipboardConsumer download finished: transferId={0} files={1}{2}",
+                        _transferId, localPaths.Count, localPaths.Count == 0 ? " (all failed)" : "");
                     if (_onFinish != null)
                     {
                         try { _onFinish(localPaths.ToArray()); }

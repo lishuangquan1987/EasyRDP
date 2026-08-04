@@ -545,12 +545,10 @@ namespace EasyRDP.Client.Wpf
 
                         Logger.Info("File clipboard download complete: transferId={0} files={1}",
                             msg.TransferId, localPaths != null ? localPaths.Length : 0);
-                        if (localPaths != null && localPaths.Length > 0)
-                        {
-                            var handler = FileClipboardReceived;
-                            if (handler != null)
-                                handler(localPaths);
-                        }
+                        // 无论成功失败都触发（空数组=全部失败）：VM 据此清除"传输中"状态
+                        var handler = FileClipboardReceived;
+                        if (handler != null)
+                            handler(localPaths);
                     });
 
                 _clipConsumers[msg.TransferId] = consumer;

@@ -89,6 +89,9 @@ namespace EasyRDP.Client.Wpf
         // 客户端最小化时无输入事件，若不发心跳，服务端会在 45s 后判定超时主动断开。
         // 用 System.Threading.Timer（线程池）而非 DispatcherTimer：UI 线程卡住或最小化时仍能可靠触发。
         private Timer? _heartbeatTimer;
+        // 鼠标移动/光标回显诊断计数（每 20 条记录一次，用于定位点击偏移）
+        private int _mouseMoveDiagCounter;
+        private int _cursorEchoDiagCounter;
 
         // ====== 多服务器配置保存 ======
         private readonly ConnectionProfileStore _profileStore;
@@ -938,7 +941,7 @@ namespace EasyRDP.Client.Wpf
         private void OnClipboardReceivedFromServer(string text)
         {
             if (string.IsNullOrEmpty(text)) return;
-            _dispatcher.Invoke(() =>
+            _dispatcher.BeginInvoke(new Action(() =>
             {
                 try
                 {
@@ -951,7 +954,7 @@ namespace EasyRDP.Client.Wpf
                 {
                     Logger.Warn(ex, "Clipboard set from server failed");
                 }
-            });
+            }));
         }
 
         /// <summary>
@@ -961,12 +964,20 @@ namespace EasyRDP.Client.Wpf
         /// </summary>
         private void OnFileClipboardReceivedFromServer(string[] localFilePaths)
         {
-            if (localFilePaths == null || localFilePaths.Length == 0) return;
             if (!_running) return; // 断连后忽略，避免设置剪贴板
-            _dispatcher.Invoke(() =>
+            _dispatcher.BeginInvoke(new Action(() =>
             {
                 try
                 {
+                    if (localFilePaths == null || localFilePaths.Length == 0)
+                    {
+                        // 传输失败（文件被占用/读取失败等）：清除"传输中"状态，避免进度条卡在 100%
+                        IsClipboardTransferring = false;
+                        ClipboardProgressValue = 0;
+                        ClipboardProgressText = "";
+                        Logger.Warn("File clipboard transfer failed (no files downloaded)");
+                        return;
+                    }
                     // WPF Clipboard.SetFileDropList 需要 System.Collections.Specialized.StringCollection
                     var fileList = new System.Collections.Specialized.StringCollection();
                     fileList.AddRange(localFilePaths);
@@ -989,7 +1000,7 @@ namespace EasyRDP.Client.Wpf
                     Logger.Warn(ex, "File clipboard set from server failed");
                     IsClipboardTransferring = false;
                 }
-            });
+            }));
         }
 
         /// <summary>
@@ -1428,6 +1439,9 @@ namespace EasyRDP.Client.Wpf
         /// <summary>远程光标更新回调（接收线程）→ 转发为 RemoteCursorChanged 事件。</summary>
         private void OnRemoteCursorChanged(CursorInfo cursor)
         {
+            // 诊断：每 20 条回显记录一次服务端光标位置，与发送坐标对比定位偏移
+            if ((++_cursorEchoDiagCounter % 20) == 0)
+                Logger.Debug("Cursor echo pos=({0},{1})", cursor.X, cursor.Y);
             var handler = RemoteCursorChanged;
             if (handler != null)
                 handler(cursor);
@@ -1440,7 +1454,11 @@ namespace EasyRDP.Client.Wpf
             if (_inputSession == null || !_running) return;
             int sx, sy;
             _inputSession.MapCoordinates(imageX, imageY, imageW, imageH, out sx, out sy);
-            // 节流合并：高频 MouseMove 只更新最新坐标，由 ClientInputSession 按 ~60Hz 发送
+            // 诊断：每 20 条记录一次本地坐标/渲染区/映射结果，与服务端 requested 对比定位点击偏移
+            if ((++_mouseMoveDiagCounter % 20) == 0)
+                Logger.Debug("MouseMove local=({0:F0},{1:F0}) area={2:F0}x{3:F0} mapped=({4},{5})",
+                    imageX, imageY, imageW, imageH, sx, sy);
+            // 节流合并：高频 MouseMove 只更新最新坐标，由 ClientInputSession 按 ~120Hz 发送
             _inputSession.QueueMouseMove(sx, sy);
         }
 
