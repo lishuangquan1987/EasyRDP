@@ -8,6 +8,7 @@ using System.Windows.Threading;
 using AlyClient.CSharpSDK;
 using EasyDesk.Core;
 using EasyDesk.Windows;
+using EasyRDP.Core.Protocol;
 using EasyRDP.Shared;
 using NLog;
 
@@ -39,6 +40,9 @@ namespace EasyRDP.Server.Wpf
         // 默认不预设凭据：启动服务端时必须显式输入用户名/密码（StartServer 会校验非空）
         private string _username = "";
         private string _password = "";
+        // 帧变化检测模式：默认原始方式（FullFrameMemcmp），保持与历史版本一致的行为。
+        // UI 可切换到 BlockHashDirtyRect（32×32 块哈希，小变化跳过编码）。
+        private ChangeDetectionMode _changeDetectionMode = ChangeDetectionMode.FullFrameMemcmp;
 
         // 设置持久化：%AppData%\EasyRDP\server\settings.json
         private readonly ServerSettingsStore _settingsStore = new ServerSettingsStore();
@@ -114,6 +118,26 @@ namespace EasyRDP.Server.Wpf
             set { _password = value ?? ""; OnPropertyChanged(nameof(Password)); }
         }
 
+        /// <summary>
+        /// 帧变化检测模式。UI 可切换：
+        /// - FullFrameMemcmp（原始方式，全帧 memcmp）
+        /// - BlockHashDirtyRect（改进方式，32×32 块哈希，小变化跳过编码）
+        /// 服务运行中修改时，新值在下次会话接入时生效（已建立会话不受影响）。
+        /// </summary>
+        public ChangeDetectionMode ChangeDetectionMode
+        {
+            get { return _changeDetectionMode; }
+            set
+            {
+                if (_changeDetectionMode == value) return;
+                _changeDetectionMode = value;
+                OnPropertyChanged(nameof(ChangeDetectionMode));
+                // 运行中切换：立即更新 TransportHost，下次会话接入时生效
+                if (_transportHost != null)
+                    _transportHost.ChangeDetectionMode = value;
+            }
+        }
+
         // ====== 命令 ======
 
         public RelayCommand StartCommand { get; }
@@ -136,6 +160,7 @@ namespace EasyRDP.Server.Wpf
                 PortText = settings.Port;
             Username = settings.Username ?? "";
             Password = settings.Password ?? "";
+            ChangeDetectionMode = settings.ChangeDetectionMode;
 
             // 启动 aly 自动更新后台检查（检查 → 下载 → 应用）
             InitializeUpdateClient();
@@ -397,6 +422,8 @@ namespace EasyRDP.Server.Wpf
                 };
 
                 _transportHost = new TransportHost(_captureService, _transportServer, inputSim, cursorCapturer, clipboard, credentials);
+                // 注入当前帧变化检测模式（运行时 UI 修改会通过属性 setter 同步更新）
+                _transportHost.ChangeDetectionMode = _changeDetectionMode;
                 _transportHost.SessionAttached += OnSessionAttached;
                 _transportHost.SessionDetached += OnSessionDetached;
                 _transportHost.Start(port);
@@ -452,7 +479,8 @@ namespace EasyRDP.Server.Wpf
             {
                 Port = PortText ?? "2000",
                 Username = Username ?? "",
-                Password = Password ?? ""
+                Password = Password ?? "",
+                ChangeDetectionMode = _changeDetectionMode
             });
             AddLog(ok ? "Settings saved" : "Settings save failed");
         }

@@ -82,13 +82,12 @@ public partial class MainWindow : Window
         _vm.PropertyChanged += (s, e) => OnViewModelPropertyChanged(e.PropertyName);
         // 远程光标更新（接收线程触发，内部转 UI 线程）
         _vm.RemoteCursorChanged += OnRemoteCursorChanged;
-        // 显示区尺寸变化时重算光标位置
-        RenderImage.SizeChanged += (s, e) =>
+        // 显示区尺寸变化时重算远程光标叠加层位置。
+        // RenderImage 用 Stretch=Uniform，尺寸由布局系统按 RenderBorder 自动管理。
+        RenderBorder.SizeChanged += (s, e) =>
         {
             if (_remoteCursorVisible)
             {
-                // 尺寸变化后本地坐标已按旧坐标系记录：先刷新为当前鼠标位置，
-                // 未知时才退回服务端回显位置（回显坐标与客户端尺寸无关，由 GetRenderImageRect 适配）。
                 if (_hasLocalCursorPos)
                 {
                     var pos = Mouse.GetPosition(RenderImage);
@@ -316,11 +315,13 @@ public partial class MainWindow : Window
             RemoteCursorImage.Visibility = Visibility.Visible;
             // 隐藏本地箭头光标，只显示远程光标形状
             RenderImage.Cursor = Cursors.None;
-            // 指针位置锚定本地鼠标位置（零延迟）；服务端回显仅用于同步形状，
-            // 位置只在尚未捕获本地鼠标位置时作为回退（如刚连接、鼠标未移动）。
-            if (_hasLocalCursorPos)
-                PositionRemoteCursorAtLocal();
-            else
+            // 位置策略（关键，曾导致"非全屏水平偏移 150~200px"视觉错位）：
+            // - _hasLocalCursorPos=true（用户移动过鼠标）：锚定本地鼠标位置（零延迟）
+            //   不重新调用 PositionRemoteCursorAtLocal —— 旧代码在每次回显到达时
+            //   用陈旧的 _localCursorX 重定位叠加层，造成"叠加层跳到旧位置"的闪烁
+            // - _hasLocalCursorPos=false（刚连接、鼠标未移动）：用服务端回显位置兜底
+            // 形状更新（cursor.RgbaPixels）始终处理，与位置无关
+            if (!_hasLocalCursorPos)
                 UpdateCursorPosition(cursor.X, cursor.Y);
         }
         catch (Exception ex)
@@ -333,6 +334,15 @@ public partial class MainWindow : Window
     /// 把远程光标叠加层定位到本地鼠标位置：指针显示与手的移动同帧完成。
     /// 服务端坐标映射已保证本地位置 == 远程操作落点，因此锚定不会造成位置偏差。
     /// </summary>
+    /// <remarks>
+    /// 坐标系说明：
+    /// - RenderImage 默认 HorizontalAlignment=Stretch，ActualWidth=Grid 宽度，
+    ///   元素左上角 = Grid 左上角（无外偏移）
+    /// - Stretch=Uniform 在元素内部居中绘制视频画面，留 letterbox 黑边在元素内
+    /// - _localCursorX = e.GetPosition(RenderImage)，相对元素左上角（含黑边区域）
+    /// - 叠加层 Margin 相对 Grid = 相对元素左上角，所以直接用 _localCursorX
+    /// - 热区偏移按视频缩放比例换算（rect.Width/RemoteScreenWidth）
+    /// </remarks>
     private void PositionRemoteCursorAtLocal()
     {
         if (!_remoteCursorVisible || RemoteCursorImage.Visibility != Visibility.Visible)

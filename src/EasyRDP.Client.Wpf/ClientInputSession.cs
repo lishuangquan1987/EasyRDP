@@ -5,6 +5,7 @@ using System.Threading;
 using EasyRDP.Core.Protocol;
 using EasyRDP.Core.Session;
 using EasyRDP.Core.Transport;
+using NLog;
 
 namespace EasyRDP.Client.Wpf
 {
@@ -13,6 +14,7 @@ namespace EasyRDP.Client.Wpf
     /// </summary>
     public class ClientInputSession : IClientInputSession
     {
+        private static readonly Logger Logger = LogManager.GetCurrentClassLogger();
         private ITransportClient _transport;
         private int _screenWidth;
         private int _screenHeight;
@@ -87,12 +89,28 @@ namespace EasyRDP.Client.Wpf
         /// <summary>发送输入事件到服务端。</summary>
         public void SendInput(InputEventMessage msg)
         {
-            if (_disposed || _transport == null) return;
+            if (_disposed || _transport == null)
+            {
+                Logger.Warn("SendInput skipped: disposed={0} transport={1} type={2} keyCode={3}",
+                    _disposed, _transport == null ? "null" : "set", msg.Type, msg.KeyCode);
+                return;
+            }
 
+            uint frameId = (uint)Interlocked.Increment(ref _sendFrameId);
             byte[] payload = msg.Pack();
+            // 诊断：记录每个发送的输入事件（Type/KeyCode/frameId），
+            // 与服务端 HandleInput 入口日志对照可定位消息丢失环节。
+            // MouseDown=4 MouseUp=5 KeyDown=1 KeyUp=2 MouseMove=3 MouseWheel=6
+            if (msg.Type != InputEventType.MouseMove)
+                Logger.Debug("SendInput: type={0} keyCode={1} x={2} y={3} frameId={4} payloadLen={5}",
+                    msg.Type, msg.KeyCode, msg.X, msg.Y, frameId, payload.Length);
+            bool ok = false;
             MessageReassembler.FragAndSend(
-                (uint)Interlocked.Increment(ref _sendFrameId), (byte)MessageType.InputEvent, payload,
-                (sid, data) => _transport.Send(data), 0);
+                frameId, (byte)MessageType.InputEvent, payload,
+                (sid, data) => ok = _transport.Send(data), 0);
+            if (!ok && msg.Type != InputEventType.MouseMove)
+                Logger.Warn("SendInput transport.Send failed: type={0} keyCode={1} frameId={2}",
+                    msg.Type, msg.KeyCode, frameId);
         }
 
         /// <summary>

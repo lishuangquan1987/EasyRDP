@@ -146,7 +146,7 @@
         </Border>
 
         <!-- ====== 中间：桌面显示区 ====== -->
-        <Border Grid.Row="2" Background="Black"
+        <Border x:Name="RenderBorder" Grid.Row="2" Background="Black"
                 MouseMove="RenderImage_MouseMove"
                 PreviewMouseDown="RenderImage_PreviewMouseDown"
                 PreviewMouseUp="RenderImage_PreviewMouseUp"
@@ -154,7 +154,8 @@
                 Focusable="True">
             <Grid>
                 <!-- Fant 高质量缩放：远程分辨率与窗口尺寸不一致时，线性插值会糊化文字/
-                     代码高亮边缘，Fant（双三次变体）在放大/缩小时保留更多细节。 -->
+                     代码高亮边缘，Fant（双三次变体）在放大/缩小时保留更多细节。
+                     Stretch=Uniform 在窗口宽高比≠视频时产生 letterbox 黑边（用户允许）。 -->
                 <Image x:Name="RenderImage" Source="{Binding RenderBitmap}" Stretch="Uniform"
                        RenderOptions.BitmapScalingMode="Fant"/>
 

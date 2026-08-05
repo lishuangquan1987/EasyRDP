@@ -101,6 +101,7 @@ EasyRDP 的核心管线（`docs/` 中的规范）将在根目录下实现 — �
 ### 各语言规范
 
 - EasyDesk：C# 5.0（net40 目标 — 禁止字符串插值、`?.`、表达式体成员等 C# 6+ 语法）。详见 `EasyDesk/AGENTS.md`
+- EasyRDP.Server.Wpf：**唯一目标 `net40`，禁止添加 `net8.0-windows` 等其他目标框架** — 服务端必须运行在 Windows XP 上。详见 `src/EasyRDP.Server.Wpf/EasyRDP.Server.Wpf.csproj`
 - aly server / publish-cli：现代 Go（go.mod，modules）
 - aly client：Go 1.10，GOPATH 模式，`GOARCH=386`，禁用 modules — 必须编译为 Windows XP 可运行
 - aly publish-gui：.NET 8，Avalonia 11.3，CommunityToolkit.Mvvm，Semi.Avalonia，Serilog。详见 `aly/AGENTS.md`

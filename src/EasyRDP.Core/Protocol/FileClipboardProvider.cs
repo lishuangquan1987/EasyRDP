@@ -125,7 +125,10 @@ namespace EasyRDP.Core.Protocol
                             {
                                 try { _currentFs.Dispose(); } catch { }
                             }
-                            _currentFs = File.OpenRead(path);
+                            // 使用 FileShare.ReadWrite 打开：允许其他进程/句柄同时写入。
+                            // File.OpenRead 使用 FileShare.Read，会阻止 NLog 等写入器，
+                            // 导致服务端日志文件被读取时日志无法写入（50 秒空白）。
+                            _currentFs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
                             _currentFileIdx = req.FileIndex;
                         }
                         _currentFs.Seek(req.Position, SeekOrigin.Begin);

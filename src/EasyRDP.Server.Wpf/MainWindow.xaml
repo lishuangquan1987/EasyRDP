@@ -1,10 +1,22 @@
 <Window x:Class="EasyRDP.Server.Wpf.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:sys="clr-namespace:System;assembly=mscorlib"
+        xmlns:proto="clr-namespace:EasyRDP.Core.Protocol;assembly=EasyRDP.Core"
         Title="EasyRDP Server" Height="720" Width="940"
         MinHeight="560" MinWidth="800"
         WindowStartupLocation="CenterScreen"
         Background="{StaticResource WindowBackgroundBrush}">
+    <Window.Resources>
+        <!-- 帧变化检测模式枚举值（供 ComboBox 绑定） -->
+        <ObjectDataProvider x:Key="ChangeDetectionModeValues"
+                            MethodName="GetValues"
+                            ObjectType="{x:Type sys:Enum}">
+            <ObjectDataProvider.MethodParameters>
+                <x:Type TypeName="proto:ChangeDetectionMode"/>
+            </ObjectDataProvider.MethodParameters>
+        </ObjectDataProvider>
+    </Window.Resources>
     <Grid>
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -56,11 +68,22 @@
                                  Style="{StaticResource LightPasswordBoxStyle}" Width="120"/>
                 </StackPanel>
 
+                <!-- 帧变化检测模式：FullFrameMemcmp（原始 memcmp）/ BlockHashDirtyRect（块哈希） -->
+                <StackPanel Grid.Column="4" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,12,0">
+                    <TextBlock Text="DETECT" Style="{StaticResource ToolbarLabelStyle}" Margin="0,0,6,0"/>
+                    <ComboBox Width="170"
+                              Style="{StaticResource ToolbarComboBoxStyle}"
+                              IsReadOnly="True"
+                              ItemsSource="{Binding Source={StaticResource ChangeDetectionModeValues}}"
+                              SelectedItem="{Binding ChangeDetectionMode}"
+                              ToolTip="帧变化检测模式：FullFrameMemcmp=原始全帧比对，BlockHashDirtyRect=块哈希小变化跳过编码。切换在下次会话接入时生效"/>
+                </StackPanel>
+
                 <!-- 主操作按钮 -->
                 <StackPanel Grid.Column="6" Orientation="Horizontal" VerticalAlignment="Center">
                     <Button Content="Save Settings" Style="{StaticResource ToolbarButtonStyle}" Height="30" Padding="12,0"
                             Command="{Binding SaveSettingsCommand}" Margin="0,0,6,0"
-                            ToolTip="保存端口/用户名/密码到本地配置文件"/>
+                            ToolTip="保存端口/用户名/密码/检测模式到本地配置文件"/>
                     <Button Content="Start" Style="{StaticResource PrimaryButtonStyle}"
                             Command="{Binding StartCommand}" Margin="0,0,6,0"/>
                     <Button Content="Stop" Style="{StaticResource DangerButtonStyle}"

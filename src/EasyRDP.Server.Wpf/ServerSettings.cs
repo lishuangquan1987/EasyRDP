@@ -2,6 +2,7 @@
 using System;
 using System.IO;
 using System.Text;
+using EasyRDP.Core.Protocol;
 using EasyRDP.Shared;
 
 namespace EasyRDP.Server.Wpf
@@ -18,11 +19,20 @@ namespace EasyRDP.Server.Wpf
         /// <summary>认证密码（写入磁盘前经 Windows DPAPI 加密，仅当前用户可解密）。</summary>
         public string Password { get; set; }
 
+        /// <summary>
+        /// 帧变化检测模式。控制 ServerStreamSession 在编码前如何判断画面是否变化。
+        /// FullFrameMemcmp=原始方式（全帧 memcmp），BlockHashDirtyRect=改进方式（32×32 块哈希）。
+        /// 切换在下次会话建立时生效。
+        /// </summary>
+        public ChangeDetectionMode ChangeDetectionMode { get; set; }
+
         public ServerSettings()
         {
             Port = "2000";
             Username = "";
             Password = "";
+            // 默认原始方式：保持与历史版本完全一致的行为，避免引入潜在回归
+            ChangeDetectionMode = ChangeDetectionMode.FullFrameMemcmp;
         }
     }
 
@@ -113,19 +123,21 @@ namespace EasyRDP.Server.Wpf
             }
         }
 
-        /// <summary>序列化为 JSON 对象（三个字符串字段）。</summary>
+        /// <summary>序列化为 JSON 对象（端口/用户名/密码 + 变化检测模式）。</summary>
         private static string SerializeJson(ServerSettings s, string encryptedPassword)
         {
-            var sb = new StringBuilder(128);
+            var sb = new StringBuilder(192);
             sb.Append('{');
             sb.Append("\"Port\":\"").Append(Escape(s.Port)).Append("\",");
             sb.Append("\"Username\":\"").Append(Escape(s.Username)).Append("\",");
-            sb.Append("\"Password\":\"").Append(Escape(encryptedPassword ?? "")).Append('"');
+            sb.Append("\"Password\":\"").Append(Escape(encryptedPassword ?? "")).Append("\",");
+            // 整型枚举以数字形式序列化，老版本读取时会被忽略（解析时仅识别已知键）
+            sb.Append("\"ChangeDetectionMode\":").Append((int)s.ChangeDetectionMode);
             sb.Append('}');
             return sb.ToString();
         }
 
-        /// <summary>从 JSON 解析三个字符串字段（容忍格式差异，字段缺失保持默认值）。</summary>
+        /// <summary>从 JSON 解析字段（容忍格式差异，字段缺失保持默认值）。</summary>
         private static ServerSettings ParseJson(string json)
         {
             var s = new ServerSettings();
@@ -182,6 +194,30 @@ namespace EasyRDP.Server.Wpf
                 {
                     expectValue = true;
                     i++;
+                }
+                else if (expectValue && key != null && (char.IsDigit(c) || c == '-'))
+                {
+                    // 非引号值（整数）：解析到 ',' 或 '}' 为止
+                    int j = i;
+                    var numSb = new StringBuilder(8);
+                    while (j < json.Length && json[j] != ',' && json[j] != '}' && !char.IsWhiteSpace(json[j]))
+                    {
+                        numSb.Append(json[j]);
+                        j++;
+                    }
+                    int num;
+                    if (int.TryParse(numSb.ToString(), out num))
+                    {
+                        if (key == "ChangeDetectionMode")
+                        {
+                            // 枚举值范围校验：未知值回退到默认（FullFrameMemcmp）
+                            if (num >= 0 && num <= (int)ChangeDetectionMode.BlockHashDirtyRect)
+                                s.ChangeDetectionMode = (ChangeDetectionMode)num;
+                        }
+                    }
+                    key = null;
+                    expectValue = false;
+                    i = j;
                 }
                 else
                 {

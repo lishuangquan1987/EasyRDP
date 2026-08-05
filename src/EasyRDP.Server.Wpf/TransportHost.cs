@@ -158,10 +158,26 @@ namespace EasyRDP.Server.Wpf
         // Authentication credentials: username → password (plaintext, sufficient for v1)
         private readonly Dictionary<string, string> _credentials;
 
+        // 帧变化检测模式：由 MainWindowViewModel 在 Start 前从 ServerSettings 注入，
+        // 运行时可更新（volatile 保证新会话建立时读到最新值，已有会话不受影响）。
+        // 默认 FullFrameMemcmp 保持与历史版本一致的行为。
+        private volatile ChangeDetectionMode _changeDetectionMode = ChangeDetectionMode.FullFrameMemcmp;
+
         // Heartbeat
         private Thread _heartbeatThread;
         private volatile bool _running;
         private readonly Dictionary<uint, DateTime> _lastActivity = new Dictionary<uint, DateTime>();
+
+        /// <summary>
+        /// 获取或设置帧变化检测模式。新会话建立时按此值通过 ChangeDetectorFactory 创建
+        /// IFrameChangeDetector 注入 ServerStreamSession。已建立的会话不受影响。
+        /// 切换在下次会话接入时生效（UI 修改后无需重启服务）。
+        /// </summary>
+        public ChangeDetectionMode ChangeDetectionMode
+        {
+            get { return _changeDetectionMode; }
+            set { _changeDetectionMode = value; }
+        }
 
         public TransportHost(
             ICaptureService captureService,
@@ -1007,13 +1023,30 @@ namespace EasyRDP.Server.Wpf
                 lock (_lock)
                 {
                     if (!_sessions.TryGetValue(e.SessionId, out info))
+                    {
+                        // 诊断：会话不存在时记录，定位 InputEvent 丢失是否因会话查找失败
+                        if (e.MessageType == (byte)MessageType.InputEvent)
+                            Logger.Warn("InputEvent dropped: sessionId={0} not found in _sessions", e.SessionId);
                         return;
+                    }
                 }
 
-                if (e.MessageType == (byte)MessageType.InputEvent && info.Input != null)
+                if (e.MessageType == (byte)MessageType.InputEvent)
                 {
-                    var inputMsg = InputEventMessage.Unpack(e.Data);
-                    info.Input.HandleInput(inputMsg);
+                    if (info.Input == null)
+                    {
+                        Logger.Warn("InputEvent dropped: sessionId={0} info.Input is null", e.SessionId);
+                    }
+                    else
+                    {
+                        var inputMsg = InputEventMessage.Unpack(e.Data);
+                        // 诊断：记录 InputEvent 的 InputEventType（payload 第 1 字节），
+                        // 与客户端 SendInput 日志对照可定位消息丢失环节。
+                        // MouseDown=4 MouseUp=5 KeyDown=1 KeyUp=2 MouseMove=3 MouseWheel=6
+                        Logger.Debug("InputEvent dispatch: sessionId={0} inputType={1} keyCode={2}",
+                            e.SessionId, inputMsg.Type, inputMsg.KeyCode);
+                        info.Input.HandleInput(inputMsg);
+                    }
                 }
                 else if (e.MessageType == (byte)MessageType.ClipboardSync)
                 {
@@ -1320,10 +1353,14 @@ namespace EasyRDP.Server.Wpf
                 var bounds = _captureService.GetPrimaryScreen();
 
                 // Create sessions first (don't send Success until Start() passes)
+                // 按 ServerSettings.ChangeDetectionMode 创建帧变化检测器注入会话。
+                // 切换在下次会话接入时生效，已有会话保持原检测器不变。
+                var changeDetector = ChangeDetectorFactory.Create(_changeDetectionMode);
+                Logger.Info("Session {0}: change detector created, mode={1}", e.SessionId, _changeDetectionMode);
                 var streamSession = new ServerStreamSession(_captureService, (sid, data) =>
                 {
                     _transportServer.SendTo(sid, data);
-                }, _cursorTracker);
+                }, _cursorTracker, changeDetector);
                 // 流会话不可恢复故障（编码器反复失败等）→ 记录日志并异步断开该会话。
                 // 事件可能在编码线程触发，不能直接调用 DisconnectSession（Stop 会 Join 自身线程），
                 // 因此通过线程池调度。

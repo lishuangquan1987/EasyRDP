@@ -1463,11 +1463,12 @@ namespace EasyRDP.Client.Wpf
             _inputSession.FlushPendingMouse(); // 先落地最新光标位置，保证点击位置准确
             int btn = MapMouseButton(changedButton);
             if (btn == 0) return;
-            var msg = new InputEventMessage { Type = InputEventType.MouseDown, KeyCode = btn };
-            _inputSession.SendInput(msg);
-            // 诊断：点击时实际发送给服务端的映射坐标（与本地位置/回显对比定位水平偏移）
+            // 携带映射坐标：服务端收到 MouseDown 后先移动光标到 (X,Y) 再点击，
+            // 避免光标因编码负载滞后导致点击落在旧位置（"点击无效果"假象）
             int sentX, sentY;
             _inputSession.GetLastSentMouse(out sentX, out sentY);
+            var msg = new InputEventMessage { Type = InputEventType.MouseDown, KeyCode = btn, X = sentX, Y = sentY };
+            _inputSession.SendInput(msg);
             Logger.Debug("Click down button={0} mapped=({1},{2})", changedButton, sentX, sentY);
         }
 
@@ -1477,10 +1478,11 @@ namespace EasyRDP.Client.Wpf
             _inputSession.FlushPendingMouse();
             int btn = MapMouseButton(changedButton);
             if (btn == 0) return;
-            var msg = new InputEventMessage { Type = InputEventType.MouseUp, KeyCode = btn };
-            _inputSession.SendInput(msg);
+            // 携带映射坐标：与 MouseDown 对称，确保 Up 位置与 Down 一致
             int sentX, sentY;
             _inputSession.GetLastSentMouse(out sentX, out sentY);
+            var msg = new InputEventMessage { Type = InputEventType.MouseUp, KeyCode = btn, X = sentX, Y = sentY };
+            _inputSession.SendInput(msg);
             Logger.Debug("Click up button={0} mapped=({1},{2})", changedButton, sentX, sentY);
         }
 
