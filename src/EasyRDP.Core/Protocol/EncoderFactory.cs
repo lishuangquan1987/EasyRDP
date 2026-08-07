@@ -19,6 +19,9 @@ namespace EasyRDP.Core.Protocol
                 }
                 case CodecId.H264Hardware:
                     return null; // 未来实现
+                case CodecId.Zrle:
+                    // ZRLE 纯 C# 实现，无原生依赖，始终可用
+                    return new ZrleEncoder();
                 default:
                     return null;
             }
@@ -42,6 +45,8 @@ namespace EasyRDP.Core.Protocol
         public static CodecCapabilities GetAvailableCodecs()
         {
             var caps = CodecCapabilities.None;
+            // ZRLE 无需探测（纯 C# 始终可用），直接置位
+            caps |= CodecCapabilities.Zrle;
             foreach (CodecId c in new[] { CodecId.H264Software, CodecId.H264Hardware })
             {
                 if (!GetAvailableCodec(c).HasValue)

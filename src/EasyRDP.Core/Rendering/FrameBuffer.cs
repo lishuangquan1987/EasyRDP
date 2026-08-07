@@ -6,10 +6,15 @@ namespace EasyRDP.Core.Rendering
     /// CommitFrame 原子交换。全链路 2 次数据搬运（解码器→写槽、读槽→GPU）。
     /// 线程安全：lock 保护所有操作（含 Sequence/FrameCount 读取——net40/XP 常为 32 位进程，
     /// long 读写非原子，必须加锁，否则 Sequence 会撕裂）。
+    /// 
+    /// 阶段二扩展：每槽关联 DirtyRects（ZRLE 脏矩形数组），
+    /// 渲染线程借帧时可随 ReadFrameRef 取回，实现局部更新渲染。
     /// </summary>
     public class FrameBuffer
     {
         private byte[][] _slots = new byte[2][];
+        // 与 _slots 对应的脏矩形数组（ZRLE 帧的区域列表；H264 帧为 null）
+        private ScreenRect[][] _dirtyRects = new ScreenRect[2][];
         private int _writeSlot;
         private int _readSlot = -1;
         private int _readingSlot = -1;
@@ -74,6 +79,16 @@ namespace EasyRDP.Core.Rendering
         /// </summary>
         public bool CommitFrame(int width, int height)
         {
+            return CommitFrame(width, height, null);
+        }
+
+        /// <summary>
+        /// 提交写入（带脏矩形）。原子交换读写槽。
+        /// dirtyRects 数组由调用方每帧新建（解码线程生成），生命周期跨借帧窗口安全；
+        /// 双槽各自持有引用，互不覆盖。
+        /// </summary>
+        public bool CommitFrame(int width, int height, ScreenRect[] dirtyRects)
+        {
             lock (_lock)
             {
                 if (_readingSlot >= 0)
@@ -88,6 +103,7 @@ namespace EasyRDP.Core.Rendering
                 _height = height;
                 _sequence++;
                 _frameCount++;
+                _dirtyRects[_writeSlot] = dirtyRects;
                 _readSlot = _writeSlot;
                 _writeSlot = (_writeSlot + 1) % 2;
                 return true;
@@ -111,7 +127,8 @@ namespace EasyRDP.Core.Rendering
                     Pixels = _slots[_readSlot],
                     Width = _width,
                     Height = _height,
-                    Sequence = _sequence
+                    Sequence = _sequence,
+                    DirtyRects = _dirtyRects[_readSlot]
                 };
                 _readingSlot = _readSlot;
                 _readSlot = -1;
@@ -145,6 +162,8 @@ namespace EasyRDP.Core.Rendering
                 _height = 0;
                 _frameCount = 0;
                 _sequence = 0;
+                _dirtyRects[0] = null;
+                _dirtyRects[1] = null;
             }
         }
     }

@@ -11,6 +11,8 @@ namespace EasyRDP.Core.Protocol
         /// <summary>Software H.264 encoding support.</summary>
         H264Software = 1 << 0,
         /// <summary>Hardware-accelerated H.264 encoding support.</summary>
-        H264Hardware = 1 << 1
+        H264Hardware = 1 << 1,
+        /// <summary>ZRLE 区域编码支持（纯 C#，无原生依赖）。</summary>
+        Zrle         = 1 << 2
     }
 }

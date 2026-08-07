@@ -29,6 +29,9 @@ namespace EasyRDP.Client.Wpf
         private byte[]? _pendingCopyB;
         private int _pendingCount;
 
+        /// <summary>脏矩形局部更新的最大矩形数：超过则回退全帧渲染（WritePixels 调用开销权衡）。</summary>
+        private const int MaxDirtyRects = 16;
+
         /// <summary>渲染目标位图，WPF 窗口通过 Image.Source 绑定此属性。
         /// 必须在 UI 线程访问。</summary>
         public WriteableBitmap? Bitmap
@@ -115,6 +118,104 @@ namespace EasyRDP.Client.Wpf
                         posted,
                         stride,
                         0);
+                }
+                finally
+                {
+                    bmp.Unlock();
+                }
+            }), DispatcherPriority.Render);
+        }
+
+        /// <summary>
+        /// 渲染一帧 BGRA 像素（带脏矩形局部更新）。
+        /// 可在任意线程调用 — 内部先拷贝像素，再通过 BeginInvoke 异步转发到 UI 线程执行。
+        /// 
+        /// 语义：
+        /// - dirtyRects 为 null（H264 整帧路径）→ 回退到全帧 RenderFrame；
+        /// - 空数组（ZRLE 无变化帧）→ 画面无变化，跳过渲染（省 CPU）；
+        /// - 超过 MaxDirtyRects 个矩形 → 回退全帧（大量小矩形 WritePixels 调用开销更大）；
+        /// - 否则仅对每个脏矩形调用 WritePixels 局部更新。
+        /// </summary>
+        public void RenderFrame(byte[] bgraPixels, int w, int h, ScreenRect[] dirtyRects)
+        {
+            if (_disposed || bgraPixels == null || w <= 0 || h <= 0)
+                return;
+
+            // H264 整帧路径或过多矩形：回退全帧渲染
+            if (dirtyRects == null || dirtyRects.Length > MaxDirtyRects)
+            {
+                RenderFrame(bgraPixels, w, h);
+                return;
+            }
+            // ZRLE 无变化帧（0 区域）：画面无变化，跳过渲染
+            if (dirtyRects.Length == 0)
+                return;
+
+            if (_bitmap == null || w != _width || h != _height)
+            {
+                if (_uiDispatcher.CheckAccess())
+                {
+                    DoResize(w, h);
+                }
+                else
+                {
+                    // 跨线程尺寸变更：异步创建新 bitmap，本帧丢弃（同全帧路径）
+                    _uiDispatcher.BeginInvoke(new Action(() => DoResize(w, h)), DispatcherPriority.Render);
+                    return;
+                }
+            }
+
+            // 拷贝像素到私有槽位（局部更新也需要完整源像素作 WritePixels 数据源）
+            byte[] slot = null;
+            lock (_renderLock)
+            {
+                if (_pendingCount < 2)
+                {
+                    slot = _pendingCount == 0 ? _pendingCopyA : _pendingCopyB;
+                    if (slot == null || slot.Length < bgraPixels.Length)
+                        slot = new byte[bgraPixels.Length];
+                    Buffer.BlockCopy(bgraPixels, 0, slot, 0, bgraPixels.Length);
+                    _pendingCount++;
+                }
+            }
+            if (slot == null)
+                return; // 双缓冲满：UI 线程繁忙，丢弃本帧（直播语义）
+
+            byte[] posted = slot;
+            ScreenRect[] rects = dirtyRects;
+            _uiDispatcher.BeginInvoke(new Action(() =>
+            {
+                lock (_renderLock)
+                {
+                    if (_pendingCount > 0)
+                        _pendingCount--;
+                }
+                if (_disposed)
+                    return;
+                var bmp = _bitmap;
+                if (bmp == null || w != _width || h != _height)
+                    return;
+                bmp.Lock();
+                try
+                {
+                    int stride = w * 4;
+                    for (int i = 0; i < rects.Length; i++)
+                    {
+                        ScreenRect rect = rects[i];
+                        // 脏矩形边界裁剪到帧范围（防御：编码器边缘瓦片可能越界）
+                        int x = rect.X < 0 ? 0 : rect.X;
+                        int y = rect.Y < 0 ? 0 : rect.Y;
+                        int rw = rect.Width;
+                        int rh = rect.Height;
+                        if (x + rw > w) rw = w - x;
+                        if (y + rh > h) rh = h - y;
+                        if (rw <= 0 || rh <= 0) continue;
+                        bmp.WritePixels(
+                            new Int32Rect(x, y, rw, rh),
+                            posted,
+                            stride,
+                            y * stride + x * 4);
+                    }
                 }
                 finally
                 {

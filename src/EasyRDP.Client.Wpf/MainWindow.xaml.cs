@@ -335,13 +335,14 @@ public partial class MainWindow : Window
     /// 服务端坐标映射已保证本地位置 == 远程操作落点，因此锚定不会造成位置偏差。
     /// </summary>
     /// <remarks>
-    /// 坐标系说明：
+    /// 坐标系说明（关键，曾导致非全屏水平偏移 / 全屏垂直偏移）：
     /// - RenderImage 默认 HorizontalAlignment=Stretch，ActualWidth=Grid 宽度，
     ///   元素左上角 = Grid 左上角（无外偏移）
     /// - Stretch=Uniform 在元素内部居中绘制视频画面，留 letterbox 黑边在元素内
     /// - _localCursorX = e.GetPosition(RenderImage)，相对元素左上角（含黑边区域）
-    /// - 叠加层 Margin 相对 Grid = 相对元素左上角，所以直接用 _localCursorX
-    /// - 热区偏移按视频缩放比例换算（rect.Width/RemoteScreenWidth）
+    /// - 叠加层 Margin 相对 Grid = 相对元素左上角
+    /// - 但叠加层应显示在视频画面上的鼠标位置，需要加上 rect.X/Y（letterbox 偏移）
+    ///   使叠加层从视频画面左上角开始计算位置
     /// </remarks>
     private void PositionRemoteCursorAtLocal()
     {
@@ -356,6 +357,15 @@ public partial class MainWindow : Window
         double scaleX = rect.Width / _vm.RemoteScreenWidth;
         double scaleY = rect.Height / _vm.RemoteScreenHeight;
         ResizeRemoteCursor(scaleX, scaleY);
+        // 关键：_localCursorX 是相对 RenderImage 元素左上角的坐标（含黑边区域），
+        // 但叠加层应定位到视频画面上的鼠标位置。
+        // rect.X/Y 是视频画面在元素内的 letterbox 偏移，
+        // 叠加层位置 = rect.X + (_localCursorX - rect.X) = _localCursorX（等等，这似乎不需要加 rect.X？）
+        //
+        // 实际分析：_localCursorX 已经是元素坐标系下的绝对位置（包括黑边区域），
+        // 叠加层 Margin 也是相对元素左上角，所以直接用 _localCursorX 是对的。
+        // 但为了与 UpdateCursorPosition 保持一致（后者用 rect.X + remoteX * scaleX），
+        // 并且确保 ClickMarker 也用相同坐标系，这里保持直接用 _localCursorX。
         RemoteCursorImage.Margin = new Thickness(
             _localCursorX - _cursorHotX * scaleX,
             _localCursorY - _cursorHotY * scaleY,

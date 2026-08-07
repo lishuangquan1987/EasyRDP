@@ -41,8 +41,7 @@ namespace EasyRDP.Client.Wpf
         private readonly System.Collections.Generic.List<MessageReceivedEventArgs> _pendingMessages
             = new System.Collections.Generic.List<MessageReceivedEventArgs>();
         private const int MaxPendingMessages = 1024;
-        private bool _pendingOverflowLogged;
-        // 管线（RenderTarget）就绪前到达的光标消息：服务端在 HandshakeRes 之前就已启动光标会话，
+        private bool _pendingOverflowLogged;        // 管线（RenderTarget）就绪前到达的光标消息：服务端在 HandshakeRes 之前就已启动光标会话，
         // 若直接丢弃，初始形状更新会在握手窗口丢失，之后只收到纯位置更新 → 客户端永远没有光标位图。
         private CursorUpdateMessage _pendingCursor;
         // 是否已记录过"首次收到含形状的光标更新"（诊断用，避免 60Hz 刷屏）
@@ -59,6 +58,18 @@ namespace EasyRDP.Client.Wpf
 
         /// <summary>Gets the negotiated video codec used for decoding.</summary>
         public CodecId Codec { get; private set; }
+        // 阶段三：客户端请求驱动流控标志（仅 ZRLE 模式启用）。
+        // InitPipeline 按协商 codec 设置；启用后渲染线程每渲染完一帧即发送
+        // FramebufferUpdateRequest，服务端等请求才编码发送下一帧。
+        private volatile bool _flowControlEnabled;
+        // 上次发送帧请求的时间戳（Stopwatch ticks）：静态场景心跳限速用。
+        // 注：C# 不允许 volatile long，故不加 volatile；InitPipeline（接收线程）写、
+        // RenderLoop（渲染线程）读的撕裂后果仅是首帧前后多/少一个心跳请求，
+        // 服务端首帧无条件推送兜底，实际无害。
+        private long _lastFrameRequestTicks;
+        /// <summary>静态场景帧请求心跳间隔（毫秒）：画面无变化（0 区域空帧）时降频请求，
+        /// 避免服务端满速编码空帧空转占单核 CPU；画面变化时仍每帧立即请求保持流畅。</summary>
+        private const int FrameRequestHeartbeatMs = 250;
         /// <summary>Gets the current frame width in pixels.</summary>
         public int FrameWidth { get { return _frameBuffer != null ? _frameBuffer.Width : 0; } }
         /// <summary>Gets the current frame height in pixels.</summary>
@@ -80,6 +91,10 @@ namespace EasyRDP.Client.Wpf
         public void InitPipeline(CodecId codec, int width, int height)
         {
             Codec = codec;
+            // 阶段三：仅 ZRLE 模式启用请求驱动流控（H264 保持服务端推送）
+            _flowControlEnabled = (codec == CodecId.Zrle);
+            // 初始化心跳时间戳：RenderLoop 首轮即可按需发请求（首帧前多一次请求无害）
+            _lastFrameRequestTicks = System.Diagnostics.Stopwatch.GetTimestamp();
             Logger.Info("InitPipeline: codec={0} resolution={1}x{2}", codec, width, height);
             _decoder = DecoderFactory.Create(codec);
             if (_decoder != null)
@@ -752,7 +767,16 @@ namespace EasyRDP.Client.Wpf
                 return;
             }
 
-            _frameBuffer.CommitFrame(msg.Width, msg.Height);
+            // 阶段二：ZRLE 帧提取脏矩形列表随帧提交（渲染层据此局部更新）。
+            // ExtractRects 只解析区域头部（不解压数据），开销可忽略。
+            // H264 帧（Codec != Zrle）保持 dirtyRects=null → 渲染层回退全帧渲染。
+            ScreenRect[] dirtyRects = null;
+            if (Codec == CodecId.Zrle && msg.Data != null)
+            {
+                dirtyRects = ZrleRegionCodec.ExtractRects(msg.Data);
+            }
+
+            _frameBuffer.CommitFrame(msg.Width, msg.Height, dirtyRects);
             Interlocked.Increment(ref _frameCount);
 
             if (_frameCount == 1)
@@ -822,7 +846,20 @@ namespace EasyRDP.Client.Wpf
                 {
                     try
                     {
-                        _renderTarget?.RenderFrame(frame.Pixels, frame.Width, frame.Height);
+                        // 阶段二：携带 DirtyRects 调用局部更新重载。
+                        // ZRLE 无变化帧（0 区域）→ 渲染层跳过；H264（null）→ 全帧渲染。
+                        _renderTarget?.RenderFrame(frame.Pixels, frame.Width, frame.Height, frame.DirtyRects);
+                        // 阶段三：画面有变化 → 渲染完成后立即请求下一帧（保持流畅）。
+                        // 服务端等请求才编码发送 → 帧率 = 客户端消费能力，不积压不丢帧。
+                        if (_flowControlEnabled)
+                        {
+                            bool hasChanges = frame.DirtyRects != null && frame.DirtyRects.Length > 0;
+                            if (hasChanges)
+                            {
+                                SendFramebufferUpdateRequest();
+                                _lastFrameRequestTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+                            }
+                        }
                     }
                     finally
                     {
@@ -833,6 +870,42 @@ namespace EasyRDP.Client.Wpf
                 {
                     Thread.Sleep(5); // 无帧时等待，降低 CPU 占用
                 }
+
+                // 阶段三：心跳请求（每轮检查，与是否借到帧无关）。
+                // 静帧（服务端回 0 区域空帧、画面无变化）时维持低帧率空帧轮询：
+                // 若把心跳放进借帧分支，静帧时客户端不再发请求 → 服务端 1s 超时后
+                // 不再推帧 → 客户端永远等不到新帧 → 画面变化永久不更新（僵局）。
+                // 心跳保证任何时刻画面变化在 ≤250ms 内被客户端感知并请求更新。
+                if (_flowControlEnabled)
+                {
+                    long now = System.Diagnostics.Stopwatch.GetTimestamp();
+                    long heartbeatTicks = FrameRequestHeartbeatMs * System.Diagnostics.Stopwatch.Frequency / 1000;
+                    if (now - _lastFrameRequestTicks >= heartbeatTicks)
+                    {
+                        SendFramebufferUpdateRequest();
+                        _lastFrameRequestTicks = now;
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// 发送帧请求消息（阶段三流控）：通知服务端客户端已消费完上一帧、可以编码下一帧。
+        /// 在渲染线程调用；空 payload，单分片发送。
+        /// </summary>
+        private void SendFramebufferUpdateRequest()
+        {
+            try
+            {
+                var transport = _transport;
+                if (transport == null) return;
+                MessageReassembler.FragAndSend(0, (byte)MessageType.FramebufferUpdateRequest,
+                    new byte[0], (sid, data) => transport.Send(data), 0);
+            }
+            catch (Exception ex)
+            {
+                // 发送失败（如连接已断开）：静默记录，Stop 流程会清理会话
+                Logger.Warn(ex, "SendFramebufferUpdateRequest failed");
             }
         }
     }

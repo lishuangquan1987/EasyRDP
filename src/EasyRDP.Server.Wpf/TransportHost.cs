@@ -1046,6 +1046,12 @@ namespace EasyRDP.Server.Wpf
                         Logger.Debug("InputEvent dispatch: sessionId={0} inputType={1} keyCode={2}",
                             e.SessionId, inputMsg.Type, inputMsg.KeyCode);
                         info.Input.HandleInput(inputMsg);
+                        // 阶段二：鼠标按下/抬起时通知流会话（ZRLE CopyRect 触发条件），
+                        // 仅在 ZRLE 模式下编码器会响应此状态，H264 路径无副作用。
+                        if (inputMsg.Type == InputEventType.MouseDown)
+                            info.Stream.SetMouseButtonDown(true);
+                        else if (inputMsg.Type == InputEventType.MouseUp)
+                            info.Stream.SetMouseButtonDown(false);
                     }
                 }
                 else if (e.MessageType == (byte)MessageType.ClipboardSync)
@@ -1069,6 +1075,14 @@ namespace EasyRDP.Server.Wpf
                          || e.MessageType == (byte)MessageType.ImageClipboardEnd)
                 {
                     HandleImageClipboardFromClient(e);
+                }
+                else if (e.MessageType == (byte)MessageType.FramebufferUpdateRequest)
+                {
+                    // 阶段三：客户端请求下一帧（ZRLE 流控）。
+                    // 无 payload，仅通知流会话有新的消费能力；流控仅在 ZRLE 会话启用，
+                    // H264 会话的 Stream.OnFramebufferUpdateRequest 置标志但不产生副作用
+                    // （H264 未启用 _flowControlEnabled，EncodeLoop 不等待）。
+                    info.Stream.OnFramebufferUpdateRequest();
                 }
             }
         }
@@ -1396,12 +1410,16 @@ namespace EasyRDP.Server.Wpf
                 streamSession.Start(e.SessionId, negotiated.Value);
 
                 // Only send Success after session fully starts
+                // 注意：握手分辨率必须用编码实际分辨率（_lastW/_lastH，向上取偶后），
+                // 而非 bounds.Width/Height（原始屏幕尺寸）。
+                // 客户端用此值计算 aspect ratio 和坐标映射，必须与视频实际分辨率一致，
+                // 否则即使 1px 偏差也会导致 letterbox 计算和鼠标映射不精确。
                 res = new HandshakeRes
                 {
                     Result = HandshakeResult.Success,
                     Codec = negotiated.Value,
-                    ScreenWidth = bounds.Width,
-                    ScreenHeight = bounds.Height
+                    ScreenWidth = streamSession.EncodeWidth,
+                    ScreenHeight = streamSession.EncodeHeight
                 };
                 SendResponse(e.SessionId, res);
                 Logger.Info("Handshake success: sessionId={0} codec={1} resolution={2}x{3}",

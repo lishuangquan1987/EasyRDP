@@ -1257,13 +1257,22 @@ namespace EasyRDP.Client.Wpf
 
         /// <summary>
         /// 视频编码尺寸变化回调（解码线程触发）。
-        /// 只影响渲染：坐标映射空间保持握手时的主屏尺寸 —— 服务端可能对编码分辨率
-        /// 降采样提速（如 1920x1080 内容编码为 1280x720），视频像素 ≠ 内容坐标空间，
-        /// 因此不能按视频尺寸更新 RemoteScreenWidth/ClientInputSession 的映射。
+        /// 更新坐标映射空间为实际视频帧尺寸 —— WPF Image 用 Stretch=Uniform 按视频
+        /// 实际尺寸计算显示区域（letterbox 黑边），MapCoordinates 必须用同一尺寸
+        /// 计算 aspect ratio，否则黑边偏移导致鼠标坐标失准。
+        /// 当前 CaptureMaxWidth=0（不降采样），视频帧尺寸 = 屏幕物理尺寸（取偶后），
+        /// 取偶差异 1px 对 SetCursorPos 的影响可忽略。
         /// </summary>
         private void OnRemoteResolutionChanged(int width, int height)
         {
-            Logger.Info("Video encode resolution changed: {0}x{1} (mapping space unchanged)", width, height);
+            if (width <= 0 || height <= 0) return;
+            if (width == _remoteScreenWidth && height == _remoteScreenHeight) return;
+            Logger.Info("Video encode resolution changed: {0}x{1} (mapping space updated from {2}x{3})",
+                width, height, _remoteScreenWidth, _remoteScreenHeight);
+            _remoteScreenWidth = width;
+            _remoteScreenHeight = height;
+            FrameSize = string.Format("{0}x{1}", width, height);
+            _inputSession?.OnResolutionChanged(width, height);
         }
 
         /// <summary>计算字节数组的前 N 字节的简单哈希（用于图片签名，非加密用途）。</summary>

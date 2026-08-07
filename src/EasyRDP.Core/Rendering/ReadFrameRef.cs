@@ -13,5 +13,10 @@ namespace EasyRDP.Core.Rendering
         public int Height;
         /// <summary>Sequence number of this frame.</summary>
         public long Sequence;
+        /// <summary>
+        /// 阶段二：本帧的脏矩形列表（ZRLE 区域坐标；H264 整帧为 null）。
+        /// 渲染层可据此只更新脏矩形区域；null 或空数组表示回退全帧渲染或跳过。
+        /// </summary>
+        public ScreenRect[] DirtyRects;
     }
 }

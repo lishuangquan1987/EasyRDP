@@ -35,7 +35,10 @@ namespace EasyRDP.Server.Wpf
 
         // Two-level queues
         private Queue<CapturedFrame> _frameQueue = new Queue<CapturedFrame>();
-        private int _frameQueueCapacity = 2;
+        // 帧队列容量：编码线程从队列取帧编码，采集线程入帧。
+        // 编码 150-400ms/帧，采集 16ms 间隔（60fps），2 容量会丢弃约 90% 的帧。
+        // 增至 4 可缓解突发，编码慢时仍有丢弃但不至于每帧都丢。
+        private int _frameQueueCapacity = 4;
         private Queue<FrameToSend> _sendQueue = new Queue<FrameToSend>();
         private int _sendQueueCapacity = 2;
 
@@ -48,6 +51,11 @@ namespace EasyRDP.Server.Wpf
         private readonly byte[][] _captureBufs = new byte[4][];
         private readonly bool[] _captureBufInUse = new bool[4];
         private int _lastW, _lastH;
+
+        /// <summary>编码实际宽度（向上取偶后），客户端用此值计算坐标映射。</summary>
+        public int EncodeWidth { get { return _lastW; } }
+        /// <summary>编码实际高度（向上取偶后），客户端用此值计算坐标映射。</summary>
+        public int EncodeHeight { get { return _lastH; } }
         // 内容坐标空间尺寸（帧尺寸，可能大于编码尺寸）
         private int _contentW, _contentH;
         // 编码降采样缓冲：捕获帧全分辨率存入 _captureBufs，编码前降采样到 _lastW×_lastH
@@ -90,6 +98,16 @@ namespace EasyRDP.Server.Wpf
 
         // Cursor session
         private ICursorTrackerSession _cursorSession;
+
+        // ZRLE CopyRect 触发状态：鼠标按下时启用编码器 CopyRect 搜索（窗口拖动场景）。
+        // 由 TransportHost 在收到 MouseDown/MouseUp 输入事件时更新。
+        private volatile bool _mouseButtonDown;
+
+        // 阶段三：客户端请求驱动流控（仅 ZRLE 模式）。
+        // _clientRequestPending：客户端已发 FramebufferUpdateRequest、等待编码发送。
+        // _flowControlEnabled：本会话是否启用流控（Start 时按 codec 设置，ZRLE 启用）。
+        private volatile bool _clientRequestPending;
+        private volatile bool _flowControlEnabled;
 
         // Threads
         private Thread _encodeThread;
@@ -143,6 +161,9 @@ namespace EasyRDP.Server.Wpf
             if (_running) return;
             _sessionId = sessionId;
             _codec = codec;
+            // 阶段三：仅 ZRLE 模式启用客户端请求驱动流控（H264 保持服务端推送路径不变）
+            _flowControlEnabled = (codec == CodecId.Zrle);
+            _clientRequestPending = false;
             Logger.Info("ServerStreamSession {0} starting with codec {1}", sessionId, codec);
 
             // Create encoder — H264 是唯一支持的编码方式，不再回退到原始像素
@@ -381,6 +402,26 @@ namespace EasyRDP.Server.Wpf
             while (!_stopping)
             {
                 encodeLoopIter++;
+
+                // 阶段三：客户端请求驱动流控（仅 ZRLE 模式）。
+                // 客户端渲染完一帧才发 FramebufferUpdateRequest，服务端等请求才编码，
+                // 帧率由客户端消费能力决定，避免客户端解码/渲染积压导致延迟膨胀。
+                // 首帧（_framesEncoded==0）跳过等待直接推送：客户端在收到首帧前无帧可渲染、
+                // 不会发请求，若等待将造成永久黑屏（握手成功后客户端等首帧、服务端等请求）。
+                if (_flowControlEnabled && !_clientRequestPending
+                    && Interlocked.Read(ref _framesEncoded) > 0)
+                {
+                    lock (_lock)
+                    {
+                        // 带超时保活：客户端崩溃/断开后不永远等待，1s 超时跳过本帧
+                        if (!_clientRequestPending && !_stopping)
+                            Monitor.Wait(_lock, 1000);
+                    }
+                    if (_stopping) break;
+                    if (!_clientRequestPending) continue;  // 超时无请求：保底 ~1 FPS
+                }
+                _clientRequestPending = false;
+
                 CapturedFrame frame;
                 lock (_lock)
                 {
@@ -410,8 +451,9 @@ namespace EasyRDP.Server.Wpf
                     Logger.Info("Session {0}: EncodeLoop iter={1} dequeued frame res={2}x{3} bgraLen={4}",
                         _sessionId, encodeLoopIter, frame.Width, frame.Height, frame.Pixels.Length);
 
-                // Throttle（D11 自适应帧率 + D12 全局负载：负载每级额外 +10ms 帧间隔）
-                int effectiveDelay = FrameDelayMs + _globalLoadLevel * 10;
+                // Throttle（D11 自适应帧率 + D12 全局负载：负载每级额外 +10ms 帧间隔）。
+                // 流控模式下客户端请求本身已限速（请求到达后才编码），跳过节流避免双重延迟。
+                int effectiveDelay = _flowControlEnabled ? 0 : FrameDelayMs + _globalLoadLevel * 10;
                 if (effectiveDelay > 0)
                 {
                     long now = Stopwatch.GetTimestamp();
@@ -462,6 +504,8 @@ namespace EasyRDP.Server.Wpf
                 long encodeStart = Stopwatch.GetTimestamp();
                 EncodedFrame result;
                 byte[] pixelsToEncode = null;
+                // ZRLE 模式标志：try 块外声明（try 内赋值、try 外 Commit 判断均需使用）
+                bool isZrle = false;
                 try
                 {
                     pixelsToEncode = frame.Pixels;
@@ -478,8 +522,14 @@ namespace EasyRDP.Server.Wpf
                     //   完全相同才跳过；
                     // - BlockHashDirtyRect 模式：32×32 块哈希对比，变化块数≤阈值时也跳过，
                     //   避免光标残影/局部闪烁触发整帧 H.264 重编码（150-250ms）。
+                    // - ZRLE 模式：编码器内部自己做 64×64 瓦片对比，跳过外部检测
+                    //   避免双重变化检测（节省 3-5ms/帧），始终返回 ShouldEncode=true，
+                    //   由 ZrleEncoder 内部决定实际编码哪些瓦片。
                     // Detect 内部缓存计算结果，编码成功后由 Commit() 提升为参考帧。
-                    var changeResult = _changeDetector.Detect(pixelsToEncode, _lastW, _lastH);
+                    isZrle = _encoder != null && _encoder.Codec == CodecId.Zrle;
+                    var changeResult = isZrle
+                        ? new FrameChangeResult { ShouldEncode = true }
+                        : _changeDetector.Detect(pixelsToEncode, _lastW, _lastH);
                     if (!changeResult.ShouldEncode && _framesSkipped < KeepaliveFrameInterval)
                     {
                         // 内容无变化且未达到保活阈值：跳过编码节省 H.264 150-250ms
@@ -542,7 +592,12 @@ namespace EasyRDP.Server.Wpf
                 // 不会重新访问 pixelsToEncode）。必须在释放缓冲所有权之前调用，
                 // 因为 BlockHashDirtyRect 模式的 _pendingHashes 已在 Detect 时算好，
                 // 而 FullFrameMemcmp 模式的 _pendingPixels 也已在 Detect 时拷贝完成。
-                _changeDetector.Commit();
+                // ZRLE 模式：编码器内部自管参考帧（Encode 成功后已更新），外部 Commit 无意义，
+                // 且 Detect 未被调用（_pendingHashes==null），Commit 本身是空操作，跳过即可。
+                if (!isZrle)
+                {
+                    _changeDetector.Commit();
+                }
                 _framesSkipped = 0;
 
                 // 拷贝完成后像素缓冲不再被引用，释放所有权供下一帧截屏复用
@@ -732,6 +787,28 @@ namespace EasyRDP.Server.Wpf
         // FullFrameChangeDetector，通过 IFrameChangeDetector 抽象注入本类。
         // BlockHashDirtyRect 模式另提供 32×32 块哈希检测，由 ChangeDetectorFactory 按
         // ServerSettings.ChangeDetectionMode 创建。两种模式可在运行时切换。
+
+        /// <summary>
+        /// 更新鼠标按下状态（阶段二：ZRLE CopyRect 触发条件）。
+        /// 由 TransportHost 在收到 MouseDown/MouseUp 输入事件时调用；
+        /// 编码线程在 Encode 前读取，仅鼠标按下时启用 CopyRect 搜索。
+        /// </summary>
+        public void SetMouseButtonDown(bool isDown)
+        {
+            _mouseButtonDown = isDown;
+            var zrle = _encoder as ZrleEncoder;
+            if (zrle != null) zrle.SetMouseButtonDown(isDown);
+        }
+
+        /// <summary>
+        /// 处理客户端帧请求（阶段三流控）：置请求标志并唤醒编码线程。
+        /// 由 TransportHost 在收到 FramebufferUpdateRequest 消息时调用（接收线程）。
+        /// </summary>
+        public void OnFramebufferUpdateRequest()
+        {
+            _clientRequestPending = true;
+            lock (_lock) { Monitor.Pulse(_lock); }
+        }
 
         /// <summary>触发一次 FatalError（不可恢复故障，TransportHost 据此断开会话）。</summary>
         private void RaiseFatal(string message)

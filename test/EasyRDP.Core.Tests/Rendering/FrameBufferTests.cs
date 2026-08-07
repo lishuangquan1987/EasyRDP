@@ -213,5 +213,56 @@ namespace EasyRDP.Core.Tests.Rendering
             Assert.True(produced > 0);
             Assert.True(consumed > 0);
         }
+
+        [Fact]
+        public void CommitFrame_WithDirtyRects_BorrowReturnsSameRects()
+        {
+            var fb = new FrameBuffer();
+            int size = 16;
+            var rects = new ScreenRect[]
+            {
+                new ScreenRect { X = 64, Y = 0, Width = 64, Height = 64 }
+            };
+
+            fb.BorrowWriteBuffer(size);
+            Assert.True(fb.CommitFrame(192, 128, rects));
+
+            ReadFrameRef frame;
+            Assert.True(fb.TryBorrowReadFrame(out frame));
+            Assert.NotNull(frame.DirtyRects);
+            Assert.Equal(1, frame.DirtyRects.Length);
+            Assert.Equal(64, frame.DirtyRects[0].X);
+            Assert.Equal(0, frame.DirtyRects[0].Y);
+            fb.ReleaseReadFrame();
+        }
+
+        [Fact]
+        public void CommitFrame_WithoutDirtyRects_BorrowReturnsNull()
+        {
+            var fb = new FrameBuffer();
+            fb.BorrowWriteBuffer(16);
+            fb.CommitFrame(192, 128);  // 无 dirtyRects 重载 → null
+
+            ReadFrameRef frame;
+            Assert.True(fb.TryBorrowReadFrame(out frame));
+            Assert.Null(frame.DirtyRects);
+            fb.ReleaseReadFrame();
+        }
+
+        [Fact]
+        public void Reset_ClearsDirtyRects()
+        {
+            var fb = new FrameBuffer();
+            fb.BorrowWriteBuffer(16);
+            fb.CommitFrame(192, 128, new ScreenRect[0]);
+
+            fb.Reset();
+            fb.BorrowWriteBuffer(16);
+            fb.CommitFrame(192, 128);
+            ReadFrameRef frame;
+            fb.TryBorrowReadFrame(out frame);
+            Assert.Null(frame.DirtyRects);
+            fb.ReleaseReadFrame();
+        }
     }
 }

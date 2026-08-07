@@ -22,6 +22,8 @@ namespace EasyRDP.Core.Protocol
         ImageClipboardData  = 0x0C,
         /// <summary>图片剪贴板传输完成：接收方可设置 CF_DIB。</summary>
         ImageClipboardEnd   = 0x0D,
-        VideoFrame      = 0x50
+        VideoFrame      = 0x50,
+        /// <summary>客户端请求下一帧（流控）：服务端收到后编码发送一帧（ZRLE 模式）。</summary>
+        FramebufferUpdateRequest = 0x51
     }
 }

@@ -161,7 +161,8 @@ namespace EasyRDP.Core.Transport
                 || type == (byte)Protocol.MessageType.ImageClipboardStart
                 || type == (byte)Protocol.MessageType.ImageClipboardData
                 || type == (byte)Protocol.MessageType.ImageClipboardEnd
-                || type == (byte)Protocol.MessageType.VideoFrame;
+                || type == (byte)Protocol.MessageType.VideoFrame
+                || type == (byte)Protocol.MessageType.FramebufferUpdateRequest;
         }
     }
 }

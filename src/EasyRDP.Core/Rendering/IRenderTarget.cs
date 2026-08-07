@@ -12,6 +12,13 @@ namespace EasyRDP.Core.Rendering
         /// <summary>渲染一帧 BGRA32 像素到平台渲染目标。</summary>
         void RenderFrame(byte[] bgraPixels, int w, int h);
 
+        /// <summary>
+        /// 渲染一帧 BGRA32 像素（带脏矩形，局部更新）。
+        /// 仅更新 dirtyRects 指定的矩形区域；dirtyRects 为 null（H264 整帧）时
+        /// 回退到全帧渲染；空数组（ZRLE 无变化帧）表示画面无变化，可跳过渲染。
+        /// </summary>
+        void RenderFrame(byte[] bgraPixels, int w, int h, ScreenRect[] dirtyRects);
+
         /// <summary>更新光标状态。光标与视频帧在不同渲染层，无同步问题。</summary>
         void UpdateCursor(CursorInfo cursor);
 

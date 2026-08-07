@@ -237,5 +237,23 @@ namespace EasyRDP.Core.Tests.Transport
             System.Buffer.BlockCopy(data, offset, result, 0, length);
             return result;
         }
+
+        [Fact]
+        public void FramebufferUpdateRequest_EmptyPayload_ShouldDeliver()
+        {
+            // 阶段三：客户端流控请求（空 payload 单分片）。
+            // 验证 FramingBuffer 消息类型白名单接受该类型（否则被当流失步丢弃）。
+            byte[] wire = BuildSingleFragmentWire((byte)MessageType.FramebufferUpdateRequest, new byte[0]);
+
+            var framing = new FramingBuffer();
+            var received = new List<byte[]>();
+            framing.FragmentReady += d => received.Add(d);
+
+            framing.Feed(wire, 0, wire.Length);
+
+            Assert.Single(received);
+            Assert.Equal(16, received[0].Length);  // 仅帧头，无 payload 数据
+            Assert.Equal((byte)MessageType.FramebufferUpdateRequest, received[0][1]);
+        }
     }
 }
