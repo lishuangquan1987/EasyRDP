@@ -44,6 +44,19 @@ public partial class App : Application
         }
     }
 
+    /// <summary>DPI 查询原生调用（GetDeviceCaps 在 XP 可用）。</summary>
+    private static class NativeMethods
+    {
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        public static extern IntPtr GetDC(IntPtr hWnd);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        public static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+
+        [System.Runtime.InteropServices.DllImport("gdi32.dll")]
+        public static extern int GetDeviceCaps(IntPtr hdc, int nIndex);
+    }
+
     /// <summary>
     /// 服务端进程级未处理异常捕获 — 主要是为了在 EncodeFrame 等原生调用
     /// 触发 AccessViolation 时能记录崩溃前最后的日志，便于定位根因。
@@ -60,6 +73,29 @@ public partial class App : Application
         Logger.Info("EasyRDP Server starting, processId={0}, bitness={1}",
             System.Diagnostics.Process.GetCurrentProcess().Id,
             IntPtr.Size == 8 ? "x64" : "x86");
+        // 启动版本标识：程序集版本 + exe 构建时间 + 修复特征常量。
+        // 部署后从日志首行即可确认二进制版本（排查"现象依旧=旧构建"问题）。
+        Logger.Info("=== EasyRDP Server version: {0} flowControlFix={1} ===",
+            EasyRDP.Core.Diagnostics.BuildInfo.Describe(),
+            EasyRDP.Core.Diagnostics.BuildInfo.FlowControlFixVersion);
+        // 系统 DPI 日志：GetDeviceCaps(LOGPIXELSX)。若服务端 win10 为 150% 缩放
+        // 而截图/SetCursorPos 有逻辑/物理不一致，会造成输入坐标偏移（排查用）。
+        try
+        {
+            IntPtr hdc = NativeMethods.GetDC(IntPtr.Zero);
+            if (hdc != IntPtr.Zero)
+            {
+                int dpiX = NativeMethods.GetDeviceCaps(hdc, 88); // LOGPIXELSX
+                int dpiY = NativeMethods.GetDeviceCaps(hdc, 90); // LOGPIXELSY
+                NativeMethods.ReleaseDC(IntPtr.Zero, hdc);
+                Logger.Info("System DPI: {0}x{1} (scale {2:F2}x{3:F2})",
+                    dpiX, dpiY, dpiX / 96.0, dpiY / 96.0);
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn(ex, "GetDeviceCaps DPI query failed");
+        }
         base.OnStartup(e);
     }
 

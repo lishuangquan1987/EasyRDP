@@ -165,8 +165,6 @@
                      正确扣除内部黑边；事件绑在 Image 上坐标恒落在 [0,ImageW]x[0,ImageH]。 -->
                 <Image x:Name="RenderImage" Source="{Binding RenderBitmap}" Stretch="Uniform"
                        HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
-                       Width="{Binding ActualWidth, ElementName=RenderBorder}"
-                       Height="{Binding ActualHeight, ElementName=RenderBorder}"
                        RenderOptions.BitmapScalingMode="Fant"
                        MouseMove="RenderImage_MouseMove"
                        PreviewMouseDown="RenderImage_PreviewMouseDown"

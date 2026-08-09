@@ -28,6 +28,11 @@ public partial class App : Application
         Logger.Info("EasyRDP Client starting, processId={0}, bitness={1}",
             System.Diagnostics.Process.GetCurrentProcess().Id,
             IntPtr.Size == 8 ? "x64" : "x86");
+        // 启动版本标识：程序集版本 + exe 构建时间 + 修复特征常量。
+        // 部署后从日志首行即可确认二进制版本（排查"现象依旧=旧构建"问题）。
+        Logger.Info("=== EasyRDP Client version: {0} requestPayloadFix={1} ===",
+            EasyRDP.Core.Diagnostics.BuildInfo.Describe(),
+            EasyRDP.Core.Diagnostics.BuildInfo.RequestPayloadFixVersion);
         base.OnStartup(e);
     }
 

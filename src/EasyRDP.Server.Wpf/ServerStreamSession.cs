@@ -108,6 +108,8 @@ namespace EasyRDP.Server.Wpf
         // _flowControlEnabled：本会话是否启用流控（Start 时按 codec 设置，ZRLE 启用）。
         private volatile bool _clientRequestPending;
         private volatile bool _flowControlEnabled;
+        /// <summary>OnFramebufferUpdateRequest 诊断日志计数器（每 100 次请求打印一次）。</summary>
+        private int _frameReqDiagCounter;
 
         // Threads
         private Thread _encodeThread;
@@ -418,9 +420,12 @@ namespace EasyRDP.Server.Wpf
                 if (_flowControlEnabled && !_clientRequestPending
                     && Interlocked.Read(ref _framesEncoded) > 0)
                 {
-                    Logger.Debug("Session {0}: EncodeLoop iter={1} flow-wait begin, pending={2} framesEncoded={3} queueCount={4}",
-                        _sessionId, encodeLoopIter, _clientRequestPending,
-                        Interlocked.Read(ref _framesEncoded), GetFrameQueueCount());
+                    // 高频诊断日志降频：仅首帧/每 100 帧打印（每帧落盘 IO 会拖慢编码线程导致卡顿）
+                    bool diagThisIter = (encodeLoopIter <= 1 || encodeLoopIter % 100 == 0);
+                    if (diagThisIter)
+                        Logger.Debug("Session {0}: EncodeLoop iter={1} flow-wait begin, pending={2} framesEncoded={3} queueCount={4}",
+                            _sessionId, encodeLoopIter, _clientRequestPending,
+                            Interlocked.Read(ref _framesEncoded), GetFrameQueueCount());
                     var waitSw = System.Diagnostics.Stopwatch.StartNew();
                     lock (_lock)
                     {
@@ -430,8 +435,9 @@ namespace EasyRDP.Server.Wpf
                     }
                     waitSw.Stop();
                     if (_stopping) break;
-                    Logger.Debug("Session {0}: EncodeLoop iter={1} flow-wait end, pending={2} waitMs={3}",
-                        _sessionId, encodeLoopIter, _clientRequestPending, waitSw.ElapsedMilliseconds);
+                    if (diagThisIter)
+                        Logger.Debug("Session {0}: EncodeLoop iter={1} flow-wait end, pending={2} waitMs={3}",
+                            _sessionId, encodeLoopIter, _clientRequestPending, waitSw.ElapsedMilliseconds);
                     // 超时（_clientRequestPending==false）：不 continue，继续执行取帧编码逻辑，
                     // 实现保底 ~1 FPS。注意：原 `continue` 会跳过取帧回到循环顶部再次 Wait ——
                     // 队列中已积压的帧永远不会被编码（纯空转），必须继续取帧。
@@ -505,8 +511,10 @@ namespace EasyRDP.Server.Wpf
                 // 会重新驱动请求，避免失败重试风暴（_consecutiveEncodeFailures 已兜底断连）。
                 if (_flowControlEnabled)
                 {
-                    Logger.Debug("Session {0}: EncodeLoop iter={1} consume request, pending={2}->false",
-                        _sessionId, encodeLoopIter, _clientRequestPending);
+                    // 降频：每 100 帧打印（避免每帧落盘 IO 拖慢编码线程）
+                    if (encodeLoopIter <= 1 || encodeLoopIter % 100 == 0)
+                        Logger.Debug("Session {0}: EncodeLoop iter={1} consume request, pending={2}->false",
+                            _sessionId, encodeLoopIter, _clientRequestPending);
                     lock (_lock) { _clientRequestPending = false; }
                 }
 
@@ -870,11 +878,11 @@ namespace EasyRDP.Server.Wpf
         /// </summary>
         public void OnFramebufferUpdateRequest()
         {
-            // 诊断日志：记录请求到达时的流控状态（线程 ID + 编码进度 + 当前 pending）。
-            // 若此日志高频出现而 flow-wait end 未见/超时，说明接收线程处理延迟或脉冲丢失。
-            Logger.Debug("Session {0}: OnFramebufferUpdateRequest: pending={1}->true framesEncoded={2} threadId={3}",
-                _sessionId, _clientRequestPending, Interlocked.Read(ref _framesEncoded),
-                System.Threading.Thread.CurrentThread.ManagedThreadId);
+            // 降频诊断：每 100 次请求打印一次（每请求落盘 IO 会拖慢接收线程）
+            if ((++_frameReqDiagCounter % 100) == 0)
+                Logger.Debug("Session {0}: OnFramebufferUpdateRequest: pending={1}->true framesEncoded={2} threadId={3}",
+                    _sessionId, _clientRequestPending, Interlocked.Read(ref _framesEncoded),
+                    System.Threading.Thread.CurrentThread.ManagedThreadId);
             // 与编码线程的请求消费写（EncodeLoop 内同 _lock）在同一锁内，
             // 消除"置 true / 置 false"交错覆盖窗口（volatile 仅保证可见性）。
             lock (_lock)

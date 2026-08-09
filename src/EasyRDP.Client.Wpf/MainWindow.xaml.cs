@@ -72,6 +72,10 @@ public partial class MainWindow : Window
         InitializeComponent();
         // 窗口句柄创建后挂接原生消息钩子（处理 WM_GETMINMAXINFO 实现真正的全屏）
         SourceInitialized += OnSourceInitialized;
+        // 鼠标偏移修复：Image 必须撑满 RenderBorder（实测 XAML Width/Height 绑定
+        // 与 Alignment=Stretch 均不生效——Image 仍按内容 16:9 单方向自适应，
+        // 产生黑框区导致映射偏移）。改为 SizeChanged 时代码强制赋值尺寸。
+        RenderBorder.SizeChanged += OnRenderBorderSizeChanged;
         _vm = new MainWindowViewModel();
         DataContext = _vm;
         // PasswordBox 不支持绑定 Password（安全设计），初始值在 XAML 构造后同步一次，
@@ -513,6 +517,21 @@ public partial class MainWindow : Window
             Logger.Warn(ex, "Cleanup aly update client failed");
         }
         base.OnClosing(e);
+    }
+
+    /// <summary>
+    /// RenderBorder 尺寸变化时强制 Image 尺寸与之一致（消除黑框区）。
+    /// XAML 绑定/Alignment=Stretch 均不生效（实测 Image 仍按内容 16:9 自适应），
+    /// 必须代码赋值。画面（bitmap）在 Image 内 Uniform 居中留边，
+    /// MapCoordinates 按服务端宽高比正确扣除内部黑边。
+    /// </summary>
+    private void OnRenderBorderSizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        if (RenderBorder.ActualWidth > 0 && RenderBorder.ActualHeight > 0)
+        {
+            RenderImage.Width = RenderBorder.ActualWidth;
+            RenderImage.Height = RenderBorder.ActualHeight;
+        }
     }
 
     /// <summary>将鼠标事件路由到 ViewModel。</summary>
