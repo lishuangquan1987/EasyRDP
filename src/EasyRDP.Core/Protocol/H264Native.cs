@@ -523,6 +523,7 @@ namespace EasyRDP.Core.Protocol
         }
 
         internal const int ENCODER_OPTION_DATAFORMAT = 0;   // SetOption: tell encoder input color format
+        internal const int ENCODER_OPTION_BITRATE = 5;      // SetOption: 运行时调整目标码率（int bps），无需重建编码器
 
         // ====== 编码器 VTable 槽位映射（ISVCEncoder 接口，无虚析构函数） ======
         // OpenH264 2.6.0 实际接口声明顺序（openh264/codec/api/svc/codec_api.h，

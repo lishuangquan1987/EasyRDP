@@ -30,6 +30,8 @@ namespace EasyRDP.Client.Wpf
         // 避免 CursorUpdate/Clipboard 等控制消息被解码阻塞（否则鼠标回显延迟随解码耗时增长）。
         private Thread _decodeThread;
         private long _frameCount;
+        // 已接收视频帧压缩数据总字节（诊断码率统计用，Interlocked 累加）
+        private long _receivedBytes;
         private int _decodeFailures;
         // 握手竞态修复：服务端先启动视频流再发 HandshakeRes，客户端若在收到响应后才订阅
         // 数据事件，首帧/首个关键帧（seq=0）会丢失，解码器只能等下一个 IDR（最长约 1 秒黑屏）。
@@ -52,6 +54,16 @@ namespace EasyRDP.Client.Wpf
         private readonly object _decodeLock = new object();
         private VideoFrameMessage _pendingDecodeFrame;
         private int _decodeFrameDrops;
+
+        // 最近一次 RTT 测量值（毫秒）。由接收线程在 Keepalive 回显到达时写入，
+        // 诊断/流控线程读取；volatile 保证可见性。未测到为 -1。
+        private volatile int _lastRttMs = -1;
+
+        /// <summary>最近一次 Keepalive 往返时延（毫秒），-1 表示尚未测到。</summary>
+        public int LastRttMs { get { return _lastRttMs; } }
+
+        /// <summary>收到服务端诊断信息时触发（接收线程）。供连接详情面板展示。</summary>
+        public event Action<DiagnosticInfoMessage> DiagnosticInfoReceived;
 
         /// <summary>服务端分辨率变化事件（解码线程触发，用于同步客户端坐标映射与显示尺寸）。</summary>
         public event Action<int, int> ResolutionChanged;
@@ -76,6 +88,15 @@ namespace EasyRDP.Client.Wpf
         public int FrameHeight { get { return _frameBuffer != null ? _frameBuffer.Height : 0; } }
         /// <summary>Gets the total number of frames received and processed.</summary>
         public long FrameCount { get { return _frameCount; } }
+
+        /// <summary>已接收视频帧压缩数据总字节（码率统计数据源）。</summary>
+        public long ReceivedBytes { get { return Interlocked.Read(ref _receivedBytes); } }
+
+        /// <summary>传输层丢帧率（0~1，来自 MessageReassembler 统计）。</summary>
+        public double PacketLossRate
+        {
+            get { return _reassembler != null ? _reassembler.PacketLossRate : 0.0; }
+        }
 
         /// <summary>Gets or sets the render target where decoded frames are displayed.</summary>
         public IRenderTarget RenderTarget
@@ -388,6 +409,34 @@ namespace EasyRDP.Client.Wpf
             else if (e.MessageType == (byte)MessageType.ImageClipboardEnd)
             {
                 HandleImageClipboardEnd(e.Data);
+            }
+            else if (e.MessageType == (byte)MessageType.Keepalive)
+            {
+                // RTT 测量：客户端发出的 Keepalive 携带发送时刻时间戳（8 字节 UtcNow.Ticks），
+                // 服务端原样回显。收到即计算往返时延。服务端自身 30s 心跳探测的
+                // 空 payload Keepalive 不在此列（长度 < 8 直接忽略）。
+                if (e.Data != null && e.Data.Length >= 8)
+                {
+                    long sentTicks = BitConverter.ToInt64(e.Data, 0);
+                    long rttTicks = DateTime.UtcNow.Ticks - sentTicks;
+                    if (rttTicks >= 0)
+                        _lastRttMs = (int)(rttTicks / TimeSpan.TicksPerMillisecond);
+                }
+            }
+            else if (e.MessageType == (byte)MessageType.DiagnosticInfo)
+            {
+                // 连接详情面板：服务端响应 DiagnosticInfoRequest，携带系统信息。
+                try
+                {
+                    DiagnosticInfoMessage diag = DiagnosticInfoMessage.Unpack(e.Data);
+                    Action<DiagnosticInfoMessage> handler = DiagnosticInfoReceived;
+                    if (handler != null)
+                        handler(diag);
+                }
+                catch (Exception ex)
+                {
+                    Logger.Warn(ex, "DiagnosticInfo unpack failed");
+                }
             }
         }
 
@@ -783,6 +832,7 @@ namespace EasyRDP.Client.Wpf
 
             _frameBuffer.CommitFrame(msg.Width, msg.Height, dirtyRects);
             Interlocked.Increment(ref _frameCount);
+            Interlocked.Add(ref _receivedBytes, msg.Data != null ? msg.Data.Length : 0);
 
             if (_frameCount == 1)
                 Logger.Info("FIRST frame decoded: seq={0} size={1}x{2} keyframe={3} dataLen={4}",

@@ -24,6 +24,9 @@ namespace EasyRDP.Core.Session
         /// <summary>Gets the number of frames currently waiting in the send queue.</summary>
         int PendingFrames { get; }
 
+        /// <summary>Gets the sliding-window average encode time in milliseconds (for D12 global load and diagnostics).</summary>
+        double AvgEncodeMs { get; }
+
         /// <summary>Starts the stream session. Begins encoding screen captures and sending them over the transport.</summary>
         void Start(uint sessionId, CodecId codec);
         /// <summary>Stops the session, terminates encode/send threads, and disposes the encoder.</summary>

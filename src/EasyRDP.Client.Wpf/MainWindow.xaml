@@ -141,6 +141,9 @@
                     <Button Content="Local Test" Style="{StaticResource LightButtonStyle}"
                             Command="{Binding StartTestCommand}"
                             ToolTip="在本地运行渲染测试，验证管线是否正常"/>
+                    <Button Content="Details" Style="{StaticResource LightButtonStyle}"
+                            Command="{Binding ToggleDetailsCommand}" Margin="0,0,6,0"
+                            ToolTip="显示/隐藏连接详情面板（网络诊断 / 连接详情 / 系统性能）"/>
                 </StackPanel>
             </Grid>
         </Border>
@@ -186,6 +189,102 @@
                          Fill="#E6FFFFFF" Stroke="#FFFF3B30" StrokeThickness="1.5"
                          HorizontalAlignment="Left" VerticalAlignment="Top"
                          IsHitTestVisible="False" Visibility="Collapsed"/>
+
+                <!-- 连接详情面板（ToDesk 风格）：网络诊断 / 连接详情 / 系统性能。
+                     悬浮于桌面显示区右上角，工具栏 Details 按钮切换。
+                     不参与命中测试（IsHitTestVisible=False），不干扰鼠标转发。 -->
+                <Border x:Name="DetailsPanel"
+                        HorizontalAlignment="Right" VerticalAlignment="Top"
+                        Margin="0,8,8,0" Width="380" Padding="14,10"
+                        Background="#F21B1B1F" CornerRadius="6"
+                        IsHitTestVisible="False"
+                        Visibility="{Binding IsDetailsPanelVisible, Converter={StaticResource BoolToVis}}">
+                    <StackPanel>
+                        <!-- ═══ 网络诊断 ═══ -->
+                        <TextBlock Text="网络诊断" Foreground="{StaticResource AccentBrush}"
+                                   FontSize="13" FontWeight="Bold" Margin="0,0,0,6"/>
+                        <Grid Margin="0,0,0,10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="80"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/>
+                            </Grid.RowDefinitions>
+                            <TextBlock Grid.Row="0" Grid.Column="0" Text="连接时间" Foreground="#B0FFFFFF" FontSize="12"/>
+                            <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding ConnectionDurationText}" Foreground="White" FontSize="12"/>
+                            <TextBlock Grid.Row="1" Grid.Column="0" Text="速率" Foreground="#B0FFFFFF" FontSize="12"/>
+                            <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding ReceiveRateText}" Foreground="White" FontSize="12"/>
+                            <TextBlock Grid.Row="2" Grid.Column="0" Text="帧率" Foreground="#B0FFFFFF" FontSize="12"/>
+                            <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding FrameRateText}" Foreground="White" FontSize="12"/>
+                            <TextBlock Grid.Row="3" Grid.Column="0" Text="延时" Foreground="#B0FFFFFF" FontSize="12"/>
+                            <TextBlock Grid.Row="3" Grid.Column="1" Text="{Binding RttText}" Foreground="White" FontSize="12"/>
+                            <TextBlock Grid.Row="4" Grid.Column="0" Text="丢包" Foreground="#B0FFFFFF" FontSize="12"/>
+                            <TextBlock Grid.Row="4" Grid.Column="1" Text="{Binding LossRateText}" Foreground="White" FontSize="12"/>
+                        </Grid>
+
+                        <!-- ═══ 连接详情 ═══ -->
+                        <TextBlock Text="连接详情" Foreground="{StaticResource AccentBrush}"
+                                   FontSize="13" FontWeight="Bold" Margin="0,0,0,6"/>
+                        <Grid Margin="0,0,0,10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="80"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/>
+                            </Grid.RowDefinitions>
+                            <TextBlock Grid.Row="0" Grid.Column="0" Text="编解码器" Foreground="#B0FFFFFF" FontSize="12"/>
+                            <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding CodecDetailText}" Foreground="White" FontSize="12" TextWrapping="Wrap"/>
+                            <TextBlock Grid.Row="1" Grid.Column="0" Text="采集方式" Foreground="#B0FFFFFF" FontSize="12"/>
+                            <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding CaptureMethodText}" Foreground="White" FontSize="12"/>
+                            <TextBlock Grid.Row="2" Grid.Column="0" Text="色度采样" Foreground="#B0FFFFFF" FontSize="12"/>
+                            <TextBlock Grid.Row="2" Grid.Column="1" Text="4:2:0 (I420)" Foreground="White" FontSize="12"/>
+                            <TextBlock Grid.Row="3" Grid.Column="0" Text="分辨率&amp;缩放" Foreground="#B0FFFFFF" FontSize="12"/>
+                            <TextBlock Grid.Row="3" Grid.Column="1" Text="{Binding RemoteResolutionText}" Foreground="White" FontSize="12" TextWrapping="Wrap"/>
+                            <TextBlock Grid.Row="4" Grid.Column="0" Text="画面呈现" Foreground="#B0FFFFFF" FontSize="12"/>
+                            <TextBlock Grid.Row="4" Grid.Column="1" Text="自动缩放 (Uniform)" Foreground="White" FontSize="12"/>
+                        </Grid>
+
+                        <!-- ═══ 系统性能 ═══ -->
+                        <TextBlock Text="系统性能" Foreground="{StaticResource AccentBrush}"
+                                   FontSize="13" FontWeight="Bold" Margin="0,0,0,6"/>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="56"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/>
+                            </Grid.RowDefinitions>
+                            <TextBlock Grid.Row="0" Grid.Column="0" Text="CPU" Foreground="#B0FFFFFF" FontSize="12"/>
+                            <StackPanel Grid.Row="0" Grid.Column="1">
+                                <TextBlock Text="{Binding LocalCpuText}" Foreground="White" FontSize="12" TextWrapping="Wrap" TextTrimming="CharacterEllipsis"/>
+                                <TextBlock Text="{Binding RemoteCpuText}" Foreground="#B0FFFFFF" FontSize="12" TextWrapping="Wrap" TextTrimming="CharacterEllipsis"/>
+                            </StackPanel>
+                            <TextBlock Grid.Row="1" Grid.Column="0" Text="GPU" Foreground="#B0FFFFFF" FontSize="12"/>
+                            <StackPanel Grid.Row="1" Grid.Column="1">
+                                <TextBlock Text="{Binding LocalGpuText}" Foreground="White" FontSize="12" TextWrapping="Wrap" TextTrimming="CharacterEllipsis"/>
+                                <TextBlock Text="{Binding RemoteGpuText}" Foreground="#B0FFFFFF" FontSize="12" TextWrapping="Wrap" TextTrimming="CharacterEllipsis"/>
+                            </StackPanel>
+                            <TextBlock Grid.Row="2" Grid.Column="0" Text="内存" Foreground="#B0FFFFFF" FontSize="12"/>
+                            <StackPanel Grid.Row="2" Grid.Column="1">
+                                <TextBlock Text="{Binding LocalMemoryText}" Foreground="White" FontSize="12"/>
+                                <TextBlock Text="{Binding RemoteMemoryText}" Foreground="#B0FFFFFF" FontSize="12"/>
+                            </StackPanel>
+                            <TextBlock Grid.Row="3" Grid.Column="0" Text="系统" Foreground="#B0FFFFFF" FontSize="12"/>
+                            <StackPanel Grid.Row="3" Grid.Column="1">
+                                <TextBlock Text="{Binding LocalOsText}" Foreground="White" FontSize="12"/>
+                                <TextBlock Text="{Binding RemoteOsText}" Foreground="#B0FFFFFF" FontSize="12"/>
+                            </StackPanel>
+                            <TextBlock Grid.Row="4" Grid.Column="0" Text="主被控" Foreground="#B0FFFFFF" FontSize="12"/>
+                            <StackPanel Grid.Row="4" Grid.Column="1">
+                                <TextBlock Text="本机（本地）" Foreground="White" FontSize="12"/>
+                                <TextBlock Text="远端（远程）" Foreground="#B0FFFFFF" FontSize="12"/>
+                            </StackPanel>
+                        </Grid>
+                    </StackPanel>
+                </Border>
 
                 <!-- 文件剪贴板传输进度条：叠加在桌面显示区顶部 -->
                 <Border HorizontalAlignment="Center" VerticalAlignment="Top"

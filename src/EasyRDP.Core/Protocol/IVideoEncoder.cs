@@ -27,6 +27,12 @@ namespace EasyRDP.Core.Protocol
         EncodedFrame Encode(byte[] pixels, bool forceKeyframe);
 
         /// <summary>
+        /// 运行时调整目标码率（bps）。实现应尽量不重建编码器（避免丢参考帧/强制关键帧）；
+        /// 无码率概念的编码器（如无损 ZRLE）应空实现。供 D11 自适应流控使用。
+        /// </summary>
+        void SetTargetBitrate(int bitrateBps);
+
+        /// <summary>
         /// 重置编码器内部状态（丢包恢复、分辨率变更）。
         /// Reset 后须重新 Initialize 才可编码。
         /// </summary>

@@ -74,6 +74,28 @@ namespace EasyRDP.Client.Wpf
         private string _lastClipboardFilesSig = "";
         // 上次图片剪贴板签名（CF_DIB 字节数 + 前 32 字节哈希），用于检测变化 + 防回环
         private string _lastClipboardImageSig = "";
+
+        // ── 连接详情面板（ToDesk 风格，每秒刷新）──
+        private bool _isDetailsPanelVisible;
+        private DateTime _connectStartTime;
+        private long _lastReceivedBytes;        // 码率差分基准
+        private string _connectionDurationText = "—";
+        private string _receiveRateText = "—";
+        private string _rttText = "—";
+        private string _lossRateText = "—";
+        private string _captureMethodText = "—";
+        private string _remoteResolutionText = "—";
+        private string _codecDetailText = "—";
+        // 本地系统信息（连接前即展示，一次性获取）
+        private readonly string _localCpuText;
+        private readonly string _localGpuText;
+        private readonly string _localMemoryText;
+        private readonly string _localOsText;
+        // 远端系统信息文本（来自 DiagnosticInfo，未收到前为 "—"）
+        private string _remoteCpuText = "—";
+        private string _remoteGpuText = "—";
+        private string _remoteMemoryText = "—";
+        private string _remoteOsText = "—";
         // 客户端文件/图片传输 ID 自增（每次剪贴板同步递增）
         private int _fileTransferIdSeq;
         // 图片块大小（64KB）：与服务端一致
@@ -113,6 +135,14 @@ namespace EasyRDP.Client.Wpf
             CheckUpdateCommand = new RelayCommand(CheckUpdate,
                 () => AlyClientStatus == AlyClientStatus.DiscoveredUpdate
                     || AlyClientStatus == AlyClientStatus.DownloadedUpdate);
+            ToggleDetailsCommand = new RelayCommand(ToggleDetailsPanel);
+
+            // 本地系统信息（连接详情面板"系统性能"本地列，一次性获取）
+            _localCpuText = GetLocalCpuText();
+            _localGpuText = GetLocalGpuName();
+            _localMemoryText = GetLocalMemoryText();
+            _localOsText = Environment.OSVersion.VersionString
+                + (Environment.Is64BitOperatingSystem ? " (x64)" : " (x86)");
 
             // 启动时恢复已保存的多服务器配置
             _profileStore = new ConnectionProfileStore();
@@ -454,6 +484,61 @@ namespace EasyRDP.Client.Wpf
             get { return _frameRate > 0 ? string.Format("{0} FPS", _frameRate) : "—"; }
         }
 
+        /// <summary>最近一次服务端诊断信息（连接详情面板数据源）。连接前/未收到时为 null。</summary>
+        public DiagnosticInfoMessage? ServerDiagnosticInfo
+        {
+            get { return _serverDiagnosticInfo; }
+            private set { _serverDiagnosticInfo = value; OnPropertyChanged(nameof(ServerDiagnosticInfo)); }
+        }
+        private DiagnosticInfoMessage? _serverDiagnosticInfo;
+
+        /// <summary>最近一次 Keepalive RTT（毫秒），-1 表示未测到。</summary>
+        public int LastRttMs
+        {
+            get { return _streamSession != null ? _streamSession.LastRttMs : -1; }
+        }
+
+        // ── 连接详情面板绑定属性 ──
+
+        /// <summary>详情面板是否可见（工具栏 Details 按钮切换）。</summary>
+        public bool IsDetailsPanelVisible
+        {
+            get { return _isDetailsPanelVisible; }
+            set { _isDetailsPanelVisible = value; OnPropertyChanged(nameof(IsDetailsPanelVisible)); }
+        }
+
+        /// <summary>连接时长文本（如 "00:01:55"）。</summary>
+        public string ConnectionDurationText { get { return _connectionDurationText; } }
+        /// <summary>接收码率（KB/s）。</summary>
+        public string ReceiveRateText { get { return _receiveRateText; } }
+        /// <summary>往返时延（ms）。</summary>
+        public string RttText { get { return _rttText; } }
+        /// <summary>丢帧率百分比。</summary>
+        public string LossRateText { get { return _lossRateText; } }
+        /// <summary>远端采集方式名（DXGI / BitBlt）。</summary>
+        public string CaptureMethodText { get { return _captureMethodText; } }
+        /// <summary>远端分辨率文本（含缩放，如 "2240×1400 (150%)"）。</summary>
+        public string RemoteResolutionText { get { return _remoteResolutionText; } }
+        /// <summary>编解码器详情（如 "H.264 / 软编·软解"）。</summary>
+        public string CodecDetailText { get { return _codecDetailText; } }
+
+        /// <summary>本地 CPU 信息。</summary>
+        public string LocalCpuText { get { return _localCpuText; } }
+        /// <summary>本地 GPU 名称。</summary>
+        public string LocalGpuText { get { return _localGpuText; } }
+        /// <summary>本地物理内存。</summary>
+        public string LocalMemoryText { get { return _localMemoryText; } }
+        /// <summary>本地操作系统版本。</summary>
+        public string LocalOsText { get { return _localOsText; } }
+        /// <summary>远端 CPU 信息。</summary>
+        public string RemoteCpuText { get { return _remoteCpuText; } }
+        /// <summary>远端 GPU 名称。</summary>
+        public string RemoteGpuText { get { return _remoteGpuText; } }
+        /// <summary>远端物理内存。</summary>
+        public string RemoteMemoryText { get { return _remoteMemoryText; } }
+        /// <summary>远端操作系统版本。</summary>
+        public string RemoteOsText { get { return _remoteOsText; } }
+
         /// <summary>远程光标更新事件（接收线程触发，订阅者需 marshal 到 UI 线程）。
         /// 光标形状数据是 Windows AND/XOR 掩码格式（来自 EasyDesk WindowsCursorCapturer）。</summary>
         public event Action<CursorInfo>? RemoteCursorChanged;
@@ -498,6 +583,8 @@ namespace EasyRDP.Client.Wpf
         public RelayCommand LockCommand { get; }
         public RelayCommand AltTabCommand { get; }
         public RelayCommand ResetKeysCommand { get; }
+        /// <summary>切换连接详情面板可见性。</summary>
+        public RelayCommand ToggleDetailsCommand { get; }
 
         // ====== 多服务器配置管理 ======
 
@@ -744,6 +831,13 @@ namespace EasyRDP.Client.Wpf
                 handshakeRes.Codec, handshakeRes.ScreenWidth, handshakeRes.ScreenHeight);
             _running = true;
             IsConnected = true;
+            // 订阅服务端诊断信息（连接详情面板数据源），并立即发送请求。
+            // 服务端响应异步到达，面板刷新定时器读取 ServerDiagnosticInfo。
+            _streamSession.DiagnosticInfoReceived += OnDiagnosticInfoReceived;
+            SendDiagnosticInfoRequest();
+            // 连接详情面板统计基准：连接起点 + 码率差分归零
+            _connectStartTime = DateTime.UtcNow;
+            _lastReceivedBytes = 0;
             // 回放握手期间缓冲的初始光标状态（含形状位图）：此时光标事件已挂接、IsConnected 已置位，
             // MainWindow 能正常渲染远程光标，否则客户端只更新位置、永远没有光标位图可显示。
             _streamSession?.FlushPendingCursor();
@@ -774,6 +868,7 @@ namespace EasyRDP.Client.Wpf
                     FrameRate = (int)(current - lastFrameCount);
                     lastFrameCount = current;
                 }
+                RefreshDiagnostics();
             };
             _fpsTimer.Start();
 
@@ -824,8 +919,11 @@ namespace EasyRDP.Client.Wpf
                 if (transport == null || !_running) return;
                 try
                 {
-                    // Keepalive 消息 payload 为空，仅用于刷新服务端 _lastActivity
-                    MessageReassembler.FragAndSend(0, (byte)MessageType.Keepalive, new byte[0],
+                    // Keepalive payload 携带发送时刻时间戳（UtcNow.Ticks，8 字节）。
+                    // 服务端收到后原样回显 payload，客户端据此测量 RTT；
+                    // 同时刷新服务端 _lastActivity 保持连接活跃。
+                    byte[] payload = BitConverter.GetBytes(DateTime.UtcNow.Ticks);
+                    MessageReassembler.FragAndSend(0, (byte)MessageType.Keepalive, payload,
                         (sid, data) => transport.Send(data), 0);
                 }
                 catch (Exception ex)
@@ -839,6 +937,182 @@ namespace EasyRDP.Client.Wpf
                 handshakeRes.ScreenWidth, handshakeRes.ScreenHeight);
             UpdateCommandState();
         }
+
+        /// <summary>
+        /// 发送诊断信息请求（空 payload）。服务端收到后回发 DiagnosticInfo。
+        /// </summary>
+        private void SendDiagnosticInfoRequest()
+        {
+            var transport = _transport;
+            if (transport == null || !_running) return;
+            try
+            {
+                MessageReassembler.FragAndSend(0, (byte)MessageType.DiagnosticInfoRequest, new byte[0],
+                    (sid, data) => transport.Send(data), 0);
+                Logger.Debug("DiagnosticInfoRequest sent");
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn(ex, "DiagnosticInfoRequest send failed");
+            }
+        }
+
+        /// <summary>接收线程回调：服务端诊断信息到达时保存（供连接详情面板绑定）。</summary>
+        private void OnDiagnosticInfoReceived(DiagnosticInfoMessage info)
+        {
+            // 引用赋值原子，接收线程写、UI 线程读无需锁
+            ServerDiagnosticInfo = info;
+            Logger.Info("DiagnosticInfo received: cpu={0} gpu={1} memMB={2} os={3}",
+                info.CpuName, info.GpuName, info.TotalMemoryMb, info.OsVersion);
+        }
+
+        /// <summary>切换连接详情面板可见性。</summary>
+        private void ToggleDetailsPanel()
+        {
+            IsDetailsPanelVisible = !IsDetailsPanelVisible;
+        }
+
+        /// <summary>
+        /// 每秒刷新连接详情面板数据（复用 FPS DispatcherTimer 的 Tick）。
+        /// 网络诊断：连接时长/码率/RTT/丢帧率；连接详情：采集方式/分辨率/编解码器；
+        /// 系统性能：本地（构造时缓存）+ 远端（DiagnosticInfo 到达后）。
+        /// </summary>
+        private void RefreshDiagnostics()
+        {
+            var session = _streamSession;
+            if (session == null)
+            {
+                _connectionDurationText = "—";
+                _receiveRateText = "—";
+                OnPropertyChanged(nameof(ConnectionDurationText));
+                OnPropertyChanged(nameof(ReceiveRateText));
+                return;
+            }
+
+            // 连接时长
+            _connectionDurationText = FormatDuration(DateTime.UtcNow - _connectStartTime);
+
+            // 码率：接收字节差分 / 秒
+            long bytes = session.ReceivedBytes;
+            long delta = bytes - _lastReceivedBytes;
+            _lastReceivedBytes = bytes;
+            if (delta > 0)
+                _receiveRateText = string.Format("{0:F1} KB/s", delta / 1024.0);
+            else if (bytes > 0)
+                _receiveRateText = "0.0 KB/s";
+
+            // RTT / 丢帧率
+            _rttText = session.LastRttMs >= 0 ? session.LastRttMs + " ms" : "—";
+            _lossRateText = string.Format("{0:P1}", session.PacketLossRate);
+
+            // 连接详情：编解码器（CodecName 如 "ZRLE"，补 "软编·软解" 说明）
+            _codecDetailText = CodecName + " / 软编·软解";
+
+            // 远端系统信息（DiagnosticInfo 到达后填充）
+            var diag = ServerDiagnosticInfo;
+            if (diag != null)
+            {
+                _captureMethodText = diag.CaptureMethod == 1 ? "DXGI" : "BitBlt";
+                _remoteResolutionText = string.Format("{0}×{1} Scale {2}%",
+                    diag.ScreenWidth, diag.ScreenHeight, diag.ScaleFactorX100);
+                _remoteCpuText = string.IsNullOrEmpty(diag.CpuName) ? "—"
+                    : diag.CpuName + " (" + diag.CpuCores + " cores)";
+                _remoteGpuText = string.IsNullOrEmpty(diag.GpuName) ? "—" : diag.GpuName;
+                _remoteMemoryText = diag.TotalMemoryMb > 0
+                    ? string.Format("{0:F1} GB", diag.TotalMemoryMb / 1024.0) : "—";
+                _remoteOsText = string.IsNullOrEmpty(diag.OsVersion) ? "—" : diag.OsVersion;
+            }
+
+            OnPropertyChanged(nameof(ConnectionDurationText));
+            OnPropertyChanged(nameof(ReceiveRateText));
+            OnPropertyChanged(nameof(RttText));
+            OnPropertyChanged(nameof(LossRateText));
+            OnPropertyChanged(nameof(CaptureMethodText));
+            OnPropertyChanged(nameof(RemoteResolutionText));
+            OnPropertyChanged(nameof(CodecDetailText));
+            OnPropertyChanged(nameof(RemoteCpuText));
+            OnPropertyChanged(nameof(RemoteGpuText));
+            OnPropertyChanged(nameof(RemoteMemoryText));
+            OnPropertyChanged(nameof(RemoteOsText));
+        }
+
+        /// <summary>格式化为 "HH:MM:SS"（超 1 小时）或 "MM:SS"。</summary>
+        private static string FormatDuration(TimeSpan ts)
+        {
+            return ts.TotalHours >= 1
+                ? string.Format("{0:00}:{1:00}:{2:00}", (int)ts.TotalHours, ts.Minutes, ts.Seconds)
+                : string.Format("{0:00}:{1:00}", ts.Minutes, ts.Seconds);
+        }
+
+        /// <summary>本地 CPU 描述：型号标识 + 核心数。</summary>
+        private static string GetLocalCpuText()
+        {
+            try
+            {
+                string id = Environment.GetEnvironmentVariable("PROCESSOR_IDENTIFIER");
+                if (!string.IsNullOrEmpty(id))
+                    return id + " (" + Environment.ProcessorCount + " cores)";
+            }
+            catch { }
+            return Environment.ProcessorCount + " cores";
+        }
+
+        /// <summary>本地物理内存描述（GlobalMemoryStatusEx）。</summary>
+        private static string GetLocalMemoryText()
+        {
+            try
+            {
+                var status = new MEMORYSTATUSEX();
+                status.dwLength = (uint)System.Runtime.InteropServices.Marshal.SizeOf(typeof(MEMORYSTATUSEX));
+                if (GlobalMemoryStatusEx(ref status))
+                    return string.Format("{0:F1} GB", status.ullTotalPhys / (1024.0 * 1024.0 * 1024.0));
+            }
+            catch { }
+            return "—";
+        }
+
+        /// <summary>本地 GPU 名称（显示类驱动注册表 DriverDesc）。</summary>
+        private static string GetLocalGpuName()
+        {
+            try
+            {
+                const string displayClass = @"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}";
+                using (var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(displayClass))
+                {
+                    if (key == null) return "—";
+                    for (int i = 0; i <= 9; i++)
+                    {
+                        using (var sub = key.OpenSubKey(i.ToString("D4")))
+                        {
+                            if (sub == null) continue;
+                            string desc = sub.GetValue("DriverDesc") as string;
+                            if (!string.IsNullOrEmpty(desc))
+                                return desc;
+                        }
+                    }
+                }
+            }
+            catch { }
+            return "—";
+        }
+
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        private struct MEMORYSTATUSEX
+        {
+            public uint dwLength;
+            public uint dwMemoryLoad;
+            public ulong ullTotalPhys;
+            public ulong ullAvailPhys;
+            public ulong ullTotalPageFile;
+            public ulong ullAvailPageFile;
+            public ulong ullTotalVirtual;
+            public ulong ullAvailVirtual;
+            public ulong ullAvailExtendedVirtual;
+        }
+
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+        [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+        private static extern bool GlobalMemoryStatusEx(ref MEMORYSTATUSEX lpBuffer);
 
         /// <summary>
         /// 发送剪贴板同步消息到服务端。文本通过 FragAndSend 分片发送，

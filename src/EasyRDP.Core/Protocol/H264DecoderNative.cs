@@ -196,7 +196,7 @@ namespace EasyRDP.Core.Protocol
                 var outHandle = GCHandle.Alloc(outputBuffer, GCHandleType.Pinned);
                 try
                 {
-                    ConvertI420ToBgra(
+                    ColorConverter.I420ToBgra(
                         bufInfo.pDst0, bufInfo.pDst1, bufInfo.pDst2,
                         yStride, uvStride,
                         w, h,
@@ -274,117 +274,6 @@ namespace EasyRDP.Core.Protocol
                 H264Native.WelsDestroyDecoder(_decoder);
                 _decoder = IntPtr.Zero;
             }
-        }
-
-        /// <summary>
-        /// I420 (YUV 4:2:0) → BGRA32 颜色空间转换。
-        /// I420 布局：Y plane = yStride × height，U/V plane = uvStride × (height/2)。
-        /// 每 2×2 像素块共享 1 个 U 和 1 个 V 值。
-        /// 使用 BT.601 limited range 转换公式（与服务端 ConvertBgraToI420 的 +16 偏移匹配）：
-        ///   R = clamp((298*(Y-16) + 409*(V-128)) >> 8)
-        ///   G = clamp((298*(Y-16) - 100*(U-128) - 208*(V-128)) >> 8)
-        ///   B = clamp((298*(Y-16) + 517*(U-128)) >> 8)
-        /// 若误用 full range 公式（无 -16 偏移），白色 Y=235 → R=235（浅灰），
-        /// 黑色 Y=16 → R=16（深灰），对比度从 255:0 降到 235:16 → "白屏看不清"。
-        /// </summary>
-        private static unsafe void ConvertI420ToBgra(
-            IntPtr yPlaneAddr, IntPtr uPlaneAddr, IntPtr vPlaneAddr,
-            int yStride, int uvStride,
-            int width, int height,
-            IntPtr bgraAddr, int bgraStride)
-        {
-            byte* yPlane = (byte*)yPlaneAddr;
-            byte* uPlane = (byte*)uPlaneAddr;
-            byte* vPlane = (byte*)vPlaneAddr;
-            byte* bgra = (byte*)bgraAddr;
-
-            // 按 2×2 块处理（I420 是 4:2:0，每 4 个 Y 共享 1 个 U 和 1 个 V）
-            int hBlocks = height >> 1;
-            int wBlocks = width >> 1;
-
-            for (int by = 0; by < hBlocks; by++)
-            {
-                int yRow0 = (by * 2) * yStride;
-                int yRow1 = ((by * 2) + 1) * yStride;
-                int uvRow = by * uvStride;
-                int bgraRow0 = (by * 2) * bgraStride;
-                int bgraRow1 = ((by * 2) + 1) * bgraStride;
-
-                for (int bx = 0; bx < wBlocks; bx++)
-                {
-                    int x0 = bx * 2;
-                    int x1 = x0 + 1;
-                    int uvIdx = uvRow + bx;
-
-                    int u = uPlane[uvIdx] - 128;
-                    int v = vPlane[uvIdx] - 128;
-
-                    // BT.601 limited range 整数系数（乘 256）
-                    int rv = 409 * v;          // R 增量：1.596*(V-128)
-                    int gu = -100 * u;         // G 增量（U 部分）：-0.391*(U-128)
-                    int gv = -208 * v;         // G 增量（V 部分）：-0.813*(V-128)
-                    int bu = 517 * u;          // B 增量：2.018*(U-128)
-
-                    // 4 个像素：左上、右上、左下、右下
-                    int y0 = yPlane[yRow0 + x0];
-                    WriteBgraPixel(bgra + bgraRow0 + x0 * 4, y0, rv, gu + gv, bu);
-
-                    int y1 = yPlane[yRow0 + x1];
-                    WriteBgraPixel(bgra + bgraRow0 + x1 * 4, y1, rv, gu + gv, bu);
-
-                    int y2 = yPlane[yRow1 + x0];
-                    WriteBgraPixel(bgra + bgraRow1 + x0 * 4, y2, rv, gu + gv, bu);
-
-                    int y3 = yPlane[yRow1 + x1];
-                    WriteBgraPixel(bgra + bgraRow1 + x1 * 4, y3, rv, gu + gv, bu);
-                }
-            }
-
-            // 处理奇数行/列（如果 width 或 height 是奇数）
-            if ((width & 1) != 0)
-            {
-                int x = width - 1;
-                for (int y = 0; y < height; y++)
-                {
-                    int uvY = y >> 1;
-                    int u = uPlane[uvY * uvStride + (x >> 1)] - 128;
-                    int v = vPlane[uvY * uvStride + (x >> 1)] - 128;
-                    int yVal = yPlane[y * yStride + x];
-                    WriteBgraPixel(bgra + y * bgraStride + x * 4, yVal, 409 * v, -100 * u - 208 * v, 517 * u);
-                }
-            }
-            if ((height & 1) != 0)
-            {
-                int yRow = (height - 1) * yStride;
-                int bgraRow = (height - 1) * bgraStride;
-                for (int x = 0; x < width; x++)
-                {
-                    int u = uPlane[((height - 1) >> 1) * uvStride + (x >> 1)] - 128;
-                    int v = vPlane[((height - 1) >> 1) * uvStride + (x >> 1)] - 128;
-                    int yVal = yPlane[yRow + x];
-                    WriteBgraPixel(bgra + bgraRow + x * 4, yVal, 409 * v, -100 * u - 208 * v, 517 * u);
-                }
-            }
-        }
-
-        /// <summary>写入单个 BGRA 像素（带 clamp）。使用 BT.601 limited range 整数公式。
-        /// Y 先减 16（limited range 偏移），再乘 298（1.164×256）做范围扩展。
-        /// 必须先 &gt;&gt; 8 再 clamp，否则 yScaled 溢出 &gt; 255 → 全白。</summary>
-        private static unsafe void WriteBgraPixel(byte* p, int y, int rv, int gv, int bu)
-        {
-            // limited range: Y-16，乘 298（1.164*256）做范围扩展到 0-255
-            int yScaled = (y - 16) * 298;
-            int r = (yScaled + rv) >> 8;
-            int g = (yScaled + gv) >> 8;
-            int b = (yScaled + bu) >> 8;
-            // Clamp 0-255
-            if (r < 0) r = 0; else if (r > 255) r = 255;
-            if (g < 0) g = 0; else if (g > 255) g = 255;
-            if (b < 0) b = 0; else if (b > 255) b = 255;
-            p[0] = (byte)b;   // B
-            p[1] = (byte)g;   // G
-            p[2] = (byte)r;   // R
-            p[3] = 255;       // A
         }
     }
 }

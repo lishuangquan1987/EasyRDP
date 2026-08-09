@@ -31,9 +31,9 @@ namespace EasyRDP.Core.Tests
             Assert.True(enc.IsAvailable);
             enc.Initialize(w, h, 12000000);
 
-            // 反射调用私有 ConvertBgraToI420
-            var mi = typeof(H264EncoderNative).GetMethod("ConvertBgraToI420",
-                BindingFlags.NonPublic | BindingFlags.Static);
+            // 颜色转换已抽为 ColorConverter 公共方法（H264/VP8 共享）
+            var mi = typeof(ColorConverter).GetMethod("BgraToI420",
+                BindingFlags.Public | BindingFlags.Static);
 
             int ySize = w * h;
             int uvSize = ((w + 1) / 2) * ((h + 1) / 2);
@@ -90,8 +90,8 @@ namespace EasyRDP.Core.Tests
             rand.NextBytes(bgra);
             for (int i = 3; i < bgra.Length; i += 4) bgra[i] = 255;
 
-            var mi = typeof(H264EncoderNative).GetMethod("ConvertBgraToI420",
-                BindingFlags.NonPublic | BindingFlags.Static);
+            var mi = typeof(ColorConverter).GetMethod("BgraToI420",
+                BindingFlags.Public | BindingFlags.Static);
 
             int ySize = w * h;
             int uvSize = ((w + 1) / 2) * ((h + 1) / 2);

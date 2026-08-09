@@ -35,6 +35,7 @@ namespace EasyRDP.Core.Transport
         // 协议级诊断计数器（与分流无关，统计所有分片）
         private int _fragCountRejectCount;
         private int _fragIdxRejectCount;
+        private int _crcErrorCount;
 
         /// <summary>完整消息组装完成事件。</summary>
         public event EventHandler<MessageReceivedEventArgs> MessageReceived;
@@ -129,6 +130,7 @@ namespace EasyRDP.Core.Transport
             ushort actualCrc = ComputeCrc16(data, pos, fragDataLen);
             if (actualCrc != expectedCrc)
             {
+                _crcErrorCount++;
                 Logger.Warn("CRC16 mismatch on frameId={0} fragIdx={1}/{2} — fragment discarded",
                     frameId, fragIdx, fragCount);
                 return; // Corrupted fragment — discard
@@ -152,6 +154,60 @@ namespace EasyRDP.Core.Transport
             state.ProcessFragment(frag.SessionId, messageType, frameId, fragIdx, fragCount,
                 totalPayloadLen, data, pos, fragDataLen, MessageReceived);
         }
+
+        #region 诊断统计（只读，供连接详情面板/自适应流控使用）
+
+        /// <summary>fragCount 非法被拒绝的分片数（DoS 防护）。</summary>
+        public int FragCountRejectCount { get { return _fragCountRejectCount; } }
+
+        /// <summary>fragIdx 越界被拒绝的分片数。</summary>
+        public int FragIdxRejectCount { get { return _fragIdxRejectCount; } }
+
+        /// <summary>CRC16 校验失败被丢弃的分片数（真实损坏/传输错误）。</summary>
+        public int CrcErrorCount { get { return _crcErrorCount; } }
+
+        /// <summary>成功组装的完整消息帧数（所有流汇总）。</summary>
+        public long TotalFramesCompleted
+        {
+            get
+            {
+                long total = _realtimeState.CompletedFrameCount;
+                foreach (var kv in _controlStates)
+                    total += kv.Value.CompletedFrameCount;
+                return total;
+            }
+        }
+
+        /// <summary>被丢弃的帧数（stale 旧帧 + 重组超时重启 + 新帧冲刷未完成旧帧）。</summary>
+        public long TotalFramesDropped
+        {
+            get
+            {
+                long total = _realtimeState.DroppedFrameCount;
+                foreach (var kv in _controlStates)
+                    total += kv.Value.DroppedFrameCount;
+                return total;
+            }
+        }
+
+        /// <summary>
+        /// 丢帧率（0.0~1.0）：dropped / (completed + dropped)。
+        /// 用于自适应流控与诊断面板。诊断近似值——读取可能发生在其他线程，
+        /// 不保证与统计时刻完全一致，用于趋势判断足够。
+        /// </summary>
+        public double PacketLossRate
+        {
+            get
+            {
+                long completed = TotalFramesCompleted;
+                long dropped = TotalFramesDropped;
+                long total = completed + dropped;
+                if (total == 0) return 0.0;
+                return (double)dropped / total;
+            }
+        }
+
+        #endregion
 
         /// <summary>
         /// 把完整消息 payload 切分为分片并逐片发送。
@@ -313,6 +369,13 @@ namespace EasyRDP.Core.Transport
             // 诊断计数器：跟踪 stale 帧拒绝
             private int _staleFrameRejectCount;
 
+            // 帧级统计（供 MessageReassembler 汇总丢帧率）
+            private long _completedFrameCount;
+            private long _droppedFrameCount;
+
+            public long CompletedFrameCount { get { return _completedFrameCount; } }
+            public long DroppedFrameCount { get { return _droppedFrameCount; } }
+
             public FrameState(string tag)
             {
                 _tag = tag;
@@ -338,6 +401,7 @@ namespace EasyRDP.Core.Transport
                 else if (IsOlder(frameId, _currentFrameId))
                 {
                     _staleFrameRejectCount++;
+                    _droppedFrameCount++;
                     if (_staleFrameRejectCount <= 3 || _staleFrameRejectCount % 100 == 0)
                         Logger.Warn("[{0}] Stale fragment discarded: frameId={1} < current={2} fragIdx={3}/{4} (total stale={5})",
                             _tag, frameId, _currentFrameId, fragIdx, fragCount, _staleFrameRejectCount);
@@ -358,6 +422,7 @@ namespace EasyRDP.Core.Transport
                     Logger.Warn("[{0}] Reassembly timeout for frameId={1} after {2}ms (received {3}/{4} fragments)",
                         _tag, _currentFrameId, _reassemblyTimer.ElapsedMilliseconds,
                         _receivedFragCount, _expectedFragCount);
+                    _droppedFrameCount++;
                     StartNewFrame(frameId, messageType, totalPayloadLen, fragCount);
                 }
 
@@ -380,6 +445,10 @@ namespace EasyRDP.Core.Transport
 
             private void StartNewFrame(uint frameId, byte messageType, int totalPayloadLen, int fragCount)
             {
+                // 旧帧未收齐即被新帧/超时冲刷 = 丢帧（实时语义：丢旧帧优于延迟）。
+                // 注意首帧 _initialized==false 不误计；正常完成后 _frameCompleted==true 不误计。
+                if (_initialized && !_frameCompleted && _fragBuffers != null)
+                    _droppedFrameCount++;
                 _currentFrameId = frameId;
                 _initialized = true;
                 _frameCompleted = false;
@@ -426,6 +495,8 @@ namespace EasyRDP.Core.Transport
                         }
                     }
                 }
+
+                _completedFrameCount++;
 
                 // Capture fragCount before reset for logging
                 int fragCount = _expectedFragCount;

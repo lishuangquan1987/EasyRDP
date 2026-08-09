@@ -324,6 +324,12 @@ namespace EasyRDP.Core.Protocol
             _initialized = false;
         }
 
+        /// <summary>ZRLE 为无损编码，无码率概念——空实现（D11 接口统一）。</summary>
+        public void SetTargetBitrate(int bitrateBps)
+        {
+            // 无损编码不适用码率控制
+        }
+
         /// <summary>释放编码器资源。</summary>
         public void Dispose()
         {

@@ -168,6 +168,15 @@ namespace EasyRDP.Server.Wpf
         private volatile bool _running;
         private readonly Dictionary<uint, DateTime> _lastActivity = new Dictionary<uint, DateTime>();
 
+        // 诊断信息采集器（系统静态信息缓存）
+        private readonly EasyRDP.Server.Wpf.Services.SystemInfoCollector _systemInfoCollector
+            = new EasyRDP.Server.Wpf.Services.SystemInfoCollector();
+
+        // D12 全局负载：当前负载级（0=正常，1/2=过载）与升降级连续判定计数
+        private volatile int _globalLoadLevel;
+        private int _globalLoadHighStreak;
+        private int _globalLoadLowStreak;
+
         /// <summary>
         /// 获取或设置帧变化检测模式。新会话建立时按此值通过 ChangeDetectorFactory 创建
         /// IFrameChangeDetector 注入 ServerStreamSession。已建立的会话不受影响。
@@ -1084,6 +1093,30 @@ namespace EasyRDP.Server.Wpf
                     // （H264 未启用 _flowControlEnabled，EncodeLoop 不等待）。
                     info.Stream.OnFramebufferUpdateRequest();
                 }
+                else if (e.MessageType == (byte)MessageType.Keepalive)
+                {
+                    // RTT 测量：客户端 Keepalive payload 携带发送时刻时间戳（8 字节 UtcNow.Ticks），
+                    // 原样回显给该客户端，客户端收到后计算往返时延。空 payload（服务端自身
+                    // 心跳探测的回包路径不经过此处）直接忽略。TCP 下该消息极轻量（≤24 字节线格式）。
+                    if (e.Data != null && e.Data.Length >= 8)
+                    {
+                        MessageReassembler.SendSingleFragment(0, (byte)MessageType.Keepalive, e.Data,
+                            (s2, data) => _transportServer.SendTo(s2, data), e.SessionId);
+                    }
+                }
+                else if (e.MessageType == (byte)MessageType.DiagnosticInfoRequest)
+                {
+                    // 连接详情面板：客户端请求服务端系统信息，回发 DiagnosticInfo。
+                    // 采集一次缓存，不阻塞；失败静默（面板对应项显示未知）。
+                    try
+                    {
+                        SendDiagnosticInfo(e.SessionId);
+                    }
+                    catch (Exception diagEx)
+                    {
+                        Logger.Warn(diagEx, "SendDiagnosticInfo failed for session {0}", e.SessionId);
+                    }
+                }
             }
         }
 
@@ -1525,6 +1558,49 @@ namespace EasyRDP.Server.Wpf
             StopCaptureIfIdle();
         }
 
+        /// <summary>
+        /// 组装并回发服务端诊断信息（响应 DiagnosticInfoRequest）。
+        /// 屏幕尺寸/采集方式取当前实际值；编码器可用性通过 EncoderFactory 动态探测；
+        /// 系统静态信息（CPU/GPU/OS/内存）由 SystemInfoCollector 缓存。
+        /// </summary>
+        private void SendDiagnosticInfo(uint sessionId)
+        {
+            // 采集方式：仅当具体实现为 CaptureService 时才能取到（ICaptureService 接口无此属性）
+            byte captureMethod = 0;
+            CaptureService capture = _captureService as CaptureService;
+            if (capture != null)
+                captureMethod = capture.CaptureMethod;
+
+            int screenW = 0, screenH = 0;
+            try
+            {
+                EasyDesk.Core.Models.DesktopBounds primary = _captureService.GetPrimaryScreen();
+                screenW = primary.Width;
+                screenH = primary.Height;
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn(ex, "GetPrimaryScreen failed for diagnostics");
+            }
+
+            CodecCapabilities caps = EncoderFactory.GetAvailableCodecs();
+            bool h264 = (caps & CodecCapabilities.H264Software) != 0;
+            bool zrle = (caps & CodecCapabilities.Zrle) != 0;
+            bool vp8 = (caps & CodecCapabilities.Vp8Software) != 0;
+
+            DiagnosticInfoMessage msg = _systemInfoCollector.Collect(
+                captureMethod, screenW, screenH,
+                EasyRDP.Server.Wpf.Services.SystemInfoCollector.GetScaleFactorX100(),
+                h264, zrle, vp8);
+
+            byte[] payload = msg.Pack();
+            // 控制流单分片发送（消息很小，不切分）
+            MessageReassembler.SendSingleFragment(0, (byte)MessageType.DiagnosticInfo, payload,
+                (s2, data) => _transportServer.SendTo(s2, data), sessionId);
+            Logger.Info("DiagnosticInfo sent to session {0}: cpu={1} gpu={2} memMB={3} capture={4} scale={5}",
+                sessionId, msg.CpuName, msg.GpuName, msg.TotalMemoryMb, msg.CaptureMethod, msg.ScaleFactorX100);
+        }
+
         private void HeartbeatLoop()
         {
             while (_running)
@@ -1549,6 +1625,11 @@ namespace EasyRDP.Server.Wpf
                     }
                 }
 
+                // D12 全局负载自适应：统计所有活跃会话的平均编码耗时，
+                // 过载时对所有会话同步降级（ApplyGlobalLoadLevel 加帧间隔），
+                // 恢复后逐级回升。与 per-Session 的 D11 自适应叠加，取更保守设置。
+                UpdateGlobalLoadLevel();
+
                 // 锁外发送 keepalive：SendTo 是阻塞网络 I/O，慢客户端会冻结锁保护的所有会话管理。
                 foreach (var sid in keepaliveTargets)
                 {
@@ -1568,6 +1649,90 @@ namespace EasyRDP.Server.Wpf
                 {
                     Logger.Warn("Session {0} heartbeat timeout — disconnecting", sid);
                     DisconnectSession(sid);
+                }
+            }
+        }
+
+        /// <summary>
+        /// D12 全局负载感知：统计所有会话的平均编码耗时，决定全局负载级并下发。
+        /// 负载级 0=正常；1/2=过载（每级帧间隔 +10ms，由 ServerStreamSession 生效）。
+        /// 判定带滞后：连续 3 次超标才升一级、连续 3 次充裕才降一级，避免抖动。
+        /// </summary>
+        private void UpdateGlobalLoadLevel()
+        {
+            double sum = 0;
+            int count = 0;
+            lock (_lock)
+            {
+                foreach (var kv in _sessions)
+                {
+                    if (kv.Value.Stream != null && kv.Value.Stream.AvgEncodeMs > 0)
+                    {
+                        sum += kv.Value.Stream.AvgEncodeMs;
+                        count++;
+                    }
+                }
+            }
+            if (count == 0)
+            {
+                if (_globalLoadLevel != 0)
+                {
+                    _globalLoadLevel = 0;
+                    ApplyGlobalLoadLevelToSessions();
+                }
+                return;
+            }
+
+            double avgMs = sum / count;
+            // 过载：平均编码耗时超过目标帧周期（33ms≈30fps）
+            if (avgMs > 33)
+            {
+                _globalLoadHighStreak++;
+                _globalLoadLowStreak = 0;
+                if (_globalLoadHighStreak >= 3 && _globalLoadLevel < 2)
+                {
+                    _globalLoadHighStreak = 0;
+                    _globalLoadLevel++;
+                    Logger.Warn("D12: global encode load high ({0:F1}ms avg, {1} sessions) — load level {2}",
+                        avgMs, count, _globalLoadLevel);
+                    ApplyGlobalLoadLevelToSessions();
+                }
+            }
+            else if (avgMs < 20)
+            {
+                _globalLoadLowStreak++;
+                _globalLoadHighStreak = 0;
+                if (_globalLoadLowStreak >= 3 && _globalLoadLevel > 0)
+                {
+                    _globalLoadLowStreak = 0;
+                    _globalLoadLevel--;
+                    Logger.Info("D12: global encode load recovered ({0:F1}ms avg) — load level {1}",
+                        avgMs, _globalLoadLevel);
+                    ApplyGlobalLoadLevelToSessions();
+                }
+            }
+            else
+            {
+                _globalLoadHighStreak = 0;
+                _globalLoadLowStreak = 0;
+            }
+        }
+
+        private void ApplyGlobalLoadLevelToSessions()
+        {
+            lock (_lock)
+            {
+                foreach (var kv in _sessions)
+                {
+                    try
+                    {
+                        if (kv.Value.Stream != null)
+                            kv.Value.Stream.ApplyGlobalLoadLevel(_globalLoadLevel);
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Warn(ex, "ApplyGlobalLoadLevel failed for session {0}", kv.Key);
+                    }
                 }
             }
         }

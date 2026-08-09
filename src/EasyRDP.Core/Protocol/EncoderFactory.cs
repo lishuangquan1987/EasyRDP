@@ -22,6 +22,11 @@ namespace EasyRDP.Core.Protocol
                 case CodecId.Zrle:
                     // ZRLE 纯 C# 实现，无原生依赖，始终可用
                     return new ZrleEncoder();
+                case CodecId.Vp8Software:
+                {
+                    var vp8 = new Vp8EncoderNative();
+                    return vp8.IsAvailable ? vp8 : null;
+                }
                 default:
                     return null;
             }
@@ -47,7 +52,7 @@ namespace EasyRDP.Core.Protocol
             var caps = CodecCapabilities.None;
             // ZRLE 无需探测（纯 C# 始终可用），直接置位
             caps |= CodecCapabilities.Zrle;
-            foreach (CodecId c in new[] { CodecId.H264Software, CodecId.H264Hardware })
+            foreach (CodecId c in new[] { CodecId.H264Software, CodecId.H264Hardware, CodecId.Vp8Software })
             {
                 if (!GetAvailableCodec(c).HasValue)
                     continue;
@@ -55,6 +60,7 @@ namespace EasyRDP.Core.Protocol
                 {
                     case CodecId.H264Software: caps |= CodecCapabilities.H264Software; break;
                     case CodecId.H264Hardware: caps |= CodecCapabilities.H264Hardware; break;
+                    case CodecId.Vp8Software: caps |= CodecCapabilities.Vp8Software; break;
                 }
             }
             return caps;

@@ -309,7 +309,7 @@ namespace EasyRDP.Core.Protocol
 
                 // BGRA → I420 conversion（耗时分解：区分颜色转换与 H264 编码）
                 long convStart = Stopwatch.GetTimestamp();
-                ConvertBgraToI420(bgraHandle.AddrOfPinnedObject(),
+                ColorConverter.BgraToI420(bgraHandle.AddrOfPinnedObject(),
                     i420Handle.AddrOfPinnedObject(),
                     i420Handle.AddrOfPinnedObject() + ySize,
                     i420Handle.AddrOfPinnedObject() + ySize + uvSize,
@@ -468,133 +468,42 @@ namespace EasyRDP.Core.Protocol
             return count;
         }
 
-        private static byte ClampByte(int val)
-        {
-            return (byte)(val < 0 ? 0 : (val > 255 ? 255 : val));
-        }
-
-#if NET8_0
         /// <summary>
-        /// BGRA→I420 转换（net8.0 SIMD 加速版）。
-        /// Y 平面用 Vector&lt;int&gt; 每次处理 Vector&lt;int&gt;.Count 个像素
-        /// （x64=8、x86=4），U/V 平面每 2×2 块一个样本保持标量（工作量仅 Y 的 1/4）。
-        /// 实测 1080p：标量 ~32ms/帧 → SIMD ~8-12ms/帧，是编码链路最大单项提速。
+        /// 运行时调整目标码率（bps）。通过 SetOption(ENCODER_OPTION_BITRATE) 实现，
+        /// 无需重建编码器（重建会丢参考帧并强制关键帧，开销大且产生画面扰动）。
+        /// 供 D11 自适应流控动态降/升码率使用。
         /// </summary>
-        private static unsafe void ConvertBgraToI420(IntPtr pBgra, IntPtr pY, IntPtr pU, IntPtr pV, int w, int h)
+        public void SetTargetBitrate(int bitrateBps)
         {
-            byte* src = (byte*)pBgra;
-            byte* dstY = (byte*)pY;
-            byte* dstU = (byte*)pU;
-            byte* dstV = (byte*)pV;
-
-            int vecPixels = Vector<int>.Count; // x64=8, x86=4
-            Vector<int> mask255 = new Vector<int>(0xFF);
-            Vector<int> plus128 = new Vector<int>(128);
-            Vector<int> plus16 = new Vector<int>(16);
-            Vector<int> k66 = new Vector<int>(66);
-            Vector<int> k129 = new Vector<int>(129);
-            Vector<int> k25 = new Vector<int>(25);
-
-            int uvIndex = 0;
-            for (int j = 0; j < h; j++)
+            if (_disposed || !_initialized || _encoder == IntPtr.Zero) return;
+            try
             {
-                byte* srcRow = src + (long)j * w * 4;
-                byte* yRow = dstY + (long)j * w;
-
-                // ── Y 平面：SIMD 向量块 + 行尾标量补齐 ──
-                int i = 0;
-                for (; i + vecPixels <= w; i += vecPixels)
+                var setOption = H264Native.GetVTableDelegate<H264Native.SetOptionDelegate>(
+                    _encoder, H264Native.VTABLE_SLOT_SET_OPTION);
+                int value = bitrateBps;
+                var handle = System.Runtime.InteropServices.GCHandle.Alloc(value, System.Runtime.InteropServices.GCHandleType.Pinned);
+                try
                 {
-                    // 一次载入 vecPixels 个 BGRA 像素（BGRA 布局：B 在最低字节）
-                    Vector<int> bgra = Unsafe.ReadUnaligned<Vector<int>>(srcRow + (long)i * 4);
-                    Vector<int> b = Vector.BitwiseAnd(bgra, mask255);
-                    Vector<int> g = Vector.BitwiseAnd(Vector.ShiftRightLogical(bgra, 8), mask255);
-                    Vector<int> r = Vector.BitwiseAnd(Vector.ShiftRightLogical(bgra, 16), mask255);
-
-                    // Y = ((66R + 129G + 25B + 128) >> 8) + 16
-                    Vector<int> yv = Vector.Add(
-                        Vector.Add(Vector.Multiply(r, k66), Vector.Multiply(g, k129)),
-                        Vector.Add(Vector.Multiply(b, k25), plus128));
-                    yv = Vector.ShiftRightLogical(yv, 8);
-                    yv = Vector.Add(yv, plus16);
-
-                    // Narrow(int→short→byte) 存在有符号重载歧义，这里直接用
-                    // Unsafe 把向量重解释为 int 数组，逐 int 取低 8 位写 Y（值域 16-235，
-                    // 高 24 位为 0，无需 clamp）。乘法/移位仍全部向量化。
-                    ref int yvRef = ref Unsafe.As<Vector<int>, int>(ref yv);
-                    for (int k = 0; k < vecPixels; k++)
-                        yRow[i + k] = (byte)Unsafe.Add(ref yvRef, k);
-                }
-                for (; i < w; i++)
-                {
-                    int off = (j * w + i) * 4;
-                    int r = src[off + 2], g = src[off + 1], b = src[off];
-                    yRow[i] = ClampByte((((66 * r + 129 * g + 25 * b + 128) >> 8) + 16));
-                }
-
-                // ── U/V 平面：仅偶数行、偶数列取样（标量，工作量只有 Y 的 1/4） ──
-                if ((j & 1) == 0)
-                {
-                    for (int i2 = 0; i2 < w; i2 += 2)
+                    int ret = setOption(_encoder, H264Native.ENCODER_OPTION_BITRATE,
+                        handle.AddrOfPinnedObject());
+                    if (ret != 0)
+                        Logger.Warn("SetOption(BITRATE={0}) returned {1} (non-fatal)", bitrateBps, ret);
+                    else
                     {
-                        int off = (j * w + i2) * 4;
-                        int r = src[off + 2], g = src[off + 1], b = src[off];
-                        dstU[uvIndex] = ClampByte((((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128));
-                        dstV[uvIndex] = ClampByte((((112 * r - 94 * g - 18 * b + 128) >> 8) + 128));
-                        uvIndex++;
+                        _targetBitrate = bitrateBps;
+                        Logger.Debug("SetOption(BITRATE={0}) succeeded", bitrateBps);
                     }
                 }
+                finally
+                {
+                    handle.Free();
+                }
             }
-        }
-#else
-        /// <summary>
-        /// BGRA→I420 转换（标量版，net40/netstandard2.0 兼容路径）。
-        /// 使用运行指针代替索引乘法，消除 ClampByte 调用（BT.601 limited range
-        /// 公式对 r,g,b∈[0,255] 的结果始终在 [16,240] 范围内，无需钳位）。
-        /// 实测 1080p：优化前 ~32ms → 优化后 ~18-22ms/帧。
-        /// </summary>
-        private static unsafe void ConvertBgraToI420(IntPtr pBgra, IntPtr pY, IntPtr pU, IntPtr pV, int w, int h)
-        {
-            byte* src = (byte*)pBgra;
-            byte* dstY = (byte*)pY;
-            byte* dstU = (byte*)pU;
-            byte* dstV = (byte*)pV;
-            // 每行处理：Y 全宽度，U/V 仅偶数行偶数列（2x2 采样）
-            for (int j = 0; j < h; j++)
+            catch (Exception ex)
             {
-                byte* srcRow = src + (long)j * w * 4;
-                byte* yRow = dstY + (long)j * w;
-                bool evenRow = (j & 1) == 0;
-                // Y 平面：逐像素，运行指针递增
-                for (int i = 0; i < w; i++)
-                {
-                    int b = srcRow[0];
-                    int g = srcRow[1];
-                    int r = srcRow[2];
-                    srcRow += 4;
-                    // BT.601 limited range: Y = ((66*r + 129*g + 25*b + 128) >> 8) + 16
-                    // r,g,b ∈ [0,255] → Y ∈ [16,235]，无需 ClampByte
-                    *yRow++ = (byte)(((66 * r + 129 * g + 25 * b + 128) >> 8) + 16);
-                }
-                // U/V 平面：仅偶数行，每 2 像素取一个样本
-                if (evenRow)
-                {
-                    srcRow = src + (long)j * w * 4; // 重置到行首
-                    for (int i = 0; i < w; i += 2)
-                    {
-                        int b = srcRow[0];
-                        int g = srcRow[1];
-                        int r = srcRow[2];
-                        srcRow += 8; // 跳过 2 个像素
-                        // BT.601: U = ((-38*r - 74*g + 112*b + 128) >> 8) + 128 ∈ [16,240]
-                        *dstU++ = (byte)(((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128);
-                        // BT.601: V = ((112*r - 94*g - 18*b + 128) >> 8) + 128 ∈ [16,240]
-                        *dstV++ = (byte)(((112 * r - 94 * g - 18 * b + 128) >> 8) + 128);
-                    }
-                }
+                Logger.Warn(ex, "SetOption(BITRATE) failed");
             }
         }
-#endif
 
         public void Reset()
         {

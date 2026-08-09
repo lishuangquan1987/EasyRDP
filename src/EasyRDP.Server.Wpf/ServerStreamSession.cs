@@ -69,10 +69,33 @@ namespace EasyRDP.Server.Wpf
         private Queue<long> _encodeTimes = new Queue<long>();
         private long _encodeSum;
         private const int AdaptiveWindow = 30;
-        // 编码分辨率上限与 CaptureService.CaptureMaxWidth 共用同一常量。
-        // 0 = 不降分辨率（当前默认，用户明确要求全分辨率画面）；
-        // >0 时截屏直接按该尺寸 StretchBlt 缩放，编码器不再做第二遍软件缩放。
-        private const int MaxEncodeWidth = CaptureService.CaptureMaxWidth;
+        // 编码分辨率上限：0 = 不降分辨率（全分辨率）。>0 时编码线程按该宽度等比降采样。
+        // D11 运行时自适应调整：编码耗时持续超标降档（1920→1280→960→640），恢复后升档回全分辨率。
+        private volatile int _adaptiveMaxEncodeWidth;
+        // 分辨率档位自适应计数：降档/升档都需要连续多帧达到阈值才动作，避免抖动
+        private int _downscaleStreak;
+        private int _upscaleStreak;
+        private const int DownscaleStreakLimit = 10;  // 连续 10 帧编码耗时超标 → 降一档
+        private const int UpscaleStreakLimit = 60;    // 连续 60 帧编码耗时充裕 → 升一档
+        private const double DownscaleThresholdMs = 40.0;  // 编码耗时 > 40ms 视为超标
+        private const double UpscaleThresholdMs = 20.0;    // 编码耗时 < 20ms 视为充裕
+        // 码率档位（bps）：默认 15Mbps，发送瓶颈/高负载时逐级下调
+        private static readonly int[] BitrateSteps = new int[]
+        {
+            15000000,   // 15Mbps 默认
+            8000000,    // 8Mbps
+            4000000,    // 4Mbps
+            2000000     // 2Mbps
+        };
+        private int _bitrateStepIndex;
+        private int _sendQueueFullStreak;   // 发送队列连续满帧数（触发降码率信号）
+        private const int SendQueueFullStreakLimit = 30;
+        // 内容变化比例（0~1）：由变化检测结果/ZRLE 编码器统计，供自适应决策与诊断
+        private volatile float _contentChangeRatio = 1.0f;
+        // 滑动窗口平均编码耗时（ms，供 D12 全局负载统计与诊断面板）。
+        // 不可 volatile（C# 限制）；编码线程写、TransportHost 心跳线程读，
+        // double 非原子读写的撕裂对诊断统计无害（近似值足够）。
+        private double _avgEncodeMs;
 
         // D12 global load
         private volatile int _globalLoadLevel;
@@ -123,6 +146,12 @@ namespace EasyRDP.Server.Wpf
         public int TargetBitrate { get; set; }
         /// <summary>已发送帧数（线程安全读取，供 UI 会话列表展示）。</summary>
         public long FramesSent { get { return Interlocked.Read(ref _framesSent); } }
+
+        /// <summary>滑动窗口平均编码耗时（毫秒）。供 D12 全局负载统计与诊断。</summary>
+        public double AvgEncodeMs { get { return _avgEncodeMs; } }
+
+        /// <summary>当前内容变化比例（0~1，1=全屏变化）。供诊断与自适应决策。</summary>
+        public float ContentChangeRatio { get { return _contentChangeRatio; } }
         public int FrameQueueCapacity
         {
             get { lock (_lock) return _frameQueueCapacity; }
@@ -194,13 +223,14 @@ namespace EasyRDP.Server.Wpf
                 _contentW = bounds.Width;
                 _contentH = bounds.Height;
                 // 编码分辨率：主屏尺寸超出上限时等比降采样（内容坐标空间不变，仅提速）。
-                // OpenH264 I420 要求偶数宽高：向上取偶。
+                // OpenH264 I420 要求偶数宽高：向上取偶。上限由 D11 自适应维护（0=全分辨率）。
                 int encodeW = bounds.Width;
                 int encodeH = bounds.Height;
-                if (MaxEncodeWidth > 0 && encodeW > MaxEncodeWidth)
+                int maxEncodeW = _adaptiveMaxEncodeWidth;
+                if (maxEncodeW > 0 && encodeW > maxEncodeW)
                 {
-                    encodeH = Math.Max(1, (int)((long)encodeH * MaxEncodeWidth / encodeW));
-                    encodeW = MaxEncodeWidth;
+                    encodeH = Math.Max(1, (int)((long)encodeH * maxEncodeW / encodeW));
+                    encodeW = maxEncodeW;
                 }
                 _lastW = (encodeW + 1) & ~1;
                 _lastH = (encodeH + 1) & ~1;
@@ -550,12 +580,14 @@ namespace EasyRDP.Server.Wpf
                 }
 
                 // 编码分辨率计算 + 编码器重建
+                // 分辨率上限由 D11 自适应维护（_adaptiveMaxEncodeWidth，0=全分辨率）
                 int newEncodeW = _contentW;
                 int newEncodeH = _contentH;
-                if (MaxEncodeWidth > 0 && newEncodeW > MaxEncodeWidth)
+                int maxEncodeW = _adaptiveMaxEncodeWidth;
+                if (maxEncodeW > 0 && newEncodeW > maxEncodeW)
                 {
-                    newEncodeH = Math.Max(1, (int)((long)newEncodeH * MaxEncodeWidth / newEncodeW));
-                    newEncodeW = MaxEncodeWidth;
+                    newEncodeH = Math.Max(1, (int)((long)newEncodeH * maxEncodeW / newEncodeW));
+                    newEncodeW = maxEncodeW;
                 }
                 newEncodeW = (newEncodeW + 1) & ~1;
                 newEncodeH = (newEncodeH + 1) & ~1;
@@ -565,7 +597,9 @@ namespace EasyRDP.Server.Wpf
                     _changeDetector.Reset();
                     _framesSkipped = 0;
                 }
-                if (newEncodeW != _lastW || newEncodeH != _lastH)
+                // 编码尺寸变化（含 D11 分辨率档位调整）：需要重建编码器并强制关键帧
+                bool encodeSizeChanged = (newEncodeW != _lastW || newEncodeH != _lastH);
+                if (encodeSizeChanged)
                 {
                     _lastW = newEncodeW;
                     _lastH = newEncodeH;
@@ -603,6 +637,11 @@ namespace EasyRDP.Server.Wpf
                     var changeResult = isZrle
                         ? new FrameChangeResult { ShouldEncode = true }
                         : _changeDetector.Detect(pixelsToEncode, _lastW, _lastH);
+                    // 内容变化率统计（自适应信号 + 诊断面板数据源）：
+                    // H264 路径来自块级变化检测（BlockHashDirtyRect 模式）或
+                    // 全帧比较（FullFrameMemcmp 模式恒为 0/1）。
+                    if (!isZrle && changeResult.TotalBlockCount > 0)
+                        _contentChangeRatio = (float)changeResult.ChangedBlockCount / changeResult.TotalBlockCount;
                     if (!changeResult.ShouldEncode && _framesSkipped < KeepaliveFrameInterval)
                     {
                         // 内容无变化且未达到保活阈值：跳过编码节省 H.264 150-250ms
@@ -626,6 +665,7 @@ namespace EasyRDP.Server.Wpf
                     // 不在每次静态帧跳过后都强制——P 帧基于上一帧差分，
                     // 短暂跳过（几帧）不影响解码器参考帧有效性，避免大量大体积关键帧。
                     bool forceKey = resolutionChanged
+                        || encodeSizeChanged
                         || _framesSkipped >= 60
                         || (_sequenceNumber % KeyframeInterval == 0);
 
@@ -680,9 +720,22 @@ namespace EasyRDP.Server.Wpf
                     _sessionId, _sequenceNumber,
                     result.Data?.Length ?? 0, result.IsKeyframe, encodeMs);
 
-                // D11: track encode time and adapt frame rate
+                // D11: track encode time and adapt frame rate / resolution / bitrate
                 lock (_lock)
                 {
+                    // ZRLE 路径变化率：编码器内部做 64×64 瓦片对比，统计变化瓦片比例
+                    if (isZrle && _encoder is ZrleEncoder)
+                    {
+                        try
+                        {
+                            _contentChangeRatio = ((ZrleEncoder)_encoder).EstimateChangeRatio(pixelsToEncode);
+                        }
+                        catch
+                        {
+                            // 统计失败不影响主流程
+                        }
+                    }
+
                     _encodeTimes.Enqueue(encodeEnd - encodeStart);
                     _encodeSum += (encodeEnd - encodeStart);
                     if (_encodeTimes.Count > AdaptiveWindow)
@@ -692,11 +745,72 @@ namespace EasyRDP.Server.Wpf
                     if (_encodeTimes.Count >= AdaptiveWindow)
                     {
                         double avgMs = _encodeSum * 1000.0 / Stopwatch.Frequency / _encodeTimes.Count;
-                        // 编码跟不上（平均耗时 > 33ms）→ 降帧率；充裕（< 20ms）→ 逐步回升
+                        _avgEncodeMs = avgMs;
+
+                        // 帧率自适应（原有）：编码跟不上 → 降帧率；充裕 → 逐步回升
                         if (avgMs > 33)
                             FrameDelayMs = Math.Min(FrameDelayMs + 5, 120);
                         else if (avgMs < 20)
                             FrameDelayMs = Math.Max(FrameDelayMs - 5, 16);
+
+                        // 分辨率档位自适应：持续超标降档（弱机降像素量提速），
+                        // 持续充裕升档回全分辨率。档位变化触发编码器重建+强制关键帧。
+                        if (avgMs > DownscaleThresholdMs)
+                        {
+                            _downscaleStreak++;
+                            _upscaleStreak = 0;
+                        }
+                        else if (avgMs < UpscaleThresholdMs)
+                        {
+                            _upscaleStreak++;
+                            _downscaleStreak = 0;
+                        }
+                        else
+                        {
+                            _downscaleStreak = 0;
+                            _upscaleStreak = 0;
+                        }
+
+                        if (_downscaleStreak >= DownscaleStreakLimit)
+                        {
+                            _downscaleStreak = 0;
+                            int next = NextDownscaleStep(_adaptiveMaxEncodeWidth);
+                            // 档位不低于实际内容宽度时（如 1600 宽屏首档 1920 不生效），
+                            // 循环跳档直到低于内容宽或到最低档 640（序列单调递减，无死循环）。
+                            while (next >= _contentW && next > 640)
+                                next = NextDownscaleStep(next);
+                            if (next != _adaptiveMaxEncodeWidth)
+                            {
+                                _adaptiveMaxEncodeWidth = next;
+                                Logger.Info("D11: encode slow ({0:F1}ms) — downscale maxEncodeWidth={1}",
+                                    avgMs, next);
+                            }
+                        }
+                        else if (_upscaleStreak >= UpscaleStreakLimit && _adaptiveMaxEncodeWidth > 0)
+                        {
+                            _upscaleStreak = 0;
+                            int next = NextUpscaleStep(_adaptiveMaxEncodeWidth);
+                            if (next != _adaptiveMaxEncodeWidth)
+                            {
+                                _adaptiveMaxEncodeWidth = next;
+                                Logger.Info("D11: encode fast ({0:F1}ms) — upscale maxEncodeWidth={1}",
+                                    avgMs, next);
+                            }
+                        }
+                    }
+
+                    // 码率自适应：发送队列持续满（网络/接收端瓶颈）→ 逐级降码率。
+                    // OpenH264 SetOption(BITRATE) 运行时生效，不重建编码器。
+                    if (_sendQueueFullStreak >= SendQueueFullStreakLimit
+                        && _bitrateStepIndex < BitrateSteps.Length - 1)
+                    {
+                        _sendQueueFullStreak = 0;
+                        _bitrateStepIndex++;
+                        TargetBitrate = BitrateSteps[_bitrateStepIndex];
+                        Logger.Info("D11: send queue persistently full — bitrate down to {0} bps",
+                            TargetBitrate);
+                        if (_encoder != null)
+                            _encoder.SetTargetBitrate(TargetBitrate);
                     }
                 }
 
@@ -741,9 +855,14 @@ namespace EasyRDP.Server.Wpf
                     {
                         _sendQueue.Enqueue(fts);
                         Monitor.Pulse(_lock);
+                        _sendQueueFullStreak = 0;  // 队列未满，重置降码率计数
                     }
                     else
                     {
+                        // 发送瓶颈：丢弃最旧的非关键帧、保留最新帧（实时语义：丢帧优于延迟）。
+                        // 若最旧的待发帧是关键帧则保留它（解码端依赖关键帧恢复），改丢新帧。
+                        // 队列持续满 → 网络/接收端是瓶颈 → 触发 D11 码率降档信号
+                        _sendQueueFullStreak++;
                         // 发送瓶颈：丢弃最旧的非关键帧、保留最新帧（实时语义：丢帧优于延迟）。
                         // 若最旧的待发帧是关键帧则保留它（解码端依赖关键帧恢复），改丢新帧。
                         if (_sendQueue.Count > 0 && _sendQueue.Peek().IsKeyframe)
@@ -812,6 +931,28 @@ namespace EasyRDP.Server.Wpf
         private int GetPendingFrames()
         {
             lock (_lock) return _sendQueue.Count;
+        }
+
+        /// <summary>
+        /// D11 分辨率降档：0（全分辨率）→1920→1280→960→640。
+        /// </summary>
+        private static int NextDownscaleStep(int current)
+        {
+            if (current == 0) return 1920;
+            if (current > 1280) return 1280;
+            if (current > 960) return 960;
+            return 640;
+        }
+
+        /// <summary>
+        /// D11 分辨率升档：640→960→1280→1920→0（恢复全分辨率）。
+        /// </summary>
+        private static int NextUpscaleStep(int current)
+        {
+            if (current < 960) return 960;
+            if (current < 1280) return 1280;
+            if (current < 1920) return 1920;
+            return 0;
         }
 
         /// <summary>

@@ -437,5 +437,53 @@ namespace EasyRDP.Core.Tests.Transport
             for (int i = 0; i < resPayload.Length; i++)
                 Assert.Equal(resPayload[i], received[1].Data[i]);
         }
+
+        [Fact]
+        public void CrcError_ShouldCountAndNotDeliver()
+        {
+            // 篡改 FragData 一字节 → CRC16 必然不匹配 → 分片被丢弃且计入 CrcErrorCount
+            var sent = new System.Collections.Generic.List<byte[]>();
+            MessageReassembler.FragAndSend(1, (byte)MessageType.Keepalive,
+                new byte[] { 0x01, 0x02, 0x03 }, (sid, data) => sent.Add(data), 42);
+
+            byte[] corrupted = (byte[])sent[0].Clone();
+            corrupted[corrupted.Length - 1] ^= 0xFF; // 翻转 FragData 最后一个字节
+
+            var reassembler = new MessageReassembler();
+            MessageReceivedEventArgs received = null;
+            reassembler.MessageReceived += (s, e) => received = e;
+
+            reassembler.OnFragment(new FragmentReceivedEventArgs(42, corrupted));
+
+            Assert.Null(received);                       // 损坏分片不送达
+            Assert.Equal(1, reassembler.CrcErrorCount);  // 计入 CRC 错误
+            Assert.Equal(0L, reassembler.TotalFramesCompleted);
+        }
+
+        [Fact]
+        public void StaleFrameDrop_ShouldReflectInPacketLossRate()
+        {
+            // 先送 frameId=1 完整帧，再送 frameId=0 旧帧 → 旧帧被 stale 丢弃
+            var reassembler = new MessageReassembler();
+            MessageReceivedEventArgs received = null;
+            reassembler.MessageReceived += (s, e) => received = e;
+
+            var frame1 = new System.Collections.Generic.List<byte[]>();
+            MessageReassembler.FragAndSend(1, (byte)MessageType.Keepalive,
+                new byte[] { 0x10, 0x20 }, (sid, data) => frame1.Add(data), 42);
+            reassembler.OnFragment(new FragmentReceivedEventArgs(42, frame1[0]));
+            Assert.NotNull(received);
+
+            var frame0 = new System.Collections.Generic.List<byte[]>();
+            MessageReassembler.FragAndSend(0, (byte)MessageType.Keepalive,
+                new byte[] { 0x30, 0x40 }, (sid, data) => frame0.Add(data), 42);
+            reassembler.OnFragment(new FragmentReceivedEventArgs(42, frame0[0]));
+
+            // 1 帧完成、至少 1 帧被丢，丢帧率 > 0
+            Assert.Equal(1L, reassembler.TotalFramesCompleted);
+            Assert.True(reassembler.TotalFramesDropped >= 1L);
+            Assert.True(reassembler.PacketLossRate > 0.0);
+            Assert.True(reassembler.PacketLossRate <= 1.0);
+        }
     }
 }

@@ -47,7 +47,13 @@ namespace EasyRDP.Server.Wpf
             if (capturer == null)
                 throw new ArgumentNullException("capturer");
             _capturer = capturer;
+            // 采集方式由实际采集器类型判定（DXGI=1，BitBlt=0），供诊断信息下发
+            _captureMethod = EasyRDP.Server.Wpf.Services.SystemInfoCollector.DetectCaptureMethod(capturer);
         }
+
+        /// <summary>屏幕采集方式。0=BitBlt(GDI)，1=DXGI Desktop Duplication。供连接详情面板展示。</summary>
+        public byte CaptureMethod { get { return _captureMethod; } }
+        private readonly byte _captureMethod;
 
         /// <summary>Starts the capture thread if not already running.</summary>
         public void Start()
