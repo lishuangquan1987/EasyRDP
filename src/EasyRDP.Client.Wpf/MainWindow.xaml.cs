@@ -109,6 +109,8 @@ public partial class MainWindow : Window
     // 此时"本地指针位置"与"远程操作落点"严格一致，指针显示不再等待回显，零延迟。
     private double _localCursorX;
     private double _localCursorY;
+    /// <summary>尺寸诊断日志计数器（每 50 次 MouseMove 打印一次 Border/Image/bitmap/DPI）。</summary>
+    private int _sizeDiagCounter;
     private bool _hasLocalCursorPos;
 
     /// <summary>当前是否处于全屏模式（供 ViewModel/快捷键判断）。</summary>
@@ -587,6 +589,18 @@ public partial class MainWindow : Window
         _hasLocalCursorPos = true;
         _localCursorX = pos.X;
         _localCursorY = pos.Y;
+        // 尺寸诊断日志（每 50 次）：Border/Image/bitmap/DPI 四组尺寸对照。
+        // 若 Image 未铺满 Border（宽或高小于 Border）则存在黑框区，
+        // 用户在该区域操作会产生越界坐标 → 钳制偏移。
+        if ((++_sizeDiagCounter % 50) == 0)
+        {
+            var bmp = _vm.RenderBitmap;
+            Logger.Debug("SizeDiag: border={0:F0}x{1:F0} image={2:F0}x{3:F0} bitmap={4}x{5} dpi={6}",
+                RenderBorder.ActualWidth, RenderBorder.ActualHeight,
+                RenderImage.ActualWidth, RenderImage.ActualHeight,
+                bmp != null ? bmp.PixelWidth : 0, bmp != null ? bmp.PixelHeight : 0,
+                System.Windows.Media.VisualTreeHelper.GetDpi(this));
+        }
         _vm.HandleMouseMove(pos.X, pos.Y, RenderImage.ActualWidth, RenderImage.ActualHeight);
         PositionRemoteCursorAtLocal();
     }

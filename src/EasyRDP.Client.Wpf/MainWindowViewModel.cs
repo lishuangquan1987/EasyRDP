@@ -947,7 +947,7 @@ namespace EasyRDP.Client.Wpf
                 {
                     // 先更新 lastClipboardText，避免 _clipboardTimer 检测到变化触发回发
                     _lastClipboardText = text;
-                    Clipboard.SetText(text);
+                    TrySetClipboard(() => Clipboard.SetText(text), "text clipboard");
                     Logger.Info("Clipboard set from server: len={0}", text.Length);
                 }
                 catch (Exception ex)
@@ -981,7 +981,8 @@ namespace EasyRDP.Client.Wpf
                     // WPF Clipboard.SetFileDropList 需要 System.Collections.Specialized.StringCollection
                     var fileList = new System.Collections.Specialized.StringCollection();
                     fileList.AddRange(localFilePaths);
-                    Clipboard.SetFileDropList(fileList);
+                    // 重试：CLIPBRD_E_CANT_OPEN 是剪贴板被其他线程短暂占用的竞态（实测出现）
+                    TrySetClipboard(() => Clipboard.SetFileDropList(fileList), "file clipboard");
 
                     // Owner Flag 防回环：标记为 SideClient（表示"由客户端从服务端同步过来"），
                     // _clipboardTimer 轮询看到此标记即跳过，避免回发到服务端
@@ -1493,6 +1494,34 @@ namespace EasyRDP.Client.Wpf
             var msg = new InputEventMessage { Type = InputEventType.MouseUp, KeyCode = btn, X = sentX, Y = sentY };
             _inputSession.SendInput(msg);
             Logger.Debug("Click up button={0} mapped=({1},{2})", changedButton, sentX, sentY);
+        }
+
+        /// <summary>
+        /// 带重试的剪贴板设置：CLIPBRD_E_CANT_OPEN（0x800401D0）是剪贴板被其他
+        /// 进程/线程短暂占用的竞态，重试 3 次（间隔 50ms）后仍失败才记录警告。
+        /// 必须在 UI 线程（STA）调用。
+        /// 注意：重试中的 Sleep 会造成最多 ~100ms 的 UI 线程阻塞（仅发生在剪贴板
+        /// 被占用竞态时，低于感知阈值，可接受）。
+        /// </summary>
+        private static void TrySetClipboard(System.Action action, string logName)
+        {
+            System.Runtime.InteropServices.COMException lastEx = null;
+            for (int retry = 0; retry < 3; retry++)
+            {
+                try
+                {
+                    action();
+                    return;
+                }
+                catch (System.Runtime.InteropServices.COMException ex)
+                {
+                    lastEx = ex;
+                    if (retry < 2) System.Threading.Thread.Sleep(50);
+                }
+            }
+            // 3 次重试仍失败：记录警告（不抛异常，避免 UI 线程崩溃）
+            NLog.LogManager.GetCurrentClassLogger().Warn(lastEx,
+                "Clipboard {0} set failed after 3 retries", logName);
         }
 
         /// <summary>WPF MouseButton → EasyDesk MouseButton 显式映射（左=1 右=2 中=3 X1=4 X2=5）。</summary>

@@ -147,17 +147,27 @@
 
         <!-- ====== 中间：桌面显示区 ====== -->
         <Border x:Name="RenderBorder" Grid.Row="2" Background="Black"
-                MouseMove="RenderImage_MouseMove"
-                PreviewMouseDown="RenderImage_PreviewMouseDown"
-                PreviewMouseUp="RenderImage_PreviewMouseUp"
-                MouseWheel="RenderImage_MouseWheel"
                 Focusable="True">
             <Grid>
                 <!-- Fant 高质量缩放：远程分辨率与窗口尺寸不一致时，线性插值会糊化文字/
                      代码高亮边缘，Fant（双三次变体）在放大/缩小时保留更多细节。
-                     Stretch=Uniform 在窗口宽高比≠视频时产生 letterbox 黑边（用户允许）。 -->
+                     Stretch=Uniform 在窗口宽高比≠视频时产生 letterbox 黑边（用户允许）。
+                     
+                     鼠标偏移修复：鼠标事件绑在 RenderImage 而非 RenderBorder。
+                     此前事件绑在 RenderBorder，而 RenderImage 默认按内容（16:9）自适应
+                     宽度、未铺满 Border（实测窗口 1420x820 时 Image 仅 1185x667，左右黑框），
+                     用户在 Border 黑框区（Image 外）移动/点击时 e.GetPosition(RenderImage)
+                     返回越界坐标（如 y=874>832），MapCoordinates 钳制后产生水平/垂直偏移。
+                     现强制 Image 撑满 Border（HorizontalAlignment/VerticalAlignment=Stretch），
+                     画面在 Image 内 Uniform 居中留边，MapCoordinates 按服务端宽高比
+                     正确扣除内部黑边；事件绑在 Image 上坐标恒落在 [0,ImageW]x[0,ImageH]。 -->
                 <Image x:Name="RenderImage" Source="{Binding RenderBitmap}" Stretch="Uniform"
-                       RenderOptions.BitmapScalingMode="Fant"/>
+                       HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+                       RenderOptions.BitmapScalingMode="Fant"
+                       MouseMove="RenderImage_MouseMove"
+                       PreviewMouseDown="RenderImage_PreviewMouseDown"
+                       PreviewMouseUp="RenderImage_PreviewMouseUp"
+                       MouseWheel="RenderImage_MouseWheel"/>
 
                 <!-- 远程光标叠加层：显示服务端光标形状/位置，盖住本地箭头光标。
                      不参与命中测试，鼠标事件仍由 RenderImage 处理。 -->
