@@ -153,23 +153,23 @@
                      代码高亮边缘，Fant（双三次变体）在放大/缩小时保留更多细节。
                      Stretch=Uniform 在窗口宽高比≠视频时产生 letterbox 黑边（用户允许）。
                      
-                     鼠标偏移修复：鼠标事件绑在 RenderImage 而非 RenderBorder。
-                     此前事件绑在 RenderBorder，而 RenderImage 默认按内容（16:9）自适应
-                     宽度、未铺满 Border（实测窗口 1420x820 时 Image 仅 1185x667，左右黑框），
-                     用户在 Border 黑框区（Image 外）移动/点击时 e.GetPosition(RenderImage)
-                     返回越界坐标（如 y=874>832），MapCoordinates 钳制后产生水平/垂直偏移。
-                     现强制 Image 撑满 Border：Alignment=Stretch + Width/Height 绑定
-                     Border 实际尺寸（实测 Alignment=Stretch 单独使用时 Image 仍按
-                     内容 16:9 单方向自适应，需显式尺寸绑定彻底消除黑框区）；
-                     画面在 Image 内 Uniform 居中留边，MapCoordinates 按服务端宽高比
-                     正确扣除内部黑边；事件绑在 Image 上坐标恒落在 [0,ImageW]x[0,ImageH]。 -->
-                <Image x:Name="RenderImage" Source="{Binding RenderBitmap}" Stretch="Uniform"
-                       HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
-                       RenderOptions.BitmapScalingMode="Fant"
-                       MouseMove="RenderImage_MouseMove"
-                       PreviewMouseDown="RenderImage_PreviewMouseDown"
-                       PreviewMouseUp="RenderImage_PreviewMouseUp"
-                       MouseWheel="RenderImage_MouseWheel"/>
+                     鼠标偏移修复（v3）：WPF Image 控件即使显式 Width/Height/Alignment=Stretch，
+                     ArrangeOverride 仍按内容 16:9 锁定 ActualWidth/Height（实测 Image 在
+                     Border=1493x747 时仅 1327x747），导致黑框区与映射错位。
+                     改用 Rectangle + ImageBrush（Rectangle 是纯几何控件必然撑满父容器），
+                     ImageBrush.Stretch=Uniform 在 Rectangle 内居中留边，
+                     MapCoordinates 用 Rectangle 尺寸按服务端宽高比正确扣除内部黑边。 -->
+                <Rectangle x:Name="RenderImage"
+                           HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+                           MouseMove="RenderImage_MouseMove"
+                           PreviewMouseDown="RenderImage_PreviewMouseDown"
+                           PreviewMouseUp="RenderImage_PreviewMouseUp"
+                           MouseWheel="RenderImage_MouseWheel">
+                    <Rectangle.Fill>
+                        <ImageBrush ImageSource="{Binding RenderBitmap}" Stretch="Uniform"
+                                    RenderOptions.BitmapScalingMode="Fant"/>
+                    </Rectangle.Fill>
+                </Rectangle>
 
                 <!-- 远程光标叠加层：显示服务端光标形状/位置，盖住本地箭头光标。
                      不参与命中测试，鼠标事件仍由 RenderImage 处理。 -->

@@ -72,10 +72,6 @@ public partial class MainWindow : Window
         InitializeComponent();
         // 窗口句柄创建后挂接原生消息钩子（处理 WM_GETMINMAXINFO 实现真正的全屏）
         SourceInitialized += OnSourceInitialized;
-        // 鼠标偏移修复：Image 必须撑满 RenderBorder（实测 XAML Width/Height 绑定
-        // 与 Alignment=Stretch 均不生效——Image 仍按内容 16:9 单方向自适应，
-        // 产生黑框区导致映射偏移）。改为 SizeChanged 时代码强制赋值尺寸。
-        RenderBorder.SizeChanged += OnRenderBorderSizeChanged;
         _vm = new MainWindowViewModel();
         DataContext = _vm;
         // PasswordBox 不支持绑定 Password（安全设计），初始值在 XAML 构造后同步一次，
@@ -87,7 +83,7 @@ public partial class MainWindow : Window
         // 远程光标更新（接收线程触发，内部转 UI 线程）
         _vm.RemoteCursorChanged += OnRemoteCursorChanged;
         // 显示区尺寸变化时重算远程光标叠加层位置。
-        // RenderImage 用 Stretch=Uniform，尺寸由布局系统按 RenderBorder 自动管理。
+        // RenderImage（Rectangle+ImageBrush）撑满 RenderBorder，尺寸由布局系统自动管理。
         RenderBorder.SizeChanged += (s, e) =>
         {
             if (_remoteCursorVisible)
@@ -404,7 +400,8 @@ public partial class MainWindow : Window
         RemoteCursorImage.Stretch = Stretch.Fill;
     }
 
-    /// <summary>计算 RenderImage 在 Uniform 拉伸下实际渲染的矩形（处理黑边 letterbox）。</summary>
+    /// <summary>计算 RenderImage（Rectangle+ImageBrush）在 Uniform 拉伸下实际渲染的矩形（处理黑边 letterbox）。
+    /// Rectangle 撑满 RenderBorder，画面在 Rectangle 内 Uniform 居中，黑边在 Rectangle 内部。</summary>
     private Rect GetRenderImageRect()
     {
         double iw = RenderImage.ActualWidth;
@@ -519,21 +516,6 @@ public partial class MainWindow : Window
         base.OnClosing(e);
     }
 
-    /// <summary>
-    /// RenderBorder 尺寸变化时强制 Image 尺寸与之一致（消除黑框区）。
-    /// XAML 绑定/Alignment=Stretch 均不生效（实测 Image 仍按内容 16:9 自适应），
-    /// 必须代码赋值。画面（bitmap）在 Image 内 Uniform 居中留边，
-    /// MapCoordinates 按服务端宽高比正确扣除内部黑边。
-    /// </summary>
-    private void OnRenderBorderSizeChanged(object sender, SizeChangedEventArgs e)
-    {
-        if (RenderBorder.ActualWidth > 0 && RenderBorder.ActualHeight > 0)
-        {
-            RenderImage.Width = RenderBorder.ActualWidth;
-            RenderImage.Height = RenderBorder.ActualHeight;
-        }
-    }
-
     /// <summary>将鼠标事件路由到 ViewModel。</summary>
     private void RenderImage_MouseMove(object sender, MouseEventArgs e)
     {
@@ -608,9 +590,8 @@ public partial class MainWindow : Window
         _hasLocalCursorPos = true;
         _localCursorX = pos.X;
         _localCursorY = pos.Y;
-        // 尺寸诊断日志（每 50 次）：Border/Image/bitmap/DPI 四组尺寸对照。
-        // 若 Image 未铺满 Border（宽或高小于 Border）则存在黑框区，
-        // 用户在该区域操作会产生越界坐标 → 钳制偏移。
+        // 尺寸诊断日志（每 50 次）：Border/Rectangle/bitmap/DPI 四组尺寸对照。
+        // 若 Rectangle 未铺满 Border（宽或高小于 Border）则存在黑框区（v3 修复后应一致）。
         if ((++_sizeDiagCounter % 50) == 0)
         {
             var bmp = _vm.RenderBitmap;
