@@ -158,11 +158,15 @@
                      宽度、未铺满 Border（实测窗口 1420x820 时 Image 仅 1185x667，左右黑框），
                      用户在 Border 黑框区（Image 外）移动/点击时 e.GetPosition(RenderImage)
                      返回越界坐标（如 y=874>832），MapCoordinates 钳制后产生水平/垂直偏移。
-                     现强制 Image 撑满 Border（HorizontalAlignment/VerticalAlignment=Stretch），
+                     现强制 Image 撑满 Border：Alignment=Stretch + Width/Height 绑定
+                     Border 实际尺寸（实测 Alignment=Stretch 单独使用时 Image 仍按
+                     内容 16:9 单方向自适应，需显式尺寸绑定彻底消除黑框区）；
                      画面在 Image 内 Uniform 居中留边，MapCoordinates 按服务端宽高比
                      正确扣除内部黑边；事件绑在 Image 上坐标恒落在 [0,ImageW]x[0,ImageH]。 -->
                 <Image x:Name="RenderImage" Source="{Binding RenderBitmap}" Stretch="Uniform"
                        HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+                       Width="{Binding ActualWidth, ElementName=RenderBorder}"
+                       Height="{Binding ActualHeight, ElementName=RenderBorder}"
                        RenderOptions.BitmapScalingMode="Fant"
                        MouseMove="RenderImage_MouseMove"
                        PreviewMouseDown="RenderImage_PreviewMouseDown"

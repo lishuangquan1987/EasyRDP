@@ -595,11 +595,15 @@ public partial class MainWindow : Window
         if ((++_sizeDiagCounter % 50) == 0)
         {
             var bmp = _vm.RenderBitmap;
-            Logger.Debug("SizeDiag: border={0:F0}x{1:F0} image={2:F0}x{3:F0} bitmap={4}x{5} dpi={6}",
+            var dpi = System.Windows.Media.VisualTreeHelper.GetDpi(this);
+            Logger.Debug("SizeDiag: border={0:F0}x{1:F0} image={2:F0}x{3:F0} bitmap={4}x{5} dpiScaleX={6:F3} dpiScaleY={7:F3}",
                 RenderBorder.ActualWidth, RenderBorder.ActualHeight,
                 RenderImage.ActualWidth, RenderImage.ActualHeight,
                 bmp != null ? bmp.PixelWidth : 0, bmp != null ? bmp.PixelHeight : 0,
-                System.Windows.Media.VisualTreeHelper.GetDpi(this));
+                dpi.DpiScaleX, dpi.DpiScaleY);
+            Logger.Debug("SizeDiagExtra: imageMargin=({0:F0},{1:F0},{2:F0},{3:F0})",
+                RenderImage.Margin.Left, RenderImage.Margin.Top,
+                RenderImage.Margin.Right, RenderImage.Margin.Bottom);
         }
         _vm.HandleMouseMove(pos.X, pos.Y, RenderImage.ActualWidth, RenderImage.ActualHeight);
         PositionRemoteCursorAtLocal();

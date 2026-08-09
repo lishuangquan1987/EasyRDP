@@ -158,6 +158,9 @@ namespace EasyRDP.Client.Wpf
             }
         }
 
+        /// <summary>MapCoordinates 诊断日志计数器（每 50 次映射打印一次全流程参数）。</summary>
+        private int _mapDiagCounter;
+
         /// <summary>把客户端控件坐标映射到服务端屏幕坐标。</summary>
         public void MapCoordinates(double controlX, double controlY, double controlW, double controlH,
             out int serverX, out int serverY)
@@ -195,6 +198,17 @@ namespace EasyRDP.Client.Wpf
             else if (py > drawH) py = drawH;
             serverX = (int)(px / drawW * _screenWidth);
             serverY = (int)(py / drawH * _screenHeight);
+            // 诊断日志（每 50 次）：映射全流程参数，验证 draw/off/px/py 计算。
+            // 若 draw 与 control 不一致（黑边扣除生效）而用户仍报偏移，
+            // 说明偏移不在映射层，需检查渲染/回显路径。
+            if ((++_mapDiagCounter % 50) == 0)
+            {
+                Logger.Debug("MapDiag: ctrl=({0:F1},{1:F1}) sz=({2:F1}x{3:F1}) scr=({4}x{5}) draw=({6:F1}x{7:F1}) off=({8:F1},{9:F1}) px=({10:F1},{11:F1}) out=({12},{13})",
+                    controlX, controlY, controlW, controlH,
+                    _screenWidth, _screenHeight,
+                    drawW, drawH, offX, offY,
+                    px, py, serverX, serverY);
+            }
         }
     }
 }

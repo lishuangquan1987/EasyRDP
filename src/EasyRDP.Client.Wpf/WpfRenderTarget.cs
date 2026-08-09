@@ -260,6 +260,8 @@ namespace EasyRDP.Client.Wpf
         /// RenderBitmap 绑定属性同步更新（避免 Image.Source 指向旧 bitmap 导致黑屏）。</summary>
         private void DoResize(int w, int h)
         {
+            if (_disposed)
+                return; // 防御：Dispose 后排队中的 BeginInvoke(DoResize) 不得重建 bitmap
             _width = w;
             _height = h;
             _bitmap = new WriteableBitmap(
