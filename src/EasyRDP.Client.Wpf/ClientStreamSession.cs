@@ -891,7 +891,12 @@ namespace EasyRDP.Client.Wpf
 
         /// <summary>
         /// 发送帧请求消息（阶段三流控）：通知服务端客户端已消费完上一帧、可以编码下一帧。
-        /// 在渲染线程调用；空 payload，单分片发送。
+        /// 在渲染线程调用。
+        /// 
+        /// 重要：payload 必须非空（1 字节占位）。服务端 MessageReassembler.OnFragment 对
+        /// fragDataLen &lt;= 0 的分片直接丢弃（防御性空分片保护），空 payload 的请求
+        /// 会被静默丢掉 → 服务端 EncodeLoop 永久等待 → 画面冻结（已实测复现）。
+        /// payload 内容无意义（服务端不解析），仅用于绕过该保护。
         /// </summary>
         private void SendFramebufferUpdateRequest()
         {
@@ -899,8 +904,9 @@ namespace EasyRDP.Client.Wpf
             {
                 var transport = _transport;
                 if (transport == null) return;
+                // 1 字节占位 payload：避免被服务端重组器的空分片保护丢弃
                 MessageReassembler.FragAndSend(0, (byte)MessageType.FramebufferUpdateRequest,
-                    new byte[0], (sid, data) => transport.Send(data), 0);
+                    new byte[] { 0 }, (sid, data) => transport.Send(data), 0);
             }
             catch (Exception ex)
             {

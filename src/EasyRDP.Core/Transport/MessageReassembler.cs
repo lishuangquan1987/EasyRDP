@@ -116,8 +116,13 @@ namespace EasyRDP.Core.Transport
             }
 
             // Extract fragment data
+            // 允许 0 长度 payload（Keepalive / FramebufferUpdateRequest 等纯控制消息，
+            // FragAndSend 发送空 payload 时 fragDataLen==0）。此前 `<= 0` 会把空分片静默
+            // 丢弃，导致服务端永远收不到客户端心跳/帧请求 → 心跳超时断连 + ZRLE 流控死锁
+            // （实测：客户端 45s 后收到 10053 连接被中止）。
+            // 负长度才代表损坏/截断，必须拒绝。
             int fragDataLen = data.Length - pos;
-            if (fragDataLen <= 0)
+            if (fragDataLen < 0)
                 return;
 
             // Verify CRC16

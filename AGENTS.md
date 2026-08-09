@@ -126,3 +126,4 @@ EasyRDP 的核心管线（`docs/` 中的规范）将在根目录下实现 — �
   - `codec/encoder/plus/src/welsEncoderExt.cpp` — 编码器实现（验证接口方法顺序）
   - `codec/decoder/plus/src/welsDecoderExt.cpp` — 解码器实现（验证接口方法顺序）
 - 预留，后续快速追加。
+- 每轮任务结束之后，涉及到代码修改，检查无误之后，git提交代码
