@@ -13,6 +13,8 @@ namespace EasyRDP.Server.Wpf.Services
     /// </summary>
     public class SystemInfoCollector
     {
+        private static readonly NLog.Logger Logger = NLog.LogManager.GetCurrentClassLogger();
+
         // 采集方式枚举（与客户端展示映射一致）
         public const byte CaptureMethodBitBlt = 0;
         public const byte CaptureMethodDxgi = 1;
@@ -98,14 +100,17 @@ namespace EasyRDP.Server.Wpf.Services
                 if (_systemInfoInitialized) return;
                 try { _cachedCpuName = ReadRegistryString(
                     @"HARDWARE\DESCRIPTION\System\CentralProcessor\0", "ProcessorNameString"); }
-                catch { _cachedCpuName = ""; }
+                catch (Exception ex) { Logger.Warn(ex, "SystemInfo collect failed: CPU name"); _cachedCpuName = ""; }
                 try { _cachedGpuName = ReadGpuName(); }
-                catch { _cachedGpuName = ""; }
+                catch (Exception ex) { Logger.Warn(ex, "SystemInfo collect failed: GPU name"); _cachedGpuName = ""; }
                 try { _cachedOsVersion = BuildOsVersion(); }
-                catch { _cachedOsVersion = Environment.OSVersion.VersionString; }
+                catch (Exception ex) { Logger.Warn(ex, "SystemInfo collect failed: OS version"); _cachedOsVersion = Environment.OSVersion.VersionString; }
                 try { _cachedTotalMemoryMb = GetTotalPhysicalMemoryMb(); }
-                catch { _cachedTotalMemoryMb = 0; }
+                catch (Exception ex) { Logger.Warn(ex, "SystemInfo collect failed: physical memory"); _cachedTotalMemoryMb = 0; }
                 _systemInfoInitialized = true;
+                Logger.Info("SystemInfo collected: CPU={0} ({1} cores) GPU={2} OS={3} Mem={4}MB",
+                    _cachedCpuName, Environment.ProcessorCount, _cachedGpuName,
+                    _cachedOsVersion, _cachedTotalMemoryMb);
             }
         }
 
@@ -122,7 +127,11 @@ namespace EasyRDP.Server.Wpf.Services
             const string displayClass = @"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}";
             using (RegistryKey key = Registry.LocalMachine.OpenSubKey(displayClass))
             {
-                if (key == null) return "";
+                if (key == null)
+                {
+                    Logger.Warn("SystemInfo: display class registry key not found: {0}", displayClass);
+                    return "";
+                }
                 for (int i = 0; i <= 9; i++)
                 {
                     using (RegistryKey sub = key.OpenSubKey(i.ToString("D4")))
@@ -134,6 +143,7 @@ namespace EasyRDP.Server.Wpf.Services
                     }
                 }
             }
+            Logger.Warn("SystemInfo: no GPU found in display class registry (0x{0})", displayClass);
             return "";
         }
 

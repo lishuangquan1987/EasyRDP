@@ -14,6 +14,8 @@ namespace EasyRDP.Core.Protocol
     /// </summary>
     public class DiagnosticInfoMessage
     {
+        private static readonly NLog.Logger Logger = NLog.LogManager.GetCurrentClassLogger();
+
         /// <summary>单个字符串字段最大字节数（CPU/GPU/OS 名称足够）。</summary>
         public const int MaxStrLen = 512;
 
@@ -77,7 +79,11 @@ namespace EasyRDP.Core.Protocol
             // 最小长度 = 3×(2 长度前缀) + CpuCores(4) + TotalMemoryMb(8) + CaptureMethod(1)
             //   + ScaleFactorX100(2) + ScreenWidth(4) + ScreenHeight(4) + 3×可用性(1) = 32
             if (payload == null || payload.Length < 32)
+            {
+                Logger.Warn("DiagnosticInfo unpack failed: payload too short ({0})",
+                    payload != null ? payload.Length : 0);
                 throw new ArgumentException("DiagnosticInfo payload too short");
+            }
             var msg = new DiagnosticInfoMessage();
             using (var ms = new MemoryStream(payload))
             using (var br = new BinaryReader(ms))
@@ -107,10 +113,16 @@ namespace EasyRDP.Core.Protocol
         {
             int len = br.ReadUInt16();
             if (len > MaxStrLen)
+            {
+                Logger.Warn("DiagnosticInfo unpack failed: string len {0} exceeds max {1}", len, MaxStrLen);
                 throw new ArgumentException("DiagnosticInfo string too long: " + len);
+            }
             byte[] buf = br.ReadBytes(len);
             if (buf.Length != len)
+            {
+                Logger.Warn("DiagnosticInfo unpack failed: string truncated (expected {0} got {1})", len, buf.Length);
                 throw new ArgumentException("DiagnosticInfo string truncated");
+            }
             return Encoding.UTF8.GetString(buf);
         }
     }

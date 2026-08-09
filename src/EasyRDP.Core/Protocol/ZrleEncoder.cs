@@ -160,6 +160,8 @@ namespace EasyRDP.Core.Protocol
             int tilesY = (_height + TileSize - 1) / TileSize;
             int regionCount = 0;
             bool isFirstFrame = _isFirstFrame;
+            // 编码耗时统计（供性能诊断）
+            long swStart = System.Diagnostics.Stopwatch.GetTimestamp();
 
             // CopyRect 锚点每帧重置
             _copyAnchorValid = false;
@@ -261,6 +263,30 @@ namespace EasyRDP.Core.Protocol
 
             // 直接用 Pack(_regionArray, regionCount)，避免每帧 new ZrleRegion[] + Array.Copy
             byte[] packed = ZrleRegionCodec.Pack(_regionArray, regionCount);
+
+            // 每帧编码统计（Debug 级）：瓦片数 + 类型分布 + 压缩率 + 耗时。
+            // 类型分布异常（如全部 Raw/CopyRect 占比骤升）可据此定位。
+            if (Logger.IsDebugEnabled)
+            {
+                int rawCount = 0, deflateCount = 0, fillCount = 0, copyCount = 0;
+                for (int i = 0; i < regionCount; i++)
+                {
+                    switch (_regionArray[i].Encoding)
+                    {
+                        case ZrleRegionEncoding.Raw: rawCount++; break;
+                        case ZrleRegionEncoding.Deflate: deflateCount++; break;
+                        case ZrleRegionEncoding.FillRect: fillCount++; break;
+                        case ZrleRegionEncoding.CopyRect: copyCount++; break;
+                    }
+                }
+                int rawBytes = _width * _height * 4;
+                double ms = (System.Diagnostics.Stopwatch.GetTimestamp() - swStart) * 1000.0
+                    / System.Diagnostics.Stopwatch.Frequency;
+                Logger.Debug("ZRLE encode: {0} tiles ({1}R/{2}D/{3}F/{4}C) {5}→{6} bytes ({7:F1}%) {8:F1}ms",
+                    regionCount, rawCount, deflateCount, fillCount, copyCount,
+                    rawBytes, packed.Length,
+                    rawBytes > 0 ? packed.Length * 100.0 / rawBytes : 0.0, ms);
+            }
 
             return new EncodedFrame
             {

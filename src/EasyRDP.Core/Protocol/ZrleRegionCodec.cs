@@ -47,6 +47,8 @@ namespace EasyRDP.Core.Protocol
     /// </summary>
     public static class ZrleRegionCodec
     {
+        private static readonly NLog.Logger Logger = NLog.LogManager.GetCurrentClassLogger();
+
         /// <summary>最大区域数限制（防恶意数据 OOM）。
         /// 必须 ≥ 1080p 的 64×64 瓦片数（1920×1080 → 34×17=578）；
         /// 1024 覆盖 2K 分辨率（2560×1440 → 41×23=943）。</summary>
@@ -107,6 +109,10 @@ namespace EasyRDP.Core.Protocol
                 }
                 offset += dataLen;
             }
+            if (Logger.IsDebugEnabled)
+            {
+                Logger.Debug("ZRLE pack: {0} regions, {1} bytes total", count, result.Length);
+            }
             return result;
         }
 
@@ -117,15 +123,25 @@ namespace EasyRDP.Core.Protocol
         public static ZrleRegion[] Unpack(byte[] data)
         {
             if (data == null || data.Length < 4)
+            {
+                Logger.Warn("ZRLE unpack failed: data too short ({0})", data != null ? data.Length : 0);
                 return null;
+            }
 
             int offset = 0;
             int count = ReadInt32(data, ref offset);
             if (count < 0 || count > MaxRegionCount)
+            {
+                Logger.Warn("ZRLE unpack failed: region count {0} out of range [0,{1}]", count, MaxRegionCount);
                 return null;
+            }
             // 最小长度：RegionCount(4) + count × 区域头(21)
             if (data.Length < 4 + (long)count * RegionHeaderSize)
+            {
+                Logger.Warn("ZRLE unpack failed: payload too short for {0} regions (len={1}, min={2})",
+                    count, data.Length, 4 + (long)count * RegionHeaderSize);
                 return null;
+            }
 
             ZrleRegion[] regions = new ZrleRegion[count];
             for (int i = 0; i < count; i++)
@@ -140,12 +156,23 @@ namespace EasyRDP.Core.Protocol
                 // 区域几何合法性：ZRLE 区域由 64×64 瓦片编码生成，w/h 上限 64，
                 // 与解码器预分配解压缓冲（64×64×4=16KB）对齐；超限视为恶意/损坏数据。
                 if (w <= 0 || h <= 0 || w > 64 || h > 64 || (long)w * h * 4 > MaxRegionDataSize)
+                {
+                    Logger.Warn("ZRLE unpack failed: region[{0}] invalid geometry w={1} h={2}", i, w, h);
                     return null;
+                }
                 // 按编码类型校验 DataLen（防越界/防错乱）
                 if (!ValidateDataLen((ZrleRegionEncoding)enc, dataLen, w, h))
+                {
+                    Logger.Warn("ZRLE unpack failed: region[{0}] DataLen={1} invalid for enc={2} w={3} h={4}",
+                        i, dataLen, enc, w, h);
                     return null;
+                }
                 if ((long)offset + dataLen > data.Length)
+                {
+                    Logger.Warn("ZRLE unpack failed: region[{0}] data overruns payload (offset={1}+{2}>{3})",
+                        i, offset, dataLen, data.Length);
                     return null;
+                }
 
                 byte[] regionData = null;
                 if (dataLen > 0)
@@ -177,14 +204,24 @@ namespace EasyRDP.Core.Protocol
         public static ScreenRect[] ExtractRects(byte[] data)
         {
             if (data == null || data.Length < 4)
+            {
+                Logger.Warn("ZRLE ExtractRects failed: data too short ({0})", data != null ? data.Length : 0);
                 return null;
+            }
 
             int offset = 0;
             int count = ReadInt32(data, ref offset);
             if (count < 0 || count > MaxRegionCount)
+            {
+                Logger.Warn("ZRLE ExtractRects failed: region count {0} out of range [0,{1}]", count, MaxRegionCount);
                 return null;
+            }
             if (data.Length < 4 + (long)count * RegionHeaderSize)
+            {
+                Logger.Warn("ZRLE ExtractRects failed: payload too short for {0} regions (len={1}, min={2})",
+                    count, data.Length, 4 + (long)count * RegionHeaderSize);
                 return null;
+            }
 
             ScreenRect[] rects = new ScreenRect[count];
             for (int i = 0; i < count; i++)
@@ -197,11 +234,22 @@ namespace EasyRDP.Core.Protocol
                 int dataLen = ReadInt32(data, ref offset);
                 // 区域几何合法性（与 Unpack 一致）：w/h 上限 64 与解码解压缓冲对齐
                 if (w <= 0 || h <= 0 || w > 64 || h > 64 || (long)w * h * 4 > MaxRegionDataSize)
+                {
+                    Logger.Warn("ZRLE ExtractRects failed: region[{0}] invalid geometry w={1} h={2}", i, w, h);
                     return null;
+                }
                 if (!ValidateDataLen((ZrleRegionEncoding)enc, dataLen, w, h))
+                {
+                    Logger.Warn("ZRLE ExtractRects failed: region[{0}] DataLen={1} invalid for enc={2} w={3} h={4}",
+                        i, dataLen, enc, w, h);
                     return null;
+                }
                 if ((long)offset + dataLen > data.Length)
+                {
+                    Logger.Warn("ZRLE ExtractRects failed: region[{0}] data overruns payload (offset={1}+{2}>{3})",
+                        i, offset, dataLen, data.Length);
                     return null;
+                }
                 offset += dataLen;
 
                 rects[i] = new ScreenRect { X = x, Y = y, Width = w, Height = h };

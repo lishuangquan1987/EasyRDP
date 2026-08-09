@@ -135,6 +135,9 @@ namespace EasyRDP.Core.Protocol
         {
             if (!_initialized || _disposed || pixels == null) return new EncodedFrame();
 
+            // 编码耗时统计（供性能诊断，对齐 H264EncoderNative 风格）
+            long swStart = System.Diagnostics.Stopwatch.GetTimestamp();
+
             // BGRA→I420（与 H264 共享 ColorConverter）
             int ySize = _width * _height;
             int uvSize = ySize / 4;
@@ -193,6 +196,15 @@ namespace EasyRDP.Core.Protocol
 
             if (encoded == null || encoded.Length == 0)
                 return new EncodedFrame();
+
+            if (Logger.IsDebugEnabled)
+            {
+                double ms = (System.Diagnostics.Stopwatch.GetTimestamp() - swStart) * 1000.0
+                    / System.Diagnostics.Stopwatch.Frequency;
+                Logger.Debug("VP8 Encode ok: {0}x{1} in={2} out={3} keyframe={4} forceKey={5} {6:F1}ms",
+                    _width, _height, pixels.Length, encoded.Length, isKey, forceKeyframe, ms);
+            }
+
             return new EncodedFrame { Data = encoded, IsKeyframe = isKey, Width = _width, Height = _height };
         }
 
