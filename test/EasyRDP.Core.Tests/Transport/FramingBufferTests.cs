@@ -239,11 +239,13 @@ namespace EasyRDP.Core.Tests.Transport
         }
 
         [Fact]
-        public void FramebufferUpdateRequest_EmptyPayload_ShouldDeliver()
+        public void FramebufferUpdateRequest_OneBytePayload_ShouldDeliver()
         {
-            // 阶段三：客户端流控请求（空 payload 单分片）。
-            // 验证 FramingBuffer 消息类型白名单接受该类型（否则被当流失步丢弃）。
-            byte[] wire = BuildSingleFragmentWire((byte)MessageType.FramebufferUpdateRequest, new byte[0]);
+            // 阶段三：客户端流控请求。
+            // payload 为 1 字节占位（非空）：空 payload 分片会被 MessageReassembler.OnFragment
+            // 的空分片保护丢弃（fragDataLen<=0 → return），导致服务端 EncodeLoop 死锁。
+            // 此测试验证 FramingBuffer 消息类型白名单接受该类型（否则被当流失步丢弃）。
+            byte[] wire = BuildSingleFragmentWire((byte)MessageType.FramebufferUpdateRequest, new byte[] { 0 });
 
             var framing = new FramingBuffer();
             var received = new List<byte[]>();
@@ -252,7 +254,7 @@ namespace EasyRDP.Core.Tests.Transport
             framing.Feed(wire, 0, wire.Length);
 
             Assert.Single(received);
-            Assert.Equal(16, received[0].Length);  // 仅帧头，无 payload 数据
+            Assert.Equal(17, received[0].Length);  // 16 字节帧头 + 1 字节 payload
             Assert.Equal((byte)MessageType.FramebufferUpdateRequest, received[0][1]);
         }
     }

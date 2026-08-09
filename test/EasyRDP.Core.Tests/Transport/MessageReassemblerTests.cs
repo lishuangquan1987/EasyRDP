@@ -58,6 +58,50 @@ namespace EasyRDP.Core.Tests.Transport
         }
 
         [Fact]
+        public void FragAndSend_EmptyPayload_ShouldDeliver()
+        {
+            // 回归（流控死锁+心跳断连根因）：空 payload 的 FragAndSend 生成 0 字节分片，
+            // 服务端 OnFragment 必须允许送达（fragDataLen<0 才拒绝）。
+            // 此前 `<=0` 把空分片静默丢弃 → Keepalive 心跳/FramebufferUpdateRequest
+            // 帧请求全部丢失 → 服务端 45s 心跳超时断连 + ZRLE 流控死锁。
+            var sentFragments = new System.Collections.Generic.List<byte[]>();
+            MessageReassembler.FragAndSend(0, (byte)MessageType.Keepalive,
+                new byte[0], (sid, data) => sentFragments.Add(data), 42);
+            Assert.Single(sentFragments);
+
+            var reassembler = new MessageReassembler();
+            MessageReceivedEventArgs received = null;
+            reassembler.MessageReceived += (s, e) => received = e;
+            reassembler.OnFragment(new FragmentReceivedEventArgs(42, sentFragments[0]));
+
+            // 空 payload 消息必须送达（Keepalive 依赖此行为更新服务端心跳）
+            Assert.NotNull(received);
+            Assert.Equal((byte)MessageType.Keepalive, received.MessageType);
+            Assert.NotNull(received.Data);
+            Assert.Equal(0, received.Data.Length);
+        }
+
+        [Fact]
+        public void FragAndSend_OneBytePayload_ShouldDeliver()
+        {
+            // 修复验证：FramebufferUpdateRequest 改用 1 字节占位 payload 后必须正常送达
+            var payload = new byte[] { 0 };
+            var sentFragments = new System.Collections.Generic.List<byte[]>();
+            MessageReassembler.FragAndSend(0, (byte)MessageType.FramebufferUpdateRequest,
+                payload, (sid, data) => sentFragments.Add(data), 42);
+            Assert.Single(sentFragments);
+
+            var reassembler = new MessageReassembler();
+            MessageReceivedEventArgs received = null;
+            reassembler.MessageReceived += (s, e) => received = e;
+            reassembler.OnFragment(new FragmentReceivedEventArgs(42, sentFragments[0]));
+
+            Assert.NotNull(received);
+            Assert.Equal((byte)MessageType.FramebufferUpdateRequest, received.MessageType);
+            Assert.Equal(payload, received.Data);
+        }
+
+        [Fact]
         public void FragAndSend_MultiFragment_RoundTrip()
         {
             // Create a payload larger than FragmentSize

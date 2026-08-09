@@ -165,6 +165,11 @@ namespace EasyRDP.Server.Wpf
             _flowControlEnabled = (codec == CodecId.Zrle);
             _clientRequestPending = false;
             Logger.Info("ServerStreamSession {0} starting with codec {1}", sessionId, codec);
+            // 版本诊断标识：部署后日志可见，用于确认运行的二进制包含 EncodeLoop 流控修复。
+            // 若日志无此行或 flowControlFix != v3-2026-08-09，说明部署的是旧构建。
+            Logger.Info("=== EasyRDP Server build: {0} flowControlFix={1} ===",
+                EasyRDP.Core.Diagnostics.BuildInfo.Describe(),
+                EasyRDP.Core.Diagnostics.BuildInfo.FlowControlFixVersion);
 
             // Create encoder — H264 是唯一支持的编码方式，不再回退到原始像素
             _encoder = EncoderFactory.Create(codec);
@@ -413,14 +418,16 @@ namespace EasyRDP.Server.Wpf
                 {
                     lock (_lock)
                     {
-                        // 带超时保活：客户端崩溃/断开后不永远等待，1s 超时跳过本帧
+                        // 带超时保活：客户端崩溃/断开后不永远等待，1s 超时后继续取帧（保底 ~1 FPS）
                         if (!_clientRequestPending && !_stopping)
                             Monitor.Wait(_lock, 1000);
                     }
                     if (_stopping) break;
-                    if (!_clientRequestPending) continue;  // 超时无请求：保底 ~1 FPS
+                    // 超时（_clientRequestPending==false）：不 continue，继续执行取帧编码逻辑，
+                    // 实现保底 ~1 FPS。注意：原 `continue` 会跳过取帧回到循环顶部再次 Wait ——
+                    // 队列中已积压的帧永远不会被编码（纯空转），必须继续取帧。
+                    // 请求到达（Pulse 唤醒，_clientRequestPending==true）时同样继续取帧。
                 }
-                _clientRequestPending = false;
 
                 CapturedFrame frame;
                 lock (_lock)
@@ -428,7 +435,7 @@ namespace EasyRDP.Server.Wpf
                     while (_frameQueue.Count == 0 && !_stopping)
                         Monitor.Wait(_lock, 100);
                     if (_stopping) break;
-                    if (_frameQueue.Count == 0) continue;
+                    if (_frameQueue.Count == 0) continue; // 超时路径且队列仍空：下一轮
 
                     // Check for sentinel
                     frame = _frameQueue.Dequeue();
@@ -438,13 +445,53 @@ namespace EasyRDP.Server.Wpf
                 // 丢弃已过期的旧帧：队列中还有更新帧时，当前出队的是最旧的，
                 // 直接释放并继续取最新帧 → 画面延迟 ≈ 1 个截屏周期而非队列深度×帧间隔。
                 // 实时桌面场景"最新帧优先"，牺牲少量平滑换取更低的端到端延迟。
+                //
+                // 流控模式修正（ZRLE）：请求驱动的帧不能浪费。原逻辑在流控模式下
+                // 每收到一个客户端请求只取 1 帧，若队列仍有积压（截屏线程 60fps 持续
+                // 入队、编码线程每次只取 1 帧）就丢弃并 continue → 请求被消费但不编码
+                // → 客户端心跳再发请求 → 再次丢弃 → 编码线程永不编码（实测 encoded=1
+                // 死锁、capture queue full 持续）。流控模式改为"取尽队列、保留最新帧"，
+                // 确保每个请求都编码一帧最新内容。
                 lock (_lock)
                 {
                     if (!_stopping && _frameQueue.Count > 0)
                     {
-                        _captureBufInUse[frame.BufferIndex] = false;
-                        continue;
+                        if (_flowControlEnabled)
+                        {
+                            // 流控模式：丢弃旧帧、保留最新帧（请求不能浪费）
+                            bool sentinelHit = false;
+                            while (_frameQueue.Count > 0)
+                            {
+                                CapturedFrame newer = _frameQueue.Dequeue();
+                                if (newer.Pixels == null)
+                                {
+                                    sentinelHit = true; // Stop 流程：buffer 由会话清理
+                                    break;
+                                }
+                                _captureBufInUse[frame.BufferIndex] = false;
+                                frame = newer;
+                            }
+                            if (sentinelHit) break; // sentinel → 编码线程结束
+                        }
+                        else
+                        {
+                            // H264 推送模式：保持原"丢弃旧帧继续取最新"逻辑
+                            _captureBufInUse[frame.BufferIndex] = false;
+                            continue;
+                        }
                     }
+                }
+
+                // 流控模式：确认此帧将被编码后消费本次请求（请求 1:1 编码）。
+                // 不能在取帧前重置——帧被丢弃/continue 时本次请求会被白白浪费（见上注释），
+                // 导致编码线程死等下一次请求（客户端已发过、靠 250ms 心跳兜底仍会丢帧）。
+                // 写操作与 OnFramebufferUpdateRequest 的置 true 在同一 _lock 内，
+                // 消除交错覆盖窗口。
+                // 注：编码异常/失败 continue 路径不会恢复 pending——客户端 250ms 心跳
+                // 会重新驱动请求，避免失败重试风暴（_consecutiveEncodeFailures 已兜底断连）。
+                if (_flowControlEnabled)
+                {
+                    lock (_lock) { _clientRequestPending = false; }
                 }
 
                 if (encodeLoopIter == 1 || encodeLoopIter % 100 == 0)
@@ -806,8 +853,13 @@ namespace EasyRDP.Server.Wpf
         /// </summary>
         public void OnFramebufferUpdateRequest()
         {
-            _clientRequestPending = true;
-            lock (_lock) { Monitor.Pulse(_lock); }
+            // 与编码线程的请求消费写（EncodeLoop 内同 _lock）在同一锁内，
+            // 消除"置 true / 置 false"交错覆盖窗口（volatile 仅保证可见性）。
+            lock (_lock)
+            {
+                _clientRequestPending = true;
+                Monitor.Pulse(_lock);
+            }
         }
 
         /// <summary>触发一次 FatalError（不可恢复故障，TransportHost 据此断开会话）。</summary>

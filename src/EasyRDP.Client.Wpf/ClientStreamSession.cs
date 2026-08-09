@@ -95,6 +95,11 @@ namespace EasyRDP.Client.Wpf
             _flowControlEnabled = (codec == CodecId.Zrle);
             // 初始化心跳时间戳：RenderLoop 首轮即可按需发请求（首帧前多一次请求无害）
             _lastFrameRequestTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+            // 版本诊断标识：确认运行的客户端二进制包含 1 字节请求 payload 修复。
+            // 若日志无此行或 requestPayloadFix != v2-1byte-payload，说明是旧构建。
+            Logger.Info("=== EasyRDP Client build: {0} requestPayloadFix={1} ===",
+                EasyRDP.Core.Diagnostics.BuildInfo.Describe(),
+                EasyRDP.Core.Diagnostics.BuildInfo.RequestPayloadFixVersion);
             Logger.Info("InitPipeline: codec={0} resolution={1}x{2}", codec, width, height);
             _decoder = DecoderFactory.Create(codec);
             if (_decoder != null)
