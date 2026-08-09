@@ -46,10 +46,11 @@ namespace EasyRDP.Server.Wpf
         // encode thread has finished reading it. Plain A/B alternation could overwrite
         // a buffer the encoder is still reading when encode takes longer than 2 captures.
         // 4 缓冲：编码耗时 200-900ms 时，2 缓冲丢弃率高达 90%+，
-        // 4 缓冲给编码线程更多时间窗口，丢弃率降至可接受水平。
-        // 每缓冲 8.3MB(1080p BGRA)，4 缓冲共 33MB——可接受。
-        private readonly byte[][] _captureBufs = new byte[4][];
-        private readonly bool[] _captureBufInUse = new bool[4];
+        // 6 缓冲提高突发容限：偶发编码尖峰（如窗口弹出瞬间 ZRLE 全瓦片编码
+        // 实测 239ms）时截屏线程仍有缓冲可用，避免 all capture buffers busy 丢帧。
+        // 每缓冲 8.3MB(1080p BGRA)，6 缓冲共 50MB——XP 32 位 2GB 地址空间可接受。
+        private readonly byte[][] _captureBufs = new byte[6][];
+        private readonly bool[] _captureBufInUse = new bool[6];
         private int _lastW, _lastH;
 
         /// <summary>编码实际宽度（向上取偶后），客户端用此值计算坐标映射。</summary>

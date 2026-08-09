@@ -301,7 +301,7 @@ namespace EasyRDP.Server.Wpf
                 int nl = msg.IndexOf('\n');
                 if (nl > 0)
                     firstLine = msg.Substring(0, nl);
-                Logger.Warn("aly update error: {0}", firstLine);
+                Logger.Debug("aly updater not available: {0}", firstLine);
             };
             _alyUpdateClient.ErrorStatusChanged += _onUpdateErrorChanged;
         }

@@ -1498,15 +1498,15 @@ namespace EasyRDP.Client.Wpf
 
         /// <summary>
         /// 带重试的剪贴板设置：CLIPBRD_E_CANT_OPEN（0x800401D0）是剪贴板被其他
-        /// 进程/线程短暂占用的竞态，重试 3 次（间隔 50ms）后仍失败才记录警告。
+        /// 进程/线程短暂占用的竞态，重试 5 次（间隔 100ms）后仍失败才记录警告。
         /// 必须在 UI 线程（STA）调用。
-        /// 注意：重试中的 Sleep 会造成最多 ~100ms 的 UI 线程阻塞（仅发生在剪贴板
+        /// 注意：重试中的 Sleep 会造成最多 ~400ms 的 UI 线程阻塞（仅发生在剪贴板
         /// 被占用竞态时，低于感知阈值，可接受）。
         /// </summary>
         private static void TrySetClipboard(System.Action action, string logName)
         {
             System.Runtime.InteropServices.COMException lastEx = null;
-            for (int retry = 0; retry < 3; retry++)
+            for (int retry = 0; retry < 5; retry++)
             {
                 try
                 {
@@ -1516,12 +1516,12 @@ namespace EasyRDP.Client.Wpf
                 catch (System.Runtime.InteropServices.COMException ex)
                 {
                     lastEx = ex;
-                    if (retry < 2) System.Threading.Thread.Sleep(50);
+                    if (retry < 4) System.Threading.Thread.Sleep(100);
                 }
             }
-            // 3 次重试仍失败：记录警告（不抛异常，避免 UI 线程崩溃）
+            // 5 次重试仍失败：记录警告（不抛异常，避免 UI 线程崩溃）
             NLog.LogManager.GetCurrentClassLogger().Warn(lastEx,
-                "Clipboard {0} set failed after 3 retries", logName);
+                "Clipboard {0} set failed after 5 retries", logName);
         }
 
         /// <summary>WPF MouseButton → EasyDesk MouseButton 显式映射（左=1 右=2 中=3 X1=4 X2=5）。</summary>
