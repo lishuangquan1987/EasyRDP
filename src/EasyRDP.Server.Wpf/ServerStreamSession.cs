@@ -344,11 +344,13 @@ namespace EasyRDP.Server.Wpf
             {
                 if (_frameQueue.Count >= _frameQueueCapacity)
                 {
-                    // 截屏→编码队列满，丢弃此帧（编码速度跟不上截屏速度）
+                    // 截屏→编码队列满，丢弃此帧（编码速度跟不上截屏速度）。
+                    // 诊断增强：附带编码进度/流控状态，定位是编码线程阻塞还是单纯降速。
                     _captureQueueDrops++;
                     if (_captureQueueDrops == 1 || _captureQueueDrops % 60 == 0)
-                        Logger.Warn("Session {0}: capture queue full, frame dropped, total drops={1}",
-                            _sessionId, _captureQueueDrops);
+                        Logger.Warn("Session {0}: capture queue full, frame dropped, total drops={1}. queueCap={2} encoded={3} pending={4} flowEnabled={5}",
+                            _sessionId, _captureQueueDrops, _frameQueueCapacity,
+                            Interlocked.Read(ref _framesEncoded), _clientRequestPending, _flowControlEnabled);
                     return;
                 }
                 for (int i = 0; i < _captureBufs.Length; i++)
@@ -416,13 +418,20 @@ namespace EasyRDP.Server.Wpf
                 if (_flowControlEnabled && !_clientRequestPending
                     && Interlocked.Read(ref _framesEncoded) > 0)
                 {
+                    Logger.Debug("Session {0}: EncodeLoop iter={1} flow-wait begin, pending={2} framesEncoded={3} queueCount={4}",
+                        _sessionId, encodeLoopIter, _clientRequestPending,
+                        Interlocked.Read(ref _framesEncoded), GetFrameQueueCount());
+                    var waitSw = System.Diagnostics.Stopwatch.StartNew();
                     lock (_lock)
                     {
                         // 带超时保活：客户端崩溃/断开后不永远等待，1s 超时后继续取帧（保底 ~1 FPS）
                         if (!_clientRequestPending && !_stopping)
                             Monitor.Wait(_lock, 1000);
                     }
+                    waitSw.Stop();
                     if (_stopping) break;
+                    Logger.Debug("Session {0}: EncodeLoop iter={1} flow-wait end, pending={2} waitMs={3}",
+                        _sessionId, encodeLoopIter, _clientRequestPending, waitSw.ElapsedMilliseconds);
                     // 超时（_clientRequestPending==false）：不 continue，继续执行取帧编码逻辑，
                     // 实现保底 ~1 FPS。注意：原 `continue` 会跳过取帧回到循环顶部再次 Wait ——
                     // 队列中已积压的帧永远不会被编码（纯空转），必须继续取帧。
@@ -459,6 +468,7 @@ namespace EasyRDP.Server.Wpf
                         if (_flowControlEnabled)
                         {
                             // 流控模式：丢弃旧帧、保留最新帧（请求不能浪费）
+                            int dropped = 0;
                             bool sentinelHit = false;
                             while (_frameQueue.Count > 0)
                             {
@@ -470,8 +480,12 @@ namespace EasyRDP.Server.Wpf
                                 }
                                 _captureBufInUse[frame.BufferIndex] = false;
                                 frame = newer;
+                                dropped++;
                             }
                             if (sentinelHit) break; // sentinel → 编码线程结束
+                            if (dropped > 0)
+                                Logger.Debug("Session {0}: EncodeLoop iter={1} flow-drop: skipped {2} older frame(s), latest bufIdx={3}",
+                                    _sessionId, encodeLoopIter, dropped, frame.BufferIndex);
                         }
                         else
                         {
@@ -491,12 +505,15 @@ namespace EasyRDP.Server.Wpf
                 // 会重新驱动请求，避免失败重试风暴（_consecutiveEncodeFailures 已兜底断连）。
                 if (_flowControlEnabled)
                 {
+                    Logger.Debug("Session {0}: EncodeLoop iter={1} consume request, pending={2}->false",
+                        _sessionId, encodeLoopIter, _clientRequestPending);
                     lock (_lock) { _clientRequestPending = false; }
                 }
 
                 if (encodeLoopIter == 1 || encodeLoopIter % 100 == 0)
-                    Logger.Info("Session {0}: EncodeLoop iter={1} dequeued frame res={2}x{3} bgraLen={4}",
-                        _sessionId, encodeLoopIter, frame.Width, frame.Height, frame.Pixels.Length);
+                    Logger.Info("Session {0}: EncodeLoop iter={1} dequeued frame res={2}x{3} bgraLen={4} queueRemaining={5}",
+                        _sessionId, encodeLoopIter, frame.Width, frame.Height, frame.Pixels.Length,
+                        GetFrameQueueCount());
 
                 // Throttle（D11 自适应帧率 + D12 全局负载：负载每级额外 +10ms 帧间隔）。
                 // 流控模式下客户端请求本身已限速（请求到达后才编码），跳过节流避免双重延迟。
@@ -853,6 +870,11 @@ namespace EasyRDP.Server.Wpf
         /// </summary>
         public void OnFramebufferUpdateRequest()
         {
+            // 诊断日志：记录请求到达时的流控状态（线程 ID + 编码进度 + 当前 pending）。
+            // 若此日志高频出现而 flow-wait end 未见/超时，说明接收线程处理延迟或脉冲丢失。
+            Logger.Debug("Session {0}: OnFramebufferUpdateRequest: pending={1}->true framesEncoded={2} threadId={3}",
+                _sessionId, _clientRequestPending, Interlocked.Read(ref _framesEncoded),
+                System.Threading.Thread.CurrentThread.ManagedThreadId);
             // 与编码线程的请求消费写（EncodeLoop 内同 _lock）在同一锁内，
             // 消除"置 true / 置 false"交错覆盖窗口（volatile 仅保证可见性）。
             lock (_lock)
@@ -860,6 +882,12 @@ namespace EasyRDP.Server.Wpf
                 _clientRequestPending = true;
                 Monitor.Pulse(_lock);
             }
+        }
+
+        /// <summary>获取帧队列当前长度（诊断日志用；调用方不在 _lock 内时安全）。</summary>
+        private int GetFrameQueueCount()
+        {
+            lock (_lock) { return _frameQueue.Count; }
         }
 
         /// <summary>触发一次 FatalError（不可恢复故障，TransportHost 据此断开会话）。</summary>
