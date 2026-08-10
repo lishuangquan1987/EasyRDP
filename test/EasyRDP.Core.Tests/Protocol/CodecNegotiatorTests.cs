@@ -79,13 +79,23 @@ namespace EasyRDP.Core.Tests.Protocol
         }
 
         [Fact]
-        public void BothSupportVp8AndH264Software_ShouldReturnVp8()
+        public void BothSupportH264SoftwareAndVp8_ShouldReturnH264Software()
         {
-            // VP8 优先级高于软件 H264
+            // H264 软编优先级高于 VP8（弱机 CPU 友好优先）
             var result = CodecNegotiator.Negotiate(
                 CodecCapabilities.H264Software | CodecCapabilities.Vp8Software,
                 CodecCapabilities.H264Software | CodecCapabilities.Vp8Software);
-            Assert.Equal(CodecId.Vp8Software, result);
+            Assert.Equal(CodecId.H264Software, result);
+        }
+
+        [Fact]
+        public void BothSupportH264SoftwareAndZrle_ShouldReturnH264Software()
+        {
+            // H264 软编优先级高于 ZRLE（弱机编码速度优先；ZRLE 作为 H264 不可用回退）
+            var result = CodecNegotiator.Negotiate(
+                CodecCapabilities.H264Software | CodecCapabilities.Zrle,
+                CodecCapabilities.H264Software | CodecCapabilities.Zrle);
+            Assert.Equal(CodecId.H264Software, result);
         }
 
         [Fact]

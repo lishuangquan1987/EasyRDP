@@ -70,15 +70,17 @@ namespace EasyRDP.Server.Wpf
         private long _encodeSum;
         private const int AdaptiveWindow = 30;
         // 编码分辨率上限：0 = 不降分辨率（全分辨率）。>0 时编码线程按该宽度等比降采样。
-        // D11 运行时自适应调整：编码耗时持续超标降档（1920→1280→960→640），恢复后升档回全分辨率。
+        // D11 运行时自适应调整：编码耗时持续超标降档（1920→1280→960），恢复后升档回全分辨率。
+        // 最低档 960×540（弱机 640×360 完全不可读，禁止自动降到该档以下）。
         private volatile int _adaptiveMaxEncodeWidth;
-        // 分辨率档位自适应计数：降档/升档都需要连续多帧达到阈值才动作，避免抖动
+        // 分辨率档位自适应计数：降档/升档都需要连续多帧达到阈值才动作，避免抖动。
+        // 阈值基于弱机实测：ZRLE 静态帧 ~100ms、动态帧 300ms+；OpenH264 软编低一个量级。
         private int _downscaleStreak;
         private int _upscaleStreak;
-        private const int DownscaleStreakLimit = 10;  // 连续 10 帧编码耗时超标 → 降一档
-        private const int UpscaleStreakLimit = 60;    // 连续 60 帧编码耗时充裕 → 升一档
-        private const double DownscaleThresholdMs = 40.0;  // 编码耗时 > 40ms 视为超标
-        private const double UpscaleThresholdMs = 20.0;    // 编码耗时 < 20ms 视为充裕
+        private const int DownscaleStreakLimit = 20;  // 连续 20 帧编码耗时超标 → 降一档
+        private const int UpscaleStreakLimit = 30;    // 连续 30 帧编码耗时充裕 → 升一档
+        private const double DownscaleThresholdMs = 100.0;  // 编码耗时 > 100ms 视为超标
+        private const double UpscaleThresholdMs = 60.0;     // 编码耗时 < 60ms 视为充裕
         // 码率档位（bps）：默认 15Mbps，发送瓶颈/高负载时逐级下调
         private static readonly int[] BitrateSteps = new int[]
         {
@@ -776,8 +778,8 @@ namespace EasyRDP.Server.Wpf
                             _downscaleStreak = 0;
                             int next = NextDownscaleStep(_adaptiveMaxEncodeWidth);
                             // 档位不低于实际内容宽度时（如 1600 宽屏首档 1920 不生效），
-                            // 循环跳档直到低于内容宽或到最低档 640（序列单调递减，无死循环）。
-                            while (next >= _contentW && next > 640)
+                            // 循环跳档直到低于内容宽或到最低档 960（序列单调递减，无死循环）。
+                            while (next >= _contentW && next > 960)
                                 next = NextDownscaleStep(next);
                             if (next != _adaptiveMaxEncodeWidth)
                             {
@@ -934,22 +936,20 @@ namespace EasyRDP.Server.Wpf
         }
 
         /// <summary>
-        /// D11 分辨率降档：0（全分辨率）→1920→1280→960→640。
+        /// D11 分辨率降档：0（全分辨率）→1920→1280→960（最低档，不再下降）。
         /// </summary>
         private static int NextDownscaleStep(int current)
         {
             if (current == 0) return 1920;
             if (current > 1280) return 1280;
-            if (current > 960) return 960;
-            return 640;
+            return 960;
         }
 
         /// <summary>
-        /// D11 分辨率升档：640→960→1280→1920→0（恢复全分辨率）。
+        /// D11 分辨率升档：960→1280→1920→0（恢复全分辨率）。
         /// </summary>
         private static int NextUpscaleStep(int current)
         {
-            if (current < 960) return 960;
             if (current < 1280) return 1280;
             if (current < 1920) return 1920;
             return 0;
