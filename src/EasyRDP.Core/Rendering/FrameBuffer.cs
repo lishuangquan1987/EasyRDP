@@ -50,6 +50,20 @@ namespace EasyRDP.Core.Rendering
             get { lock (_lock) return _frameCount; }
         }
 
+        /// <summary>
+        /// 预设置帧尺寸（InitPipeline 时调用）。避免首帧到达时因 FrameWidth=0 触发
+        /// 无谓的解码器重建（decoder.Reset+Initialize+renderTarget.Resize），
+        /// 对 H264 解码器尤其有意义（重建有原生开销）。CommitFrame 仍会更新尺寸。
+        /// </summary>
+        public void SetSize(int width, int height)
+        {
+            lock (_lock)
+            {
+                _width = width;
+                _height = height;
+            }
+        }
+
         /// <summary>Gets the monotonically increasing sequence number of the latest committed frame.</summary>
         public long Sequence
         {

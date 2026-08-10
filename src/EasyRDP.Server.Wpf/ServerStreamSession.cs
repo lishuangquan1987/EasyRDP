@@ -216,6 +216,19 @@ namespace EasyRDP.Server.Wpf
             }
             Logger.Info("Session {0}: encoder created for codec {1}", sessionId, codec);
 
+            // 弱机优化：ZRLE 流控模式下客户端请求驱动（间隔 ≥250ms），服务端 60fps 捕获
+            // 纯属浪费——实测捕获 863 帧 vs 编码 452 帧，半数捕获帧被 flow-drop 丢弃，
+            // 捕获线程还和编码线程争抢弱机 CPU。流控模式下把捕获间隔降到 100ms
+            // （10fps 上限，仍远超 2-4fps 编码需求），释放 CPU 给编码；H264 推送模式保持 16ms。
+            // 注意：CaptureService 为全局单例，多会话时此设置影响所有会话
+            // （弱机单会话为目标场景，见注释）。
+            if (_flowControlEnabled)
+            {
+                var captureImpl = _captureService as CaptureService;
+                if (captureImpl != null)
+                    captureImpl.FrameIntervalMs = 100;
+            }
+
             // 初始化阶段抛异常时先释放编码器，再向上抛出（此时 _running=false，
             // Stop() 会提前返回，若不在此释放会造成原生句柄泄漏）
             try
@@ -296,6 +309,11 @@ namespace EasyRDP.Server.Wpf
 
             // 2. Unsubscribe from capture events so no new frames enter _frameQueue
             _captureService.FrameCaptured -= OnFrameCaptured;
+
+            // 恢复捕获间隔（Start 时流控模式降为 100ms），避免影响后续 H264 会话的 60fps 需求
+            var captureImpl = _captureService as CaptureService;
+            if (captureImpl != null)
+                captureImpl.FrameIntervalMs = 16;
 
             // 3. Clear queues + push sentinel values to unblock waiting threads.
             //    Order matters: Clear then Enqueue under same lock prevents a race

@@ -66,7 +66,8 @@ namespace EasyRDP.Core.Tests.Transport
         public void MultiFragment_ShouldDeliverAllFragments_Unchanged()
         {
             // 回归保护：标准多分片消息（FragAndSend 切分）解析行为不变。
-            byte[] payload = new byte[3000];
+            // payload 需 > FragmentSize(16384) 才触发多分片路径（旧 1400 时 3000 字节即可）。
+            byte[] payload = new byte[40000];
             for (int i = 0; i < payload.Length; i++)
                 payload[i] = (byte)((i * 13) % 256);
 
@@ -168,11 +169,13 @@ namespace EasyRDP.Core.Tests.Transport
         [Fact]
         public void InterleavedMultiFragmentResponses_LoseOneFrame()
         {
-            // 对照测试：旧实现把每个响应切成 1400 字节分片且共用 frameId=0，
-            // 两个并发响应的分片交错到达时，重组器会把后到的同槽分片丢弃，导致其中一个响应永远组装不齐
-            // （下载块超时失败 → 剪贴板不被设置 → 无粘贴菜单）。本测试固化该缺陷以说明修复动机。
-            byte[] payloadA = new byte[3000];
-            byte[] payloadB = new byte[3000];
+            // 对照测试：多分片（> FragmentSize=16384）且共用 frameId=0 时，
+            // 两个并发响应的分片交错到达，重组器会把后到的同槽分片丢弃，导致其中一个响应永远组装不齐
+            // （下载块超时失败 → 剪贴板不被设置 → 无粘贴菜单）。本测试固化该缺陷以说明
+            // 为什么生产代码改用 SendSingleFragment（独立完整帧，见 SendSingleFragment_RoundTrip）。
+            // payload 40000 字节 → 3 片，确保进入多分片路径（旧 1400 时 3000 字节即可）。
+            byte[] payloadA = new byte[40000];
+            byte[] payloadB = new byte[40000];
             for (int i = 0; i < payloadA.Length; i++)
             {
                 payloadA[i] = (byte)(i & 0xFF);

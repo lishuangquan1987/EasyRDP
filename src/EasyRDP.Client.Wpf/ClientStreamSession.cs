@@ -128,6 +128,8 @@ namespace EasyRDP.Client.Wpf
             else
                 Logger.Error("InitPipeline: decoder not available for codec {0} — H264 decoding is mandatory", codec);
             _frameBuffer = new FrameBuffer();
+            // 预设置帧尺寸：否则 FrameWidth=0，首帧必触发一次无谓的解码器重建
+            _frameBuffer.SetSize(width, height);
             if (_renderTarget != null)
                 _renderTarget.Resize(width, height);
             _pipelineReady = true;
