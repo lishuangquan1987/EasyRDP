@@ -26,7 +26,7 @@ namespace EasyRDP.Server.Wpf
         public event Action<uint> SessionDetached;
 
         private readonly ICaptureService _captureService;
-        private readonly ITransportServer _transportServer;
+        private readonly ITransportAcceptor _transportAcceptor;
         private readonly IInputSimulator _inputSimulator; // Shared for all input sessions
 
         // Session tracking
@@ -37,8 +37,11 @@ namespace EasyRDP.Server.Wpf
         private int _maxSessions = 2; // D12 default for XP dual-core
         private int _activeCount;
 
-        // Reassemblers per session
-        private readonly Dictionary<uint, MessageReassembler> _reassemblers = new Dictionary<uint, MessageReassembler>();
+        // Per-session transports (sessionId → ITransport)，替代旧的 MessageReassembler 字典。
+        // 路由由 TransportHost 维护：MessageReceived 订阅用闭包捕获 sessionId。
+        private readonly Dictionary<uint, ITransport> _transports = new Dictionary<uint, ITransport>();
+        // sessionId 自增计数器（原来在 TcpTransportServer.AcceptLoop 分配，迁移到 TransportHost）
+        private uint _nextSessionId = 1;
 
         // Cursor tracking
         private readonly ICursorTracker _cursorTracker;
@@ -190,22 +193,20 @@ namespace EasyRDP.Server.Wpf
 
         public TransportHost(
             ICaptureService captureService,
-            ITransportServer transportServer,
+            ITransportAcceptor transportAcceptor,
             IInputSimulator inputSimulator,
             ICursorCapturer cursorCapturer,
             IClipboardService clipboardService,
             Dictionary<string, string> credentials)
         {
             _captureService = captureService;
-            _transportServer = transportServer;
+            _transportAcceptor = transportAcceptor;
             _inputSimulator = inputSimulator;
             _cursorTracker = new CursorTracker(cursorCapturer);
             _clipboardService = clipboardService;
             _credentials = credentials ?? new Dictionary<string, string>();
 
-            _transportServer.DataReceived += OnDataReceived;
-            _transportServer.ClientConnected += OnClientConnected;
-            _transportServer.ClientDisconnected += OnClientDisconnected;
+            _transportAcceptor.ClientConnected += OnClientConnected;
 
             // 剪贴板 STA 线程：IClipboardService 必须在 STA 线程调用
             if (_clipboardService != null)
@@ -216,11 +217,11 @@ namespace EasyRDP.Server.Wpf
             }
         }
 
-        public void Start(int port)
+        public void Start(string endpoint)
         {
-            Logger.Info("TransportHost starting on port {0}", port);
+            Logger.Info("TransportHost starting on endpoint {0}", endpoint);
             _running = true;
-            _transportServer.Start(port);
+            _transportAcceptor.Start(endpoint);
 
             _heartbeatThread = new Thread(HeartbeatLoop);
             _heartbeatThread.IsBackground = true;
@@ -305,7 +306,7 @@ namespace EasyRDP.Server.Wpf
                     catch { }
                 }
                 _sessions.Clear();
-                _reassemblers.Clear();
+                _transports.Clear();
                 _lastActivity.Clear();
                 _remoteEndpoints.Clear();
             }
@@ -333,7 +334,7 @@ namespace EasyRDP.Server.Wpf
                 try { _captureService.Stop(); }
                 catch (Exception ex) { Logger.Warn(ex, "CaptureService stop failed"); }
             }
-            _transportServer.Stop();
+            _transportAcceptor.Stop();
             _heartbeatThread?.Join(2000);
             _clipboardThread?.Join(2000);
         }
@@ -706,8 +707,7 @@ namespace EasyRDP.Server.Wpf
                         // 单完整帧发送：并发响应的分片若交错且共用 frameId=0，
                         // 接收端重组器会把不同响应的分片混在一起导致 payload 损坏（下载失败 → 无粘贴菜单）。
                         // 每个响应作为完整帧发送，线上交错时互不干扰。
-                        MessageReassembler.SendSingleFragment(0, (byte)MessageType.ClipFileContentsRes, payload,
-                            (s, d) => _transportServer.SendTo(s, d), targetSid);
+                        SendMessage(targetSid, (byte)MessageType.ClipFileContentsRes, payload);
                     });
                 lock (_clipProviderLock)
                 {
@@ -733,8 +733,7 @@ namespace EasyRDP.Server.Wpf
                 {
                     // FragAndSend 签名：(frameId, messageType, payload, sendAction, sessionId)
                     // 控制流 frameId=0；sessionId=sid（传给 sendAction → SendTo）
-                    MessageReassembler.FragAndSend(0, (byte)MessageType.ClipFormatList, listPayload,
-                        (s, data) => _transportServer.SendTo(s, data), sid);
+                    SendMessage(sid, (byte)MessageType.ClipFormatList, listPayload);
                 }
                 catch (Exception ex)
                 {
@@ -824,8 +823,7 @@ namespace EasyRDP.Server.Wpf
                     {
                         // FragAndSend 签名：(frameId, messageType, payload, sendAction, sessionId)
                         // 控制流 frameId=0；sessionId=sid（传给 sendAction → SendTo）
-                        MessageReassembler.FragAndSend(0, (byte)MessageType.ImageClipboardStart, startPayload,
-                            (s, data) => _transportServer.SendTo(s, data), sid);
+                        SendMessage(sid, (byte)MessageType.ImageClipboardStart, startPayload);
                     }
                     catch (Exception ex)
                     {
@@ -865,8 +863,7 @@ namespace EasyRDP.Server.Wpf
                         {
                             // FragAndSend 签名：(frameId, messageType, payload, sendAction, sessionId)
                             // 控制流 frameId=0；sessionId=sid（传给 sendAction → SendTo）
-                            MessageReassembler.FragAndSend(0, (byte)MessageType.ImageClipboardData, dataPayload,
-                                (s, d) => _transportServer.SendTo(s, d), sid);
+                            SendMessage(sid, (byte)MessageType.ImageClipboardData, dataPayload);
                         }
                         catch (Exception ex)
                         {
@@ -887,8 +884,7 @@ namespace EasyRDP.Server.Wpf
                     {
                         // FragAndSend 签名：(frameId, messageType, payload, sendAction, sessionId)
                         // 控制流 frameId=0；sessionId=sid（传给 sendAction → SendTo）
-                        MessageReassembler.FragAndSend(0, (byte)MessageType.ImageClipboardEnd, endPayload,
-                            (s, data) => _transportServer.SendTo(s, data), sid);
+                        SendMessage(sid, (byte)MessageType.ImageClipboardEnd, endPayload);
                     }
                     catch (Exception ex)
                     {
@@ -942,8 +938,7 @@ namespace EasyRDP.Server.Wpf
                     {
                         // FragAndSend 签名：(frameId, messageType, payload, sendAction, sessionId)
                         // 控制流 frameId=0；sessionId=sid（传给 sendAction → SendTo）
-                        MessageReassembler.FragAndSend(0, (byte)MessageType.ClipboardSync, payload,
-                            (s, data) => _transportServer.SendTo(s, data), sid);
+                        SendMessage(sid, (byte)MessageType.ClipboardSync, payload);
                     }
                     catch (Exception ex)
                     {
@@ -992,31 +987,41 @@ namespace EasyRDP.Server.Wpf
             DisconnectSession(sessionId);
         }
 
-        private void OnClientConnected(object sender, ConnectionEventArgs e)
+        private void OnClientConnected(object sender, TransportAcceptedEventArgs e)
         {
-            Logger.Info("Client connected: sessionId={0}", e.SessionId);
-            // Create reassembler for this session
-            var reassembler = new MessageReassembler();
-            reassembler.MessageReceived += (s, args) => OnMessageReceived(args);
+            uint sessionId;
+            lock (_lock)
+            {
+                sessionId = _nextSessionId++;
+            }
+
+            Logger.Info("Client connected: sessionId={0} remote={1}", sessionId, e.RemoteEndPoint);
+
+            var transport = e.Transport;
 
             lock (_lock)
             {
-                _reassemblers[e.SessionId] = reassembler;
-                _lastActivity[e.SessionId] = DateTime.UtcNow;
-                _remoteEndpoints[e.SessionId] = e.RemoteEndPoint ?? "";
+                _transports[sessionId] = transport;
+                _lastActivity[sessionId] = DateTime.UtcNow;
+                _remoteEndpoints[sessionId] = e.RemoteEndPoint ?? "";
             }
-        }
 
-        private void OnDataReceived(object sender, FragmentReceivedEventArgs e)
-        {
-            MessageReassembler reassembler;
-            lock (_lock)
+            // 订阅该连接的 MessageReceived/Disconnected（闭包捕获 sessionId 完成路由），
+            // 订阅完成后才 Start() 启动接收，避免首包在订阅前到达而丢失（首包竞态）。
+            transport.MessageReceived += (s, args) =>
             {
-                if (!_reassemblers.TryGetValue(e.SessionId, out reassembler))
-                    return;
-                _lastActivity[e.SessionId] = DateTime.UtcNow;
-            }
-            reassembler.OnFragment(e);
+                // TcpTransport 抛事件时 SessionId=0；这里填充真实 sessionId，
+                // 后续 OnMessageReceived 及其 Handler 仍按 e.SessionId 路由，无需改动。
+                args.SessionId = sessionId;
+                lock (_lock)
+                {
+                    _lastActivity[sessionId] = DateTime.UtcNow;
+                }
+                OnMessageReceived(args);
+            };
+            transport.Disconnected += (s, args) => OnTransportDisconnected(sessionId);
+
+            transport.Start();
         }
 
         private void OnMessageReceived(MessageReceivedEventArgs e)
@@ -1100,8 +1105,7 @@ namespace EasyRDP.Server.Wpf
                     // 心跳探测的回包路径不经过此处）直接忽略。TCP 下该消息极轻量（≤24 字节线格式）。
                     if (e.Data != null && e.Data.Length >= 8)
                     {
-                        MessageReassembler.SendSingleFragment(0, (byte)MessageType.Keepalive, e.Data,
-                            (s2, data) => _transportServer.SendTo(s2, data), e.SessionId);
+                        SendMessage(e.SessionId, (byte)MessageType.Keepalive, e.Data);
                     }
                 }
                 else if (e.MessageType == (byte)MessageType.DiagnosticInfoRequest)
@@ -1142,8 +1146,7 @@ namespace EasyRDP.Server.Wpf
                         // 控制流 frameId=0；sessionId=e.SessionId（传给 sendAction → SendTo）
                         // 之前误把 e.SessionId 传给 frameId、0 传给 sessionId，
                         // 导致 SendTo(0, ...) 静默失败，FileContentsReq 永远发不到客户端
-                        MessageReassembler.FragAndSend(0, (byte)MessageType.ClipFileContentsReq, payload,
-                            (s, d) => _transportServer.SendTo(s, d), e.SessionId);
+                        SendMessage(e.SessionId, (byte)MessageType.ClipFileContentsReq, payload);
                     },
                     localPaths =>
                     {
@@ -1406,7 +1409,7 @@ namespace EasyRDP.Server.Wpf
                 Logger.Info("Session {0}: change detector created, mode={1}", e.SessionId, _changeDetectionMode);
                 var streamSession = new ServerStreamSession(_captureService, (sid, data) =>
                 {
-                    _transportServer.SendTo(sid, data);
+                    SendRaw(sid, data);
                 }, _cursorTracker, changeDetector);
                 // 流会话不可恢复故障（编码器反复失败等）→ 记录日志并异步断开该会话。
                 // 事件可能在编码线程触发，不能直接调用 DisconnectSession（Stop 会 Join 自身线程），
@@ -1487,28 +1490,53 @@ namespace EasyRDP.Server.Wpf
         private void SendResponse(uint sessionId, HandshakeRes res)
         {
             byte[] payload = res.Pack();
-            MessageReassembler.FragAndSend(0, (byte)MessageType.HandshakeRes, payload,
-                (sid, data) => _transportServer.SendTo(sid, data), sessionId);
+            SendMessage(sessionId, (byte)MessageType.HandshakeRes, payload);
         }
 
-        private void OnClientDisconnected(object sender, ConnectionEventArgs e)
+        /// <summary>线程安全地向指定会话发送一条完整消息（framing 外层由本方法拼装）。</summary>
+        private void SendMessage(uint sessionId, byte messageType, byte[] payload)
         {
-            DisconnectSession(e.SessionId);
+            ITransport transport;
+            lock (_lock)
+            {
+                if (!_transports.TryGetValue(sessionId, out transport))
+                    return;
+            }
+            transport.Send(Framing.BuildMessage(messageType, payload));
+        }
+
+        /// <summary>线程安全地向指定会话发送已 framed 的完整消息字节（如 ServerStreamSession 已拼装好的帧）。</summary>
+        private void SendRaw(uint sessionId, byte[] wire)
+        {
+            ITransport transport;
+            lock (_lock)
+            {
+                if (!_transports.TryGetValue(sessionId, out transport))
+                    return;
+            }
+            transport.Send(wire);
+        }
+
+        private void OnTransportDisconnected(uint sessionId)
+        {
+            DisconnectSession(sessionId);
 
             var handler = SessionDetached;
-            if (handler != null) handler(e.SessionId);
+            if (handler != null) handler(sessionId);
         }
 
         private void DisconnectSession(uint sessionId)
         {
             Logger.Info("Disconnecting session {0}", sessionId);
             SessionInfo info;
+            ITransport transport = null;
             lock (_lock)
             {
                 if (!_sessions.TryGetValue(sessionId, out info))
                     return;
                 _sessions.Remove(sessionId);
-                _reassemblers.Remove(sessionId);
+                _transports.TryGetValue(sessionId, out transport);
+                _transports.Remove(sessionId);
                 _lastActivity.Remove(sessionId);
                 _remoteEndpoints.Remove(sessionId);
                 _activeCount--;
@@ -1551,7 +1579,10 @@ namespace EasyRDP.Server.Wpf
             try { info.Stream?.Dispose(); } catch { }
             try { info.Input?.Dispose(); } catch { }
 
-            _transportServer.Disconnect(sessionId);
+            if (transport != null)
+            {
+                try { transport.Disconnect(); } catch { }
+            }
             Logger.Info("Session {0} disconnected", sessionId);
 
             // 无会话后停止捕获与光标追踪（服务端保持监听，等待下一客户端）
@@ -1595,8 +1626,7 @@ namespace EasyRDP.Server.Wpf
 
             byte[] payload = msg.Pack();
             // 控制流单分片发送（消息很小，不切分）
-            MessageReassembler.SendSingleFragment(0, (byte)MessageType.DiagnosticInfo, payload,
-                (s2, data) => _transportServer.SendTo(s2, data), sessionId);
+            SendMessage(sessionId, (byte)MessageType.DiagnosticInfo, payload);
             Logger.Info("DiagnosticInfo sent to session {0}: cpu={1} gpu={2} memMB={3} capture={4} scale={5}",
                 sessionId, msg.CpuName, msg.GpuName, msg.TotalMemoryMb, msg.CaptureMethod, msg.ScaleFactorX100);
         }
@@ -1636,8 +1666,7 @@ namespace EasyRDP.Server.Wpf
                     try
                     {
                         var empty = new byte[0];
-                        MessageReassembler.FragAndSend(0, (byte)MessageType.Keepalive, empty,
-                            (s2, data) => _transportServer.SendTo(s2, data), sid);
+                        SendMessage(sid, (byte)MessageType.Keepalive, empty);
                     }
                     catch (Exception ex)
                     {

@@ -281,7 +281,7 @@ namespace EasyRDP.Server.Wpf
             if (_cursorTracker != null)
             {
                 _cursorSession = _cursorTracker.CreateSession();
-                _cursorSession.AttachSendTo(_sendTo, _sessionId);
+                _cursorSession.AttachSendTo(wire => _sendTo(_sessionId, wire));
                 _cursorSession.Start();
             }
 
@@ -928,21 +928,17 @@ namespace EasyRDP.Server.Wpf
                     if (fts.Data == null) break; // sentinel
                 }
 
-                // Fragment and send
-                int fragCount = (fts.Data.Length + Constants.FragmentSize - 1) / Constants.FragmentSize;
-                if (fragCount == 0) fragCount = 1;
-
-                MessageReassembler.FragAndSend(
-                    sendFrameId, (byte)MessageType.VideoFrame, fts.Data,
-                    _sendTo, _sessionId);
+                // 发送完整视频帧消息（Framing.BuildMessage 组装 framing 外层，无分片）
+                byte[] wire = Framing.BuildMessage((byte)MessageType.VideoFrame, fts.Data);
+                _sendTo(_sessionId, wire);
 
                 Interlocked.Increment(ref _framesSent);
                 if (_framesSent == 1)
-                    Logger.Info("Session {0}: FIRST frame sent, frameId={1} payloadLen={2} fragCount={3} keyframe={4}",
-                        _sessionId, sendFrameId, fts.Data.Length, fragCount, fts.IsKeyframe);
+                    Logger.Info("Session {0}: FIRST frame sent, frameId={1} payloadLen={2} keyframe={3}",
+                        _sessionId, sendFrameId, fts.Data.Length, fts.IsKeyframe);
                 else if (_framesSent % 100 == 0)
-                    Logger.Debug("Session {0}: sent {1} frames, last frameId={2} payloadLen={3} fragCount={4}",
-                        _sessionId, _framesSent, sendFrameId, fts.Data.Length, fragCount);
+                    Logger.Debug("Session {0}: sent {1} frames, last frameId={2} payloadLen={3}",
+                        _sessionId, _framesSent, sendFrameId, fts.Data.Length);
 
                 sendFrameId++;
             }

@@ -9,6 +9,7 @@ using AlyClient.CSharpSDK;
 using EasyDesk.Core;
 using EasyDesk.Windows;
 using EasyRDP.Core.Protocol;
+using EasyRDP.Core.Transport;
 using EasyRDP.Shared;
 using NLog;
 
@@ -24,7 +25,7 @@ namespace EasyRDP.Server.Wpf
 
         // 业务对象
         private CaptureService _captureService;
-        private TcpTransportServer _transportServer;
+        private ITransportAcceptor _transportAcceptor;
         private TransportHost _transportHost;
         private DateTime _startTime;
         private DispatcherTimer _uptimeTimer;
@@ -412,8 +413,8 @@ namespace EasyRDP.Server.Wpf
                 // 捕获与光标追踪由 TransportHost 在首个客户端会话接入时惰性启动、
                 // 最后一个会话断开时停止：无客户端时不截屏，避免资源浪费与本机光标异常。
 
-                _transportServer = new TcpTransportServer();
-                _transportServer.OnLog = (msg) => _dispatcher.Invoke(() => AddLog(msg));
+                _transportAcceptor = new TcpTransportAcceptor();
+                _transportAcceptor.OnLog = (msg) => _dispatcher.Invoke(() => AddLog(msg));
 
                 // 构造凭据表：UI 配置的用户名/密码
                 var credentials = new System.Collections.Generic.Dictionary<string, string>
@@ -421,12 +422,12 @@ namespace EasyRDP.Server.Wpf
                     { username, password }
                 };
 
-                _transportHost = new TransportHost(_captureService, _transportServer, inputSim, cursorCapturer, clipboard, credentials);
+                _transportHost = new TransportHost(_captureService, _transportAcceptor, inputSim, cursorCapturer, clipboard, credentials);
                 // 注入当前帧变化检测模式（运行时 UI 修改会通过属性 setter 同步更新）
                 _transportHost.ChangeDetectionMode = _changeDetectionMode;
                 _transportHost.SessionAttached += OnSessionAttached;
                 _transportHost.SessionDetached += OnSessionDetached;
-                _transportHost.Start(port);
+                _transportHost.Start(port.ToString());
 
                 _startTime = DateTime.Now;
                 _uptimeTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
@@ -458,8 +459,8 @@ namespace EasyRDP.Server.Wpf
                 _transportHost.SessionDetached -= OnSessionDetached;
             }
             _transportHost = null;
-            _transportServer?.Dispose();
-            _transportServer = null;
+            _transportAcceptor?.Dispose();
+            _transportAcceptor = null;
             _captureService?.Stop();
             _captureService = null;
 

@@ -1,0 +1,76 @@
+<Project>
+  <PropertyGroup>
+    <AssemblyName>EasyRDP.Server.Wpf</AssemblyName>
+    <IntermediateOutputPath>obj\Debug\</IntermediateOutputPath>
+    <BaseIntermediateOutputPath>obj\</BaseIntermediateOutputPath>
+    <MSBuildProjectExtensionsPath>E:\Project2026\EasyRDP\src\EasyRDP.Server.Wpf\obj\</MSBuildProjectExtensionsPath>
+    <_TargetAssemblyProjectName>EasyRDP.Server.Wpf</_TargetAssemblyProjectName>
+    <RootNamespace>EasyRDP.Server.Wpf</RootNamespace>
+  </PropertyGroup>
+  <Import Project="Sdk.props" Sdk="Microsoft.NET.Sdk" />
+  <ItemGroup>
+    <ProjectReference Include="..\EasyRDP.Core\EasyRDP.Core.csproj" />
+    <ProjectReference Include="..\..\aly\client\aly-client-sdk\AlyClient.CSharpSDK\AlyClient.CSharpSDK\AlyClient.CSharpSDK.csproj" />
+    <ProjectReference Include="..\..\EasyDesk\src\EasyDesk.Core\EasyDesk.Core.csproj" />
+    <ProjectReference Include="..\..\EasyDesk\src\EasyDesk.Windows\EasyDesk.Windows.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="..\Shared\RelayCommand.cs" Link="RelayCommand.cs" />
+    <Compile Include="..\Shared\SecretProtector.cs" Link="SecretProtector.cs" />
+  </ItemGroup>
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <!-- 服务端必须运行在 Windows XP 上，唯一目标 net40，禁止添加 net8.0-windows 等其他目标框架 -->
+    <TargetFramework>net40</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <!-- 高语言版本（SDK Roslyn 可编译至 net40 IL） -->
+    <LangVersion>12</LangVersion>
+  </PropertyGroup>
+  <ItemGroup>
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="..\..\libs\openh264\x86\openh264.dll" Link="openh264\x86\openh264.dll" CopyToOutputDirectory="PreserveNewest" Visible="false" />
+    <Content Include="..\..\libs\openh264\x64\openh264.dll" Link="openh264\x64\openh264.dll" CopyToOutputDirectory="PreserveNewest" Visible="false" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="NLog.config" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+  <ItemGroup>
+    <ReferencePath Include="E:\Project2026\EasyRDP\aly\client\aly-client-sdk\AlyClient.CSharpSDK\AlyClient.CSharpSDK\bin\Debug\net40\AlyClient.CSharpSDK.dll" />
+    <ReferencePath Include="E:\Project2026\EasyRDP\EasyDesk\src\EasyDesk.Core\bin\Debug\net40\EasyDesk.Core.dll" />
+    <ReferencePath Include="E:\Project2026\EasyRDP\EasyDesk\src\EasyDesk.Windows\bin\Debug\net40\EasyDesk.Windows.dll" />
+    <ReferencePath Include="E:\Project2026\EasyRDP\src\EasyRDP.Core\bin\Debug\net40\EasyRDP.Core.dll" />
+    <ReferencePath Include="C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.0\mscorlib.dll" />
+    <ReferencePath Include="C:\Users\5001494\.nuget\packages\newtonsoft.json\13.0.4\lib\net40\Newtonsoft.Json.dll" />
+    <ReferencePath Include="C:\Users\5001494\.nuget\packages\nlog\6.1.4\lib\net35\NLog.dll" />
+    <ReferencePath Include="C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.0\PresentationCore.dll" />
+    <ReferencePath Include="C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.0\PresentationFramework.dll" />
+    <ReferencePath Include="C:\Users\5001494\.nuget\packages\sharpdx.direct3d11\4.0.1\lib\net40\SharpDX.Direct3D11.dll" />
+    <ReferencePath Include="C:\Users\5001494\.nuget\packages\sharpdx.direct3d9\4.0.1\lib\net40\SharpDX.Direct3D9.dll" />
+    <ReferencePath Include="C:\Users\5001494\.nuget\packages\sharpdx\4.0.1\lib\net40\SharpDX.dll" />
+    <ReferencePath Include="C:\Users\5001494\.nuget\packages\sharpdx.dxgi\4.0.1\lib\net40\SharpDX.DXGI.dll" />
+    <ReferencePath Include="C:\Users\5001494\.nuget\packages\sharpdx.mathematics\4.0.1\lib\net40\SharpDX.Mathematics.dll" />
+    <ReferencePath Include="C:\Users\5001494\.nuget\packages\sharpdx.mediafoundation\4.0.1\lib\net40\SharpDX.MediaFoundation.dll" />
+    <ReferencePath Include="C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.0\System.Configuration.dll" />
+    <ReferencePath Include="C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.0\System.Core.dll" />
+    <ReferencePath Include="C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.0\System.Data.dll" />
+    <ReferencePath Include="C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.0\System.dll" />
+    <ReferencePath Include="C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.0\System.Drawing.dll" />
+    <ReferencePath Include="C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.0\System.Numerics.dll" />
+    <ReferencePath Include="C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.0\System.Runtime.Serialization.dll" />
+    <ReferencePath Include="C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.0\System.Xaml.dll" />
+    <ReferencePath Include="C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.0\System.Xml.dll" />
+    <ReferencePath Include="C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.0\System.Xml.Linq.dll" />
+    <ReferencePath Include="C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.0\UIAutomationClient.dll" />
+    <ReferencePath Include="C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.0\UIAutomationClientsideProviders.dll" />
+    <ReferencePath Include="C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.0\UIAutomationProvider.dll" />
+    <ReferencePath Include="C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.0\UIAutomationTypes.dll" />
+    <ReferencePath Include="C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.0\WindowsBase.dll" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="E:\Project2026\EasyRDP\src\EasyRDP.Server.Wpf\obj\Debug\net40\MainWindow.g.cs" />
+    <Compile Include="E:\Project2026\EasyRDP\src\EasyRDP.Server.Wpf\obj\Debug\net40\App.g.cs" />
+    <Compile Include="E:\Project2026\EasyRDP\src\EasyRDP.Server.Wpf\obj\Debug\net40\EasyRDP.Server.Wpf_Content.g.cs" />
+  </ItemGroup>
+  <Import Project="Sdk.targets" Sdk="Microsoft.NET.Sdk" />
+</Project>

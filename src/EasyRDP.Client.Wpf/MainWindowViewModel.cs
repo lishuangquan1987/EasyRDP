@@ -43,7 +43,7 @@ namespace EasyRDP.Client.Wpf
         private FrameBuffer? _frameBuffer;
         private ClientStreamSession? _streamSession;
         private ClientInputSession? _inputSession;
-        private TcpTransportClient? _transport;
+        private ITransport? _transport;
         private volatile bool _running;
         private volatile bool _disconnecting; // 防止 Disconnect → Disconnected 事件 → Stop 重入循环
         private DispatcherTimer? _fpsTimer;
@@ -705,23 +705,24 @@ namespace EasyRDP.Client.Wpf
                 return;
             }
 
-            _transport = new TcpTransportClient();
+            var connector = new TcpTransportConnector();
             // 异步更新状态栏：OnLog 可能在接收线程触发，同步 Invoke 会阻塞接收线程
             // （TCP 接收缓冲可能被填满反压服务端），且 UI 繁忙时造成额外等待。
-            _transport.OnLog = (msg) => _dispatcher.BeginInvoke(() => StatusText = msg);
+            connector.OnLog = (msg) => _dispatcher.BeginInvoke(() => StatusText = msg);
 
             Logger.Info("Connecting to {0}:{1}...", host, port);
-            bool connected = await Task.Run(() => _transport.Connect(host, port, ConnectTimeoutMs));
-            if (!connected)
+            string endpoint = host + ":" + port;
+            var connectedTransport = await Task.Run(() => connector.Connect(endpoint, ConnectTimeoutMs));
+            if (connectedTransport == null)
             {
                 Logger.Warn("Connection to {0}:{1} failed", host, port);
                 SetBusy(false, "Connection failed");
                 return;
             }
+            _transport = connectedTransport;
             Logger.Info("TCP connected to {0}:{1}, sending handshake", host, port);
 
-            // 先订阅 DataReceived，再发送握手 — 避免竞态条件导致 HandshakeRes 丢失
-            var handshakeReassembler = new MessageReassembler();
+            // 先订阅 MessageReceived，再 Start 接收、再发送握手 — 避免竞态导致 HandshakeRes 丢失
             MessageReceivedEventArgs? handshakeResponse = null;
             var waitHandle = new ManualResetEventSlim(false);
             EventHandler<MessageReceivedEventArgs> onHandshakeMsg = (s, args) =>
@@ -732,10 +733,7 @@ namespace EasyRDP.Client.Wpf
                     waitHandle.Set();
                 }
             };
-            handshakeReassembler.MessageReceived += onHandshakeMsg;
-
-            EventHandler<FragmentReceivedEventArgs> onHandshakeData = (s, args) => handshakeReassembler.OnFragment(args);
-            _transport.DataReceived += onHandshakeData;
+            _transport.MessageReceived += onHandshakeMsg;
 
             // 提前创建流会话并订阅数据事件：服务端在 HandshakeRes 之后会立即发送视频帧，
             // 若等握手完成后再订阅，首个关键帧（seq=0）会丢失，解码器只能等下一个 IDR，
@@ -767,12 +765,12 @@ namespace EasyRDP.Client.Wpf
                 Password = _password ?? ""
             };
             byte[] reqPayload = handshakeReq.Pack();
-            MessageReassembler.FragAndSend(0, (byte)MessageType.HandshakeReq, reqPayload,
-                (sid, data) => _transport.Send(data), 0);
+            // 订阅就绪后启动接收，再发送握手请求
+            _transport.Start();
+            _transport.Send(Framing.BuildMessage((byte)MessageType.HandshakeReq, reqPayload));
             Logger.Debug("HandshakeReq sent, waiting for response...");
             bool gotResponse = await Task.Run(() => waitHandle.Wait(HandshakeTimeoutMs));
-            _transport.DataReceived -= onHandshakeData;
-            handshakeReassembler.MessageReceived -= onHandshakeMsg;
+            _transport.MessageReceived -= onHandshakeMsg;
 
             if (!gotResponse || handshakeResponse == null)
             {
@@ -923,8 +921,7 @@ namespace EasyRDP.Client.Wpf
                     // 服务端收到后原样回显 payload，客户端据此测量 RTT；
                     // 同时刷新服务端 _lastActivity 保持连接活跃。
                     byte[] payload = BitConverter.GetBytes(DateTime.UtcNow.Ticks);
-                    MessageReassembler.FragAndSend(0, (byte)MessageType.Keepalive, payload,
-                        (sid, data) => transport.Send(data), 0);
+                    transport.Send(Framing.BuildMessage((byte)MessageType.Keepalive, payload));
                 }
                 catch (Exception ex)
                 {
@@ -947,8 +944,7 @@ namespace EasyRDP.Client.Wpf
             if (transport == null || !_running) return;
             try
             {
-                MessageReassembler.FragAndSend(0, (byte)MessageType.DiagnosticInfoRequest, new byte[0],
-                    (sid, data) => transport.Send(data), 0);
+                transport.Send(Framing.BuildMessage((byte)MessageType.DiagnosticInfoRequest, new byte[0]));
                 Logger.Debug("DiagnosticInfoRequest sent");
             }
             catch (Exception ex)
@@ -1115,7 +1111,7 @@ namespace EasyRDP.Client.Wpf
         private static extern bool GlobalMemoryStatusEx(ref MEMORYSTATUSEX lpBuffer);
 
         /// <summary>
-        /// 发送剪贴板同步消息到服务端。文本通过 FragAndSend 分片发送，
+        /// 发送剪贴板同步消息到服务端。文本作为完整消息发送，
         /// 服务端 TransportHost 接收后在 STA 线程设置系统剪贴板。
         /// </summary>
         private void SendClipboardSync(string text)
@@ -1129,8 +1125,7 @@ namespace EasyRDP.Client.Wpf
                     Text = text
                 };
                 byte[] payload = msg.Pack();
-                MessageReassembler.FragAndSend(0, (byte)MessageType.ClipboardSync, payload,
-                    (sid, data) => _transport.Send(data), 0);
+                _transport.Send(Framing.BuildMessage((byte)MessageType.ClipboardSync, payload));
                 Logger.Info("Clipboard sync sent: len={0}", text.Length);
             }
             catch (Exception ex)
@@ -1182,11 +1177,8 @@ namespace EasyRDP.Client.Wpf
                 var provider = new FileClipboardProvider(transferId, filePaths,
                     (sid, payload) =>
                     {
-                        // 单完整帧发送：并发响应的分片若交错且共用 frameId=0，
-                        // 接收端重组器会把不同响应的分片混在一起导致 payload 损坏（下载失败 → 无粘贴菜单）。
-                        // 每个响应作为完整帧发送，线上交错时互不干扰。
-                        MessageReassembler.SendSingleFragment(0, (byte)MessageType.ClipFileContentsRes, payload,
-                            (s, d) => transport.Send(d), 0);
+                        // 每个响应作为完整消息发送，线上交错时互不干扰。
+                        transport.Send(Framing.BuildMessage((byte)MessageType.ClipFileContentsRes, payload));
                     });
                 _streamSession?.SetFileClipboardProvider(provider);
 
@@ -1197,8 +1189,7 @@ namespace EasyRDP.Client.Wpf
                     Files = metaList
                 };
                 byte[] listPayload = listMsg.Pack();
-                MessageReassembler.FragAndSend(0, (byte)MessageType.ClipFormatList, listPayload,
-                    (sid, data) => transport.Send(data), 0);
+                transport.Send(Framing.BuildMessage((byte)MessageType.ClipFormatList, listPayload));
                 Logger.Info("ClipFormatList sent: transferId={0} fileCount={1}", transferId, metaList.Count);
             }
             catch (Exception ex)
@@ -1455,8 +1446,7 @@ namespace EasyRDP.Client.Wpf
                     TotalSize = dibBytes.Length
                 };
                 byte[] startPayload = startMsg.Pack();
-                MessageReassembler.FragAndSend(0, (byte)MessageType.ImageClipboardStart, startPayload,
-                    (sid, data) => _transport.Send(data), 0);
+                _transport.Send(Framing.BuildMessage((byte)MessageType.ImageClipboardStart, startPayload));
                 Logger.Info("ImageClipboardStart sent: transferId={0} dibSize={1}",
                     transferId, dibBytes.Length);
 
@@ -1477,8 +1467,7 @@ namespace EasyRDP.Client.Wpf
                         Data = chunk
                     };
                     byte[] dataPayload = dataMsg.Pack();
-                    MessageReassembler.FragAndSend(0, (byte)MessageType.ImageClipboardData, dataPayload,
-                        (s, d) => _transport.Send(d), 0);
+                    _transport.Send(Framing.BuildMessage((byte)MessageType.ImageClipboardData, dataPayload));
                     offset += chunkLen;
                     chunkCount++;
                 }
@@ -1488,8 +1477,7 @@ namespace EasyRDP.Client.Wpf
                 // 3) 发送 End
                 var endMsg = new ImageClipboardEndMessage { TransferId = transferId };
                 byte[] endPayload = endMsg.Pack();
-                MessageReassembler.FragAndSend(0, (byte)MessageType.ImageClipboardEnd, endPayload,
-                    (sid, data) => _transport.Send(data), 0);
+                _transport.Send(Framing.BuildMessage((byte)MessageType.ImageClipboardEnd, endPayload));
                 Logger.Info("ImageClipboardEnd sent: transferId={0}", transferId);
             }
             catch (Exception ex)

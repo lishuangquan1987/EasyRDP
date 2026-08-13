@@ -248,8 +248,7 @@ namespace EasyRDP.Server.Wpf
     {
         private readonly object _sendLock = new object();
         private readonly CursorTracker _owner;
-        private Action<uint, byte[]> _sendTo;
-        private uint _sessionId;
+        private Action<byte[]> _sendTo;
         private volatile bool _running;
         internal bool IsRunning { get { return _running; } }
 
@@ -258,13 +257,12 @@ namespace EasyRDP.Server.Wpf
             _owner = owner;
         }
 
-        /// <summary>注入本会话的发送回调。</summary>
-        public void AttachSendTo(Action<uint, byte[]> sendTo, uint sessionId)
+        /// <summary>注入本会话的发送回调（发送完整线格式字节）。</summary>
+        public void AttachSendTo(Action<byte[]> sendTo)
         {
             lock (_sendLock)
             {
                 _sendTo = sendTo;
-                _sessionId = sessionId;
             }
         }
 
@@ -292,47 +290,15 @@ namespace EasyRDP.Server.Wpf
         /// <summary>由 CursorTracker 调用，发送光标更新。</summary>
         internal void SendCursorUpdate(byte[] payload)
         {
-            Action<uint, byte[]> sendTo;
-            uint sessionId;
+            Action<byte[]> sendTo;
             lock (_sendLock)
             {
                 if (!_running || _sendTo == null) return;
                 sendTo = _sendTo;
-                sessionId = _sessionId;
             }
-            // 光标消息始终单分片，直接构建线格式发送，不经过 FragAndSend
-            // 使用 frameId=0 避免与视频流的 FrameId 命名空间碰撞
-            byte[] wire = BuildCursorWire(payload);
-            sendTo(sessionId, wire);
-        }
-
-        private static byte[] BuildCursorWire(byte[] payload)
-        {
-            // Magic(1)+Type(1)+PayloadLen(4)+FrameId(4)+FragIdx(2)+FragCount(2)+CRC16(2)+FragData
-            int headerSize = 16;
-            byte[] wire = new byte[headerSize + payload.Length];
-            int pos = 0;
-            wire[pos++] = Constants.FrameMagic;
-            wire[pos++] = (byte)MessageType.CursorUpdate;
-            // PayloadLen (4 bytes LE)
-            uint totalLen = (uint)payload.Length;
-            wire[pos++] = (byte)(totalLen & 0xFF);
-            wire[pos++] = (byte)((totalLen >> 8) & 0xFF);
-            wire[pos++] = (byte)((totalLen >> 16) & 0xFF);
-            wire[pos++] = (byte)((totalLen >> 24) & 0xFF);
-            // FrameId = 0（不与视频流碰撞）
-            wire[pos++] = 0; wire[pos++] = 0; wire[pos++] = 0; wire[pos++] = 0;
-            // FragIdx = 0（单分片）
-            wire[pos++] = 0; wire[pos++] = 0;
-            // FragCount = 1
-            wire[pos++] = 1; wire[pos++] = 0;
-            // CRC16（占位，先写数据再计算）
-            if (payload.Length > 0)
-                Buffer.BlockCopy(payload, 0, wire, pos + 2, payload.Length);
-            ushort crc = MessageReassembler.ComputeCrc16(payload, 0, payload.Length);
-            wire[pos++] = (byte)(crc & 0xFF);
-            wire[pos++] = (byte)((crc >> 8) & 0xFF);
-            return wire;
+            // 组装完整消息线格式（无分片、无 CRC16）
+            byte[] wire = Framing.BuildMessage((byte)MessageType.CursorUpdate, payload);
+            sendTo(wire);
         }
     }
 }

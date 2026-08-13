@@ -9,10 +9,10 @@ namespace EasyRDP.Core.Protocol
     public interface ICursorTrackerSession
     {
         /// <summary>
-        /// 注入本会话的发送回调。光标变化时通过它发送 CursorUpdateMessage。
-        /// sessionId 由调用方传入（服务端通过 TransportHost 分配的 ID）。
+        /// 注入本会话的发送回调。光标变化时通过它发送 CursorUpdateMessage 的完整线格式字节。
+        /// sessionId 路由已由调用方（TransportHost/ServerStreamSession）在闭包中捕获，此处不再携带。
         /// </summary>
-        void AttachSendTo(Action<uint, byte[]> sendTo, uint sessionId);
+        void AttachSendTo(Action<byte[]> sendTo);
 
         /// <summary>启动本会话的光标追踪。</summary>
         void Start();

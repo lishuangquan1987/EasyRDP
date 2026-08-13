@@ -19,7 +19,7 @@ namespace EasyRDP.Core.Session
         /// <summary>Gets or sets the render target for displaying decoded frames.</summary>
         Rendering.IRenderTarget RenderTarget { get; set; }
         /// <summary>Starts the stream session with the given transport and begins receive/decode/render loops.</summary>
-        void Start(ITransportClient transport);
+        void Start(ITransport transport);
         /// <summary>Stops the session, terminates threads, and releases unmanaged resources.</summary>
         void Stop();
         /// <summary>Raised when a non-recoverable error occurs in the stream session.</summary>

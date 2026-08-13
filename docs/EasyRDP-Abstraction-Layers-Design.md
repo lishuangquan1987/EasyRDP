@@ -1,8 +1,8 @@
 # EasyRDP 五层抽象 + 编排层设计规范
 
-> 版本：2.7
-> 状态：设计终版，待实现（分层职责闭合修订版）
-> 最后更新：2026-07-24
+> 版本：2.8
+> 状态：设计终版，已实现（传输层抽象重构版）
+> 最后更新：2026-08-13
 > 修订：
 > - v1.2 → v2.0 文档自包含化——不再引用现有代码，所有接口完整定义，目录结构仅展示目标态
 > - v2.0 → v2.1 可行性审核修订：补 XP 用例（D10/D11）、net40 H.264 原生后端保证、协议 Framing 与消息结构、修正 A1 线程模型、补 C1–C6 并发与生命周期漏洞
@@ -12,6 +12,7 @@
 > - v2.4 → v2.5 传输健壮性 + 认证完善修订：分包机制；校验码策略；认证改用户名+密码
 > - v2.5 → v2.6 传输无关协议层重构：纠正 v2.5 按传输方式分支的做法。改为协议层统一定义帧分片+顺序保证+丢帧策略，传输层只"尽力投递分片字节"
 > - v2.6 → v2.7 分层职责闭合修订：新增 MessageReassembler（4.3.1）闭合传输层分片→Session 完整消息的桥接缺口；传输层事件改名 DataReceived（去"消息"歧义）；FrameId/SequenceNumber 语义澄清；修复 CommitFrame 双 summary / 目录树双 └── / 非视频消息丢帧策略说明
+> - v2.7 → v2.8 传输层抽象重构：ITransportClient/ITransportServer 统一为 ITransport（连接）+ ITransportAcceptor（监听）+ ITransportConnector（建连）；Send 收发完整消息 byte[]，分片完全下放到传输实现（TCP 直接整消息收发，UDP 内部自建切片/重组/丢帧）；线格式 16 字节分片头精简为 6 字节消息头（协议版本 0x02→0x03）；删除 MessageReassembler/FramingBuffer/分片 CRC16；SessionId 路由移到 TransportHost（Dictionary<uint,ITransport> + 闭包捕获）
 
 ---
 
@@ -40,7 +41,7 @@ EasyRDP 需要三套底层抽象协作完成远程桌面：捕获、编码、传
 - 编排层只依赖接口，可被 WPF / Avalonia 共享
 - 纯视频流协议（H.264），不保留图片传输兼容路径
 
-> **"接口可插拔"的边界澄清（L4）**：可插拔的是各层的**后端实现**——`IScreenCapturer`（BitBlt/镜像驱动）、`IVideoEncoder`/`IVideoDecoder`（x264/OpenH264/MF）、`ITransportClient`/`ITransportServer`（TCP/UDP）、`IRenderTarget`（WPF/Avalonia）。而 `FrameBuffer`、`CursorInfo`、`ScreenRect`、协议消息类等是 **Core 共享的具体类型**（双槽算法/数据结构固定，抽象意义不大），各后端与编排层共用，不要求做成接口。区分二者：**跨平台/多实现的零件用接口，单一算法/数据载体用具体类**。
+> **"接口可插拔"的边界澄清（L4）**：可插拔的是各层的**后端实现**——`IScreenCapturer`（BitBlt/镜像驱动）、`IVideoEncoder`/`IVideoDecoder`（x264/OpenH264/MF）、`ITransport`（TCP/UDP/WebSocket，含 `ITransportAcceptor`/`ITransportConnector`）、`IRenderTarget`（WPF/Avalonia）。而 `FrameBuffer`、`CursorInfo`、`ScreenRect`、协议消息类等是 **Core 共享的具体类型**（双槽算法/数据结构固定，抽象意义不大），各后端与编排层共用，不要求做成接口。区分二者：**跨平台/多实现的零件用接口，单一算法/数据载体用具体类**。
 >
 > **命名空间归属（L7）**：编解码接口（`IVideoEncoder`/`IVideoDecoder`/Factory）虽置于 `EasyRDP.Core.Protocol` 命名空间下（因 `CodecId`/`CodecCapabilities` 与握手协议紧密相关），但其职责是数据处理而非协议线格式。`Protocol` 命名空间同时容纳"编解码抽象"与"协议消息/常量"两组职责——若未来编解码后端增多，可拆出 `EasyRDP.Core.Codec` 独立命名空间，当前保持合并以减少文件分散。
 
@@ -50,7 +51,7 @@ EasyRDP 需要三套底层抽象协作完成远程桌面：捕获、编码、传
 
 | # | 决策 | 说明 |
 |---|---|---|
-| D1 | 纯视频流协议 | 仅保留 H.264 编码路径，去除 Bitmap 图片传输。协议版本 `0x02`，不接受 v0x01 连接 |
+| D1 | 纯视频流协议 | 仅保留 H.264 编码路径，去除 Bitmap 图片传输。协议版本 `0x03`，不接受 v0x01/v0x02 连接 |
 | D2 | 光标独立传输 | 光标不混入视频帧像素，作为独立消息流。`FrameBuffer` 不感知光标，叠加由平台渲染层负责 |
 | D3 | `FrameBuffer` 置于 Core | 渲染逻辑层不依赖 UI，放在 `EasyRDP.Core/Rendering/` 下，Avalonia 客户端直接复用 |
 | D4 | `IVideoDecoder` 抽象 | 镜像 `IVideoEncoder`，新增 `DecoderFactory`。为未来 VP8/VP9 解码后端铺路 |
@@ -92,7 +93,7 @@ EasyRDP 需要三套底层抽象协作完成远程桌面：捕获、编码、传
 
 **客户端**：
 ```
-[接收线程] ITransportClient → IVideoDecoder ──→ FrameBuffer (双槽=有界队列)
+[接收线程] ITransport → IVideoDecoder ──→ FrameBuffer (双槽=有界队列)
                                                   ↓
 [渲染线程]                            TryBorrowReadFrame → IRenderTarget → ReleaseReadFrame
                                             ↑ 光标 → IRenderTarget.UpdateCursor
@@ -129,9 +130,14 @@ EasyRDP.Core/
 │       └── CursorUpdateMessage.cs
 │
 ├── Transport/
-│   ├── ITransportClient.cs
-│   ├── ITransportServer.cs         (含 FragmentReceivedEventArgs/ConnectionEventArgs/LogCallback)
-│   ├── MessageReassembler.cs       (分片重组桥接层，4.3.1，含 MessageReceivedEventArgs)
+│   ├── ITransport.cs
+│   ├── ITransportConnector.cs
+│   ├── ITransportAcceptor.cs      (含 TransportAcceptedEventArgs/LogCallback)
+│   ├── TcpTransport.cs            (TCP 连接实现)
+│   ├── TcpTransportConnector.cs
+│   ├── TcpTransportAcceptor.cs
+│   ├── MessageFramingBuffer.cs    (消息级切分)
+│   ├── MessageReceivedEventArgs.cs
 │   └── TCP/UDP 实现
 │
 ├── Services/
@@ -182,7 +188,7 @@ EasyRDP.Server.Wpf/
 > - net40 编解码后端通过**原生软件库 P/Invoke** 实现：`libx264`（首选，MIT，质量/速度最佳）或 `OpenH264`（Cisco，BSD）。原生 DLL 须为 **x86 + XP 兼容构建**（工具链不得引用 Vista+ API；XP 无 MediaFoundation，无硬件编码）。
 > - 抽象层契约：`EncoderFactory.Create(CodecId.H264Software)` 与 `DecoderFactory.Create(CodecId.H264Software)` 在 **net40 与 net8.0 下都必须能返回可用实例**（DLL 缺失时才返回 null），否则五层抽象无法支撑 XP 用例。
 >
-> **日志策略（D3）**：仅传输层（`ITransportClient`/`ITransportServer`）通过 `LogCallback` 回调暴露日志，因其内部网络事件最需观测。捕获/编码/解码/会话层不设独立日志钩子，状态通过返回值与事件上报：编码失败由 `Encode` 返回 null（连续 30 帧→`FatalError`）；解码故障由 `DecodeResult.Status`/`IsAvailable=false` 上报；Session 不可恢复故障经 `FatalError` 事件。若需全层统一日志，由实现层在构造各零件时注入统一的 `LogCallback`（实现可扩展，抽象层不强加）。
+> **日志策略（D3）**：仅传输层（`ITransport`/`ITransportConnector`/`ITransportAcceptor`）通过 `LogCallback` 回调暴露日志，因其内部网络事件最需观测。捕获/编码/解码/会话层不设独立日志钩子，状态通过返回值与事件上报：编码失败由 `Encode` 返回 null（连续 30 帧→`FatalError`）；解码故障由 `DecodeResult.Status`/`IsAvailable=false` 上报；Session 不可恢复故障经 `FatalError` 事件。若需全层统一日志，由实现层在构造各零件时注入统一的 `LogCallback`（实现可扩展，抽象层不强加）。
 >
 > **生命周期契约（D6）**：所有 `IDisposable` 零件/会话遵循：
 > 1. `Dispose` 必须**幂等**（重复调用安全，不抛异常）。
@@ -373,63 +379,70 @@ namespace EasyRDP.Core.Protocol
 
 ### 4.3 第③层：传输
 
-#### ITransportClient
+#### ITransport（连接抽象）
 
 ```csharp
 namespace EasyRDP.Core.Transport
 {
-    public interface ITransportClient : IDisposable
+    /// <summary>
+    /// 传输连接抽象。发送/接收的单位是「完整消息字节」（framing 外层 + payload），
+    /// 不感知分片——分片是各传输实现的内部细节。与客户端/服务端角色无关。
+    /// </summary>
+    public interface ITransport : IDisposable
     {
-        bool Connect(string host, int port, int timeoutMs);
-        void Disconnect();
-        /// <summary>
-        /// 尽力发送已构好的完整线格式分片字节（含 6.3 framing 外层 + 6.3.1 分片头 + FragData）。
-        /// 传输层不保证：有序到达、不丢失、不重复——由 MessageReassembler 兜底，见 4.3.1。
-        /// 返回 true=已写入底层；false=连接已断/发送失败。
-        /// </summary>
-        bool Send(byte[] data);
+        /// <summary>开始接收循环（幂等）。连接建立后不自动开始：调用方须先订阅
+        /// MessageReceived/Disconnected，再调 Start()，避免首包在订阅前到达而丢失。</summary>
+        void Start();
+        /// <summary>发送一条完整消息（Magic+Type+PayloadLen+Payload）。不返回成功标志：
+        /// 写入失败/连接已断通过 Disconnected 事件与 OnLog 上报。</summary>
+        void Send(byte[] message);
         bool IsConnected { get; }
-        /// <summary>收到一个线格式分片字节时触发（可能乱序/重复/丢失）。数据交由 MessageReassembler 重组，见 4.3.1。</summary>
-        event EventHandler<FragmentReceivedEventArgs> DataReceived;
+        /// <summary>优雅关闭连接并触发 Disconnected 事件；幂等。IDisposable.Dispose 等价调用并释放资源。</summary>
+        void Disconnect();
+        /// <summary>收到一条完整消息时触发（MessageType + payload）。</summary>
+        event EventHandler<MessageReceivedEventArgs> MessageReceived;
         event EventHandler Disconnected;
         LogCallback OnLog { get; set; }
     }
 }
 ```
 
-#### ITransportServer
+#### ITransportConnector（客户端建连）
 
 ```csharp
 namespace EasyRDP.Core.Transport
 {
-    public interface ITransportServer : IDisposable
+    /// <summary>客户端建连抽象。endpoint 格式由各实现定义（TCP "host:port"；命名管道路径等）。
+    /// 返回的 ITransport 处于「已连接未开始接收」状态，订阅后需调 Start()。
+    /// 连接失败（解析失败/超时/拒绝）返回 null，详情经 OnLog 上报。</summary>
+    public interface ITransportConnector
     {
-        void Start(int port);
+        ITransport Connect(string endpoint, int timeoutMs);
+        LogCallback OnLog { get; set; }
+    }
+}
+```
+
+#### ITransportAcceptor（服务端监听）
+
+```csharp
+namespace EasyRDP.Core.Transport
+{
+    /// <summary>传输监听抽象。监听 endpoint（TCP "port" 或 "host:port"），产出 ITransport 实例。</summary>
+    public interface ITransportAcceptor : IDisposable
+    {
+        void Start(string endpoint);
         void Stop();
-        /// <summary>向指定客户端尽力发送一个线格式分片字节。语义同 ITransportClient.Send。</summary>
-        /// <remarks>公平性约束（#5）：各 Session 的发送操作应直接写入其对应 Socket，不得有全局发送锁。
-        /// 若实现层合并了发送路径（如单发送循环），须保证公平调度（Round-Robin 或按 Session 独立队列），
-        /// 避免高分辨率/高频 Session 霸占通道致低分辨率 Session 饿死。</remarks>
-        void SendTo(uint sessionId, byte[] data);
-        void Disconnect(uint sessionId);
-        event EventHandler<ConnectionEventArgs> ClientConnected;
-        event EventHandler<ConnectionEventArgs> ClientDisconnected;
-        event EventHandler<FragmentReceivedEventArgs> DataReceived;
+        /// <summary>新连接到达时触发，携带「已连接未开始接收」的 ITransport。</summary>
+        event EventHandler<TransportAcceptedEventArgs> ClientConnected;
         LogCallback OnLog { get; set; }
     }
 
-    /// <summary>传输层收到一个线格式分片字节的事件参数。Data 为完整线格式分片（含 framing 外层+分片头+FragData），可能乱序/重复/丢失。</summary>
-    public class FragmentReceivedEventArgs : EventArgs
+    /// <summary>新连接事件参数。</summary>
+    public class TransportAcceptedEventArgs : EventArgs
     {
-        public uint SessionId;   // 服务端：来源客户端；客户端实现可忽略
-        public byte[] Data;      // 分片字节（Magic+Type+PayloadLen + FrameId+FragIdx+FragCount+CRC16+FragData）
-    }
-
-    /// <summary>连接事件参数。</summary>
-    public class ConnectionEventArgs : EventArgs
-    {
-        public uint SessionId;
-        public string RemoteEndPoint;  // "host:port"，可空
+        public ITransport Transport;
+        public string RemoteEndPoint;
     }
 
     /// <summary>日志回调委托。传输层内部日志通过它回传，不依赖第三方日志库。</summary>
@@ -437,116 +450,25 @@ namespace EasyRDP.Core.Transport
 }
 ```
 
-### 4.3.1 MessageReassembler（分片重组桥接层）
+### 4.3.1 分片下放（原 MessageReassembler 已删除）
 
-> **定位**：位于传输层与 Session/TransportHost 之间。传输层通过 `DataReceived` 抛分片字节，`MessageReassembler` 按 6.3.1 规则重组为完整消息，然后以 `MessageReceived` 事件通知上层。上层（TransportHost、IClientStreamSession）只看到完整消息，不感知分片/乱序/丢包。
-
-```csharp
-namespace EasyRDP.Core.Protocol
-{
-    /// <summary>
-    /// 消息分片重组器。每个 Session 独立一个实例。
-    /// 订阅传输层的 FragmentReceivedEventArgs（接收）→ 按 FrameId 重组 → 校验 CRC16
-    /// → 收齐全部 FragCount 个分片后拼接为完整消息 → 抛出 MessageReceived。
-    /// 乱序/超时/CRC失败按 6.3.1 丢帧策略处理（丢整帧不重传，最新帧优先）。
-    /// 发送侧：提供 FragAndSend 静态方法，把完整 payload 切分为分片并逐片写入指定 Action。
-    /// </summary>
-    public class MessageReassembler
-    {
-        // —— 接收侧：重组 ——
-
-        /// <summary>收到一个线格式分片（来自传输层 DataReceived）。非线程安全，调用方须保证串行。</summary>
-        public void OnFragment(FragmentReceivedEventArgs frag)
-        {
-            // 解析 framing 外层 → 得到 MessageType、PayloadLen（各分片一致）
-            // 解析分片头 → 得到 FrameId、FragIdx、FragCount、CRC16
-            // 校验 CRC16 → 失败则丢弃（=丢包）
-            // 按 FrameId 维护分片缓冲：
-            //   - frag.FrameId == _currentFrameId → 填入槽位，收齐则组装→抛 CompleteMessageReceived
-            //   - frag.FrameId > _currentFrameId → 新帧优先，丢弃旧帧 → 开始新帧
-            //   - frag.FrameId < _currentFrameId → 旧帧残余，丢弃
-            // 超时检查（FragmentReassembleTimeoutMs）：当前帧超时未收齐 → 丢弃
-        }
-
-        /// <summary>完整消息组装完成事件。上层（Session/TransportHost）订阅此事件处理消息。</summary>
-        public event EventHandler<MessageReceivedEventArgs> MessageReceived;
-
-        // —— 发送侧：分片 ——
-
-        /// <summary>
-        /// 把完整消息 payload 切分为分片并逐片发送。
-        /// payload 已用 BinaryPacker 序列化好（见 6.3/6.8），本方法负责装 framing 外层 + 分片头 + CRC16 + 逐片写 sendAction。
-        /// </summary>
-        /// <param name="frameId">本帧 ID（服务端/客户端各自的发送计数器）</param>
-        /// <param name="messageType">MessageType 枚举</param>
-        /// <param name="payload">序列化后的消息 payload</param>
-        /// <param name="sendAction">发送回调（服务端: (sessionId, bytes) => transport.SendTo; 客户端: (_, bytes) => transport.Send）</param>
-        /// <param name="sessionId">服务端 SessionId（客户端传任意值即可）</param>
-        public static void FragAndSend(uint frameId, byte messageType, byte[] payload,
-            Action<uint, byte[]> sendAction, uint sessionId)
-        {
-            int totalLen = payload.Length;
-            int fragCount = (totalLen + Constants.FragmentSize - 1) / Constants.FragmentSize;
-            for (int i = 0; i < fragCount; i++)
-            {
-                int offset = i * Constants.FragmentSize;
-                int fragLen = Math.Min(Constants.FragmentSize, totalLen - offset);
-                byte[] fragData = new byte[fragLen];
-                Buffer.BlockCopy(payload, offset, fragData, 0, fragLen);
-                // 构造线格式分片：framing 外层 + 分片头 + FragData
-                byte[] wire = BuildWireFragment(frameId, (ushort)i, (ushort)fragCount, messageType, totalLen, fragData);
-                sendAction(sessionId, wire);
-            }
-        }
-
-        private static byte[] BuildWireFragment(uint frameId, ushort fragIdx, ushort fragCount,
-            byte messageType, int totalPayloadLen, byte[] fragData)
-        {
-            // Magic(1)+Type(1)+PayloadLen(4)+FrameId(4)+FragIdx(2)+FragCount(2)+CRC16(2)+FragData
-            // 用 BinaryPacker 或 MemoryStream 拼接
-            var ms = new System.IO.MemoryStream();
-            var bw = new System.IO.BinaryWriter(ms);
-            bw.Write(Constants.FrameMagic);
-            bw.Write(messageType);
-            bw.Write((uint)totalPayloadLen);
-            bw.Write(frameId);
-            bw.Write(fragIdx);
-            bw.Write(fragCount);
-            bw.Write(Crc16(fragData));
-            bw.Write(fragData);
-            return ms.ToArray();
-        }
-
-        private static ushort Crc16(byte[] data)
-        {
-            // CRC-16/XMODEM 或等价轻量实现，net40 可用。这里仅占位，实现自行选具体多项式。
-            // 校验失败在接收侧 OnFragment 中处理。
-            throw new NotImplementedException();
-        }
-    }
-
-    /// <summary>完整消息事件参数。MessageReassembler 组装完毕后抛出，Data 为完整消息 payload（去 framing+分片头）。</summary>
-    public class MessageReceivedEventArgs : EventArgs
-    {
-        public uint SessionId;
-        public byte MessageType;    // MessageType 枚举
-        public byte[] Data;         // 完整消息 payload（不含 framing 外层与分片头）
-    }
-}
-```
+> **定位变更**：v2.7 的 `MessageReassembler`（分片重组 / CRC16 / 顺序保证 / 丢帧判定）已删除。v2.8 起分片完全下放到传输实现：
+> - TCP（当前实现）：天然可靠有序字节流，直接整消息收发，无分片 / 重组 / 丢帧 / CRC。
+> - UDP（未来实现）：在 UdpTransport 内部自建 datagram 切片 + 重组 + 丢帧 + 校验，不改 ITransport 契约。
+> - WebSocket（未来实现）：有 message 帧边界，直接整消息收发。
+>
+> `ITransport.MessageReceived` 直接抛出「完整消息」（MessageType + payload），上层（TransportHost / IClientStreamSession）不再感知分片 / 乱序 / 丢包。
 
 > **层次小结**：
 > ```
 > Session / TransportHost ── 处理 MessageReceived (完整消息)
 >        │
-> MessageReassembler ── 分片重组 / CRC16 / 顺序保证 / 丢帧判定
+> ITransport ── Send (完整消息字节) / MessageReceived (完整消息)
 >        │
-> ITransportClient/Server ── DataReceived (分片字节) / Send (线格式分片)
->        │
-> TCP / UDP / WebSocket ── 物理传输
+> TCP / UDP / WebSocket ── 物理传输（分片/重组/丢帧在实现内部）
 > ```
 >
-> **每个方向上服务端为每个活跃 Session 各创建独立的 MessageReassembler 实例**（服务端：TransportHost 为每个 Session 创建一个，订阅 ITransportServer.DataReceived 并只处理该 SessionId 的分片；客户端：IClientStreamSession 持有一个）。一个实例跟踪一路 FrameId 流，内部状态简洁，无需 per-SessionId 多路复用。
+> **路由**：服务端 TransportHost 为每个连接维护 Dictionary<uint, ITransport>，MessageReceived 订阅用闭包捕获 sessionId 完成路由；客户端 IClientStreamSession 持有一个 ITransport 引用。
 
 ### 4.4 第④层：解码
 
@@ -889,7 +811,7 @@ namespace EasyRDP.Core.Rendering
 - 按流向拆分：视频流（生产者-消费者）、输入（事件驱动）
 - 客户端对称：`IServerStreamSession` ↔ `IClientStreamSession`，`IServerInputSession` ↔ `IClientInputSession`
 - 光标归入 StreamSession，通过 `ICursorTracker` 接口管理
-- 传输解耦：服务端用 `Action<uint, byte[]> sendTo` 回调 / 客户端注入 `ITransportClient`
+- 传输解耦：服务端用 `Action<uint, byte[]> sendTo` 回调 / 客户端注入 `ITransport`
 - 单捕获多编码（D9）：全局 `ICaptureService` → 事件分发 → 每 Session 独立编码管线
 - 生产者-消费者（D8）：每 Session 编码→有界队列→发送双线程
 - 编码器动态探测：握手时 `EncoderFactory.Create` 实测可用性
@@ -1035,7 +957,7 @@ namespace EasyRDP.Core.Session
 - `OnFrameCaptured` 回调（截屏线程中，必须极快）：拷贝 `frame.Scan0` 像素到 `CapturedFrame` 私有缓冲 → `_frameQueue.TryAdd(...)`，满则跳过本帧。**禁止在此回调内编码。**
   - **内存复用（#4）**：`CapturedFrame.Pixels` 不每帧 new，改用 Session 内**双缓冲**——两个 `byte[]` 槽位交替使用：截屏回调写入槽 A 时，编码线程读槽 B；下一帧反之。仅在分辨率变更致槽位不足时才重新分配。避免 1080p×30fps×N 客户端 = N×240MB/s 的 LOH 分配压力（XP/.NET4 非并发 GC 下碎片严重）。
 - 编码线程：`_frameQueue.Take()` → 分辨率变更检测 → `Encode`（返回 `EncodedFrame`）→ **编排层包装为 `VideoFrameMessage`**（填 `SequenceNumber` 等，H1：编码层不感知协议）→ 构造 `FrameToSend` → `_sendQueue.TryAdd(...)`，满则跳帧
-- 发送线程：`_sendQueue.Take()` → 序列化（`BinaryPacker`，6.3）→ framing 装 outer（6.3）→ **按 Constants.FragmentSize 切分片、每片加分片头+CRC16**（6.3.1）→ 逐片 `sendTo(sessionId, fragData)`
+- 发送线程：`_sendQueue.Take()` → 序列化（`BinaryPacker`，6.3）→ framing 装 outer（6.3）→ 整消息 `sendTo(sessionId, wire)`（分片下放到传输实现，见 6.3.1）
 - 分辨率变更检测（编码线程内）：比较帧尺寸 → `IVideoEncoder.Reset()` → `Initialize(newW, newH, ...)` → `forceKeyframe=true`
 - D11 自适应（编码线程内）：滑动窗口统计 `Encode` 实测耗时；超阈值则降分辨率/降 `FrameDelayMs`/调 `TargetBitrate`（运行时可改，H2），持续达标则回升，并触发 `forceKeyframe`
 - D12 全局协调（D11 升级）：单 Session 降级阈值之外，`TransportHost` 汇总所有 Session 的编码耗时，总负载超阈值时向**所有** Session 下发降级指令（避免各 Session 独立降级时因根因是全局过载而治标不治本）。`IServerStreamSession` 暴露 `ApplyGlobalLoadLevel(level)` 供 TransportHost 调用。
@@ -1043,12 +965,12 @@ namespace EasyRDP.Core.Session
   - ⚠️ `Encode()` 内部不可中断是已知限制：超时后残留编码线程的 Encode 返回值将被丢弃（队列已 CompleteAdding），但原生句柄延迟释放确保不崩溃。
 
 **TransportHost** (`EasyRDP.Server.Wpf/Services/TransportHost.cs`)
-- 持有全局 `ICaptureService` + `ITransportServer`，管理所有 Session 生命周期
+- 持有全局 `ICaptureService` + `ITransportAcceptor` + `Dictionary<uint, ITransport>`，管理所有 Session 生命周期
 - **并发上限（D12）**：维护活跃 Session 计数，默认上限 2（XP 双核实测安全值，可配；若服务端 ≥4 核，可调至 4–5）。超限时新握手回 `HandshakeRes.Result=ServerBusy`，不创建 Session。
 - **全局负载感知（D12）**：周期汇总各 Session 的编码耗时统计；总负载超阈值时向所有 Session 调 `ApplyGlobalLoadLevel(1/2)` 同步降级，恢复时调 `ApplyGlobalLoadLevel(0)`。避免 per-Session D11 独立决策在全局过载时治标不治本。
-- **握手处理**：为新连接创建 `MessageReassembler` 实例（4.3.1），订阅 `ITransportServer.DataReceived` 并过滤该 SessionId 的分片。Reassembler 的 `MessageReceived` 事件收到重组后的 `HandshakeReq` 后校验版本与认证（6.5.1），调 `CodecNegotiator.Negotiate(clientCaps, EncoderFactory.GetAvailableCodecs())` 协商编码；协商成功则回 `HandshakeRes` 并创建 `IServerStreamSession`+`IServerInputSession`（后续该 Session 的数据分片由此 Session 专属的 MessageReassembler 处理）；交集为空回 `NoCommonCodec`。
+- **握手处理**：订阅 `ITransportAcceptor.ClientConnected` 得到 `ITransport`，分配 sessionId，订阅该连接的 `MessageReceived`（闭包捕获 sessionId）并调 `transport.Start()`；收到 `HandshakeReq` 后校验版本与认证（6.5.1），调 `CodecNegotiator.Negotiate(clientCaps, EncoderFactory.GetAvailableCodecs())` 协商编码；协商成功则回 `HandshakeRes` 并创建 `IServerStreamSession`+`IServerInputSession`；交集为空回 `NoCommonCodec`。
 - **心跳检测（6.5.2，#3）**：为每个 Session 维护 `LastActivity`；定时器（10s）扫描超 30s 无活动的 Session 发 Keepalive ping，再 15s 无响应则触发 C5 断连联动，防僵尸 Session 空转。
-- **断连联动（C5）**：订阅 `ITransportServer.ClientDisconnected`，回调中按 `sessionId` 找到对应 `IServerStreamSession` + `IServerInputSession`，依次调用 `Stop()`（带超时，见 D6）+ `Dispose()`，并从内部字典移除。确保断开的客户端不残留编码/发送线程、不继续占用 `FrameCaptured` 订阅。
+- **断连联动（C5）**：订阅每个 `ITransport.Disconnected`（闭包捕获 sessionId），回调中按 `sessionId` 找到对应 `IServerStreamSession` + `IServerInputSession`，依次调用 `Stop()`（带超时，见 D6）+ `Dispose()`，并从内部字典移除。确保断开的客户端不残留编码/发送线程、不继续占用 `FrameCaptured` 订阅。
 - **服务端停机**：`TransportHost.Stop()` 遍历所有 Session 执行上述销毁流程，再 `Stop` CaptureService 与 TransportServer。
 
 ### 5.3 客户端接口（仅定义，后续实现）
@@ -1060,7 +982,7 @@ namespace EasyRDP.Core.Session
 {
     /// <summary>
     /// 客户端视频流会话。双线程：
-    ///   接收线程：ITransportClient → IVideoDecoder → FrameBuffer.BorrowWriteBuffer → CommitFrame
+    ///   接收线程：ITransport → IVideoDecoder → FrameBuffer.BorrowWriteBuffer → CommitFrame
     ///   渲染线程：FrameBuffer.TryBorrowReadFrame → IRenderTarget.RenderFrame → ReleaseReadFrame
     /// 分辨率变更闭环（接收线程内）：
     ///   视频侧（C6）：检测 VideoFrameMessage.Width/Height 变化 →
@@ -1079,7 +1001,7 @@ namespace EasyRDP.Core.Session
         /// <summary>已渲染帧数（监控用）。</summary>
         long FrameCount { get; }
         IRenderTarget RenderTarget { get; set; }
-        void Start(ITransportClient transport);
+        void Start(ITransport transport);
         void Stop();
         /// <summary>致命错误（如解码 native 故障 IsAvailable=false、传输断连）。与服务端 FatalError 对称（D4），订阅方应 Stop+Dispose 并可选重连。</summary>
         event EventHandler<ErrorEventArgs> FatalError;
@@ -1098,7 +1020,7 @@ namespace EasyRDP.Core.Session
         /// 启动输入会话。screenWidth/screenHeight 为初始服务端分辨率（来自握手 HandshakeRes），
         /// 用于把客户端鼠标坐标映射到服务端屏幕坐标。
         /// </summary>
-        void Start(ITransportClient transport, int screenWidth, int screenHeight);
+        void Start(ITransport transport, int screenWidth, int screenHeight);
 
         /// <summary>
         /// 服务端分辨率变化通知（D5）。D11 自适应降级或用户改分辨率时，StreamSession 检测到
@@ -1198,9 +1120,9 @@ namespace EasyRDP.Core.Protocol
 
 ### 6.3 帧格式（Framing）与序列化
 
-> **为何需要 Framing**：TCP 是字节流，接收方无法天然知道一条消息从哪开始、到哪结束。`MaxFrameSize` 50MB 的视频帧与几字节的输入事件混在同一流上，必须有明确的切分规则，否则 `ITransportClient.DataReceived` 的"分片"语义无从成立。
+> **为何需要 Framing**：TCP 是字节流，接收方无法天然知道一条消息从哪开始、到哪结束。`MaxFrameSize` 50MB 的视频帧与几字节的输入事件混在同一流上，必须有明确的切分规则，否则 `ITransport.MessageReceived` 的"消息"语义无从成立。
 
-#### 线格式（所有消息统一外层）
+#### 线格式（所有消息统一外层，v0.03）
 
 所有消息外层采用 **length-prefix + 类型码** 封装，**小端字节序（Little-Endian）**：
 
@@ -1213,62 +1135,22 @@ namespace EasyRDP.Core.Protocol
 └──────────────────────────────────────────────────────────┘
 ```
 
-- `Magic = 0xE5`：每条消息起始魔术字节，用于流错位后重新对齐（解析失败时扫描到下一个 0xE5 恢复）。
+- `Magic = 0xE5`：每条消息起始魔术字节，用于流错位后重新对齐（扫描到下一个 0xE5 且 Type 为已知类型、PayloadLen 合法时恢复）。
 - `Type`：`MessageType` 枚举值（6.2 节）。
-- `PayloadLen`：4 字节小端 uint32，上限 `MaxFrameSize`（50MB），超出视为协议错误并断连。
-- 传输层（`ITransportClient`/`ITransportServer` 实现）**负责 framing 外层的装/拆**：发送侧拼装字节流，接收侧按 Magic+Type+PayloadLen 切分。但**传输层不保证**：消息有序到达、不丢失、大消息完整投递——这些由协议层用机制兜底（见 6.3.1 帧分片与顺序保证），与传输方式（TCP/UDP/WebSocket）无关。
-- **传输无关原则（核心）**：协议层定义"帧"的完整语义（分片、序号、校验、顺序保证、丢帧策略），传输层只承担"尽力投递分片字节"的职责。无论底层是 TCP（天然有序可靠）、UDP（乱序丢包）、WebSocket（基于 TCP 但有帧边界），协议逻辑统一不变。这样换任何传输后端，上层（Session）与协议层代码无需改动。
-  - 传输层契约（`ITransportClient`/`ITransportServer`）仅要求：`Send`/`SendTo` 尽力把字节写入底层；`DataReceived` 抛出收到的分片字节（可能乱序、可能丢失、可能重复）。不要求先发先达。完整消息由 `MessageReassembler` 重组（4.3.1）。
-  - 协议层在传输层之上做：分片重组、按 FrameId 排序、丢帧判定、完整性校验。
+- `PayloadLen`：4 字节小端 uint32，上限 `MaxSafePayloadSize`（10MB），超出视为协议错误并丢弃。
+- **v0.03 变更**：删除 v0.02 的 16 字节分片头（FrameId+FragIdx+FragCount+CRC16），头精简为 6 字节。协议版本 `Constants.ProtocolVersion = 0x03`，不接受 0x01/0x02 连接。
+- **传输无关原则（核心，v2.8 修正）**：协议层定义"完整消息"的语义（序列化 + framing 外层），传输层负责"把完整消息投递给对端"，分片 / 重组 / 丢帧 / 校验是各传输实现的内部细节：
+  - TCP（当前实现）：可靠有序字节流，直接整消息收发；`MessageFramingBuffer` 按 Magic+Type+PayloadLen 切完整消息。
+  - UDP（未来实现）：UdpTransport 内部按 MTU 切片 + 重组 + 丢帧 + 校验。
+  - WebSocket（未来实现）：message 帧边界，直接整消息收发。
 
-#### 6.3.1 帧分片与顺序保证（传输无关）
+#### 6.3.1 分片下放（原"帧分片与顺序保证"章节）
 
-> **设计原则**：协议层不依赖传输层的有序性/可靠性。无论 TCP/UDP/WebSocket，所有消息统一走分片机制，由协议层自己保证帧的顺序与完整性兜底。传输层只"尽力投递分片字节"。
+> **设计原则变更**：v2.7 的"协议层统一分片"（所有消息切 1400/16384 字节分片 + FrameId 排序 + CRC16）已废弃。v2.8 起分片完全下放到传输实现：协议层不再定义 FrameId/FragIdx/FragCount/CRC16。
 
-**为何所有消息都分片（而非仅 UDP）**：
-- 统一机制，协议层代码与传输后端解耦——换传输不改协议逻辑。
-- 即使 TCP 有序可靠，大帧（可达 50MB）仍需切分以避免单次发送阻塞、控制内存峰值；分片头开销极小（每片 10 字节），对 TCP 路径近乎免费。
-- 万一未来换 UDP/WebSocket，协议层无需改动。
-
-**分片格式（所有消息统一，附加在 framing 外层之内、payload 之上）**：
-
-```
-分片头（每片前置，小端）：
-┌──────────────┬──────────────┬──────────────┬──────────────┬───────────┐
-│ FrameId(4B)  │ FragIdx(2B)  │ FragCount(2B)│ CRC16(2B)    │ FragData  │
-│ 帧ID(单调)   │ 当前分片序号 │ 总分片数     │ FragData校验 │ (分片字节)│
-└──────────────┴──────────────┴──────────────┴──────────────┴───────────┘
-```
-
-即完整线格式为：`Magic(1) + Type(1) + PayloadLen(4) + [FrameId(4)+FragIdx(2)+FragCount(2)+CRC16(2)+FragData]`。小消息（如 Keepalive、InputEvent）FragCount=1、FragIdx=0，仍带分片头以保持统一。
-
-- `FrameId`：4 字节 uint32，**发送方自己的**单调递增计数器。同一帧的所有分片共享同一 FrameId。**这是传输层顺序保证的依据**——接收方据此判断新旧、丢弃过期帧。**区别于 `VideoFrameMessage.SequenceNumber`**：FrameId 是传输级分片组 ID（所有消息适用，服务端/客户端各自独立计数），SequenceNumber 是视频 payload 内的应用级帧序号（仅 VideoFrame 消息有，跨帧语义）。两者分别服务于传输可靠性与应用层丢帧检测，不可混用。
-- `FragIdx`/`FragCount`：当前分片序号（0 起）/ 总分片数。FragCount=1 表示不分片（整帧一个分片）。
-- `CRC16`：本分片 FragData 的校验（2 字节），检测传输损坏（无论传输层是否已校验，协议层独立校验，保证传输无关的完整性兜底）。
-- `FragData`：原始 payload 按 FragCount 等分后的第 FragIdx 段。最后一片可较短。
-- 分片大小 `FragData` 上限由 `Constants.FragmentSize`（默认 1400 字节，留余量给各传输协议头）控制。
-
-**接收方重组与顺序保证（协议层逻辑，传输无关）**：
-
-1. **按 FrameId 重组**：`MessageReassembler` 维护"当前期望 FrameId"与一个分片缓冲。收到某 FrameId 的分片，若 == 当前期望且 FragIdx 连续，填入缓冲；收齐 FragCount 个分片后，按 FragIdx 顺序拼接为完整 payload，校验通过则通过 `MessageReassembler.MessageReceived` 事件抛给上层（TransportHost/Session），FrameId 推进。
-2. **乱序处理**：若收到的 FrameId > 当前期望（新帧的分片先到），且当前帧未收齐——**丢弃当前未完成帧**，转而组装新帧（最新帧优先，实时流语义）。
-3. **丢包/超时处理**：当前帧某分片迟迟未到（超时 `Constants.FragmentReassembleTimeoutMs`，默认 100ms），丢弃当前帧部分分片，**不重传、不等待**——等下一帧。远程桌面是实时流，旧帧无价值。
-4. **重复分片**：同一 FrameId+FragIdx 重复到达，忽略后到的（幂等）。
-5. **CRC16 校验失败**：该分片视为损坏=丢失，按丢包处理（丢整帧）。
-
-**与"可靠重组"的本质区别**：本机制为**实时性牺牲完整性**——丢帧不重传，只保证"最新可用帧"尽快呈现。这是远程桌面的正确语义，与文件传输的可靠重组（重传补齐）相反。若底层是 TCP（天然不丢不乱序），上述逻辑退化为"每帧恰好一个或多个有序分片、无丢包、CRC 恒通过"，开销近乎为零但机制统一。
-
-**握手与控制的可靠性策略**：
-- **握手（HandshakeReq/Res）**：小帧（FragCount=1 通常），若传输丢包/超时导致重组失败，**应用层重试兜底**——客户端握手超时未收到响应则重发 HandshakeReq（有限次，如 3 次），而非协议层重传分片。
-- **InputEvent / CursorUpdate / Keepalive**：均为小消息（FragCount=1 通常）。`MessageReassembler` 对它们与视频帧一律按 6.3.1 丢帧策略处理（丢即弃不重传）——这是实时流语义的代价。实际影响：输入丢了用户可重新操作；光标丢了下一轮 60Hz 刷新覆盖；Keepalive 丢了服务端心跳检测容忍多轮丢包（30s 无活动才断连，见 6.5.2）。
-- **此策略不适合"每消息必须到达"的可靠信令场景——如有此需求 V2 应加入 message-level ACK/重传。V1 以局域网 TCP 为默认传输，丢包极少，当前策略可行。**
-
-#### 校验码策略（传输无关）
-
-- **每个分片带 CRC16**（见分片头），无论传输方式。协议层独立校验分片完整性，不依赖传输层是否已校验——这保证换任何传输后端都有统一的完整性兜底。
-- CRC16 而非 CRC32：分片小（默认 1400B），CRC16 足以检测突发错误，计算开销低于 CRC32，适合 XP 弱 CPU 的高频分片场景。
-- **校验失败 = 丢整帧**：某分片 CRC16 不符，视为损坏=丢失，按 6.3.1 丢包处理（丢当前帧，不重传）。因整帧可能因任一分片损坏而无法重组，不对整帧单独加校验。
-- 小消息（Keepalive/InputEvent，FragCount=1）也带 CRC16，统一无例外。
+- **为何下放**：TCP/WebSocket 天然支持任意长度消息，不需要应用层分片；只有 UDP 受 MTU 限制需要切片。把分片塞进统一契约，是让所有实现为 UDP 的局限买单。
+- **实时流丢帧语义**：发送侧丢帧仍在 Session 层（D11 自适应降级 + 发送队列丢弃过期帧）；接收侧丢帧只有 UDP 需要（TCP 有序不丢），由 UdpTransport 内部实现。
+- **校验策略**：协议层不再做分片 CRC16。TCP 路径由 TCP checksum 兜底（单帧损坏下一帧覆盖可接受）；UDP 实现自带 datagram 校验。
 
 #### 序列化约定
 
@@ -1354,7 +1236,7 @@ namespace EasyRDP.Core.Protocol
     /// <summary>客户端握手请求。</summary>
     public class HandshakeReq
     {
-        public byte Version;                 // 协议版本，须 == Constants.ProtocolVersion (0x02)
+        public byte Version;                 // 协议版本，须 == Constants.ProtocolVersion (0x03)
         public CodecCapabilities Capabilities; // 客户端支持的解码能力
         public string Username;              // 用户名；认证机制见 6.5.1
         public string Password;              // 密码
@@ -1436,12 +1318,11 @@ namespace EasyRDP.Core.Protocol
 {
     public static class Constants
     {
-        public const byte ProtocolVersion = 0x02;
+        public const byte ProtocolVersion = 0x03;
         public const byte FrameMagic = 0xE5;            // 消息起始魔术字节，见 6.3
         public const int DefaultPort = 8750;
         public const int MaxFrameSize = 50 * 1024 * 1024; // 50MB
-        public const int FragmentSize = 1400;           // 分片 FragData 上限（传输无关，留余量给各协议头），见 6.3.1
-        public const int FragmentReassembleTimeoutMs = 100; // 分片重组超时默认值（可被 MessageReassembler 实例构造参数覆盖；TCP 局域网下恒定不超时，UDP/WAN 场景可调大），见 6.3.1
+        public const int MaxSafePayloadSize = 10 * 1024 * 1024; // 安全 payload 上限，见 6.3
     }
 }
 ```
@@ -1449,7 +1330,7 @@ namespace EasyRDP.Core.Protocol
 ### 6.5 握手流程
 
 ```
-Client → Server: HandshakeReq { Version=0x02, Capabilities=[H264Software], Username="admin", Password="..." }
+Client → Server: HandshakeReq { Version=0x03, Capabilities=[H264Software], Username="admin", Password="..." }
 Server → Client: HandshakeRes {
     Result=Success,
     Codec=H264Software,
@@ -1459,7 +1340,7 @@ Server → Client: HandshakeRes {
 ```
 
 握手失败场景：
-- 客户端版本 < 0x02 → `VersionMismatch`
+- 客户端版本 < 0x03 → `VersionMismatch`
 - 双方编码能力交集为空 → `NoCommonCodec`（服务端动态探测后仅广告可实际创建的编码器）
 - 认证失败 → `AuthFailed`
 
@@ -1467,7 +1348,7 @@ Server → Client: HandshakeRes {
 
 - **认证方式：用户名 + 密码**。`HandshakeReq` 携带 `Username`/`Password`；服务端校验用户名密码对，失败返回 `AuthFailed` 并断连。
 - **服务端存储**：服务端维护用户名/密码凭据表（实现层负责，如配置文件、注册表或自定义存储）。抽象层只定义 `HandshakeReq.Username`/`Password` 字段与 `AuthFailed` 结果，不规定存储介质与密码哈希算法。建议实现层存哈希（如 SHA-256）而非明文，校验时比对哈希。
-- **明文传输警告**：Username/Password 以 UTF-8 明文置于握手包内。**明文仅适用于可信/内网环境**；跨公网须在传输层加固（TLS 隧道或在 `ITransportClient`/`ITransportServer` 实现层叠加加密），本抽象层不规定具体加密方案。
+- **明文传输警告**：Username/Password 以 UTF-8 明文置于握手包内。**明文仅适用于可信/内网环境**；跨公网须在传输层加固（TLS 隧道或在 `ITransport` 实现层叠加加密），本抽象层不规定具体加密方案。
 - **认证状态机**：握手前为未认证，握手 `Success` 后才允许收发 `VideoFrame`/`InputEvent`/`CursorUpdate`/`Keepalive`；未认证收到这些消息类型，服务端直接断连。
 - **失败防护**：连续认证失败（如 3 次）可由实现层加入短时封锁/延迟，防暴力破解；抽象层不强制。
 
@@ -1475,7 +1356,7 @@ Server → Client: HandshakeRes {
 
 - `MessageType.Keepalive = 0x03`，**payload 为空**（仅 framing 外层 Magic+Type+PayloadLen=0，共 6 字节）。双向：客户端与服务端均可主动发送 ping，对端收到后立即回 pong（同为空 payload 的 Keepalive 消息）。
 - **服务端检测**（防僵尸 Session，#3）：`TransportHost` 为每个 Session 维护 `LastActivity` 时间戳，收到该 Session 任何消息（含 Keepalive/VideoFrame/InputEvent）即刷新。定时器（默认 10s 间隔）扫描：若某 Session 超过 30s 无活动，主动发送 Keepalive ping 探活；再等 15s 仍无响应则视为死连接，触发 C5 断连联动（Stop+Dispose）。
-- **客户端检测**：`IClientStreamSession` 对称实现——`ITransportClient` 30s 无数据则发 ping，15s 无 pong 则触发 `FatalError`（D4）供上层重连。
+- **客户端检测**：`IClientStreamSession` 对称实现——`ITransport` 30s 无数据则发 ping，15s 无 pong 则触发 `FatalError`（D4）供上层重连。
 - 选取 30s/15s 而非更短：避免弱网/慢编码导致的正常延迟误判为断连；TCP 自身的 keepalive 通常更长（2h），应用层心跳必须更早介入。
 
 ### 6.6 视频帧消息
@@ -1525,7 +1406,7 @@ namespace EasyRDP.Core.Protocol
 
 | 偏移 | 字段 | 类型 | 字节 | 说明 |
 |---|---|---|---|---|
-| 0 | Version | uint8 | 1 | 须 == 0x02 |
+| 0 | Version | uint8 | 1 | 须 == 0x03 |
 | 1 | Capabilities | uint8 | 1 | CodecCapabilities 位掩码 |
 | 2 | UsernameLen | uint16 LE | 2 | UTF-8 字节数 |
 | 4 | Username | byte[] | UsernameLen | UTF-8 编码用户名 |

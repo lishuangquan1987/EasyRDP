@@ -15,13 +15,10 @@ namespace EasyRDP.Client.Wpf
     public class ClientInputSession : IClientInputSession
     {
         private static readonly Logger Logger = LogManager.GetCurrentClassLogger();
-        private ITransportClient _transport;
+        private ITransport _transport;
         private int _screenWidth;
         private int _screenHeight;
         private bool _disposed;
-        // 与流帧 ID 命名空间分离；用 int + Interlocked 保证线程安全
-        // （SendInput 会被 UI 线程与鼠标节流定时器线程并发调用，uint 的 ++ 不是原子的）
-        private int _sendFrameId = 1000;
 
         // 鼠标移动节流：WPF MouseMove 频率可达 100Hz+，每个事件都发一个分片会打满链路。
         // 这里只保留最新坐标，由定时器按 ~120Hz 合并发送，交互延迟增加 <8ms。
@@ -39,7 +36,7 @@ namespace EasyRDP.Client.Wpf
         private static readonly long ImmediateFlushTicks = Stopwatch.Frequency / 125;
         private long _lastMouseSendTicks;
 
-        public void Start(ITransportClient transport, int screenWidth, int screenHeight)
+        public void Start(ITransport transport, int screenWidth, int screenHeight)
         {
             _transport = transport;
             _screenWidth = screenWidth;
@@ -96,21 +93,13 @@ namespace EasyRDP.Client.Wpf
                 return;
             }
 
-            uint frameId = (uint)Interlocked.Increment(ref _sendFrameId);
             byte[] payload = msg.Pack();
-            // 诊断：记录每个发送的输入事件（Type/KeyCode/frameId），
-            // 与服务端 HandleInput 入口日志对照可定位消息丢失环节。
+            // 诊断：记录每个发送的输入事件（Type/KeyCode），与服务端 HandleInput 入口日志对照定位丢失环节。
             // MouseDown=4 MouseUp=5 KeyDown=1 KeyUp=2 MouseMove=3 MouseWheel=6
             if (msg.Type != InputEventType.MouseMove)
-                Logger.Debug("SendInput: type={0} keyCode={1} x={2} y={3} frameId={4} payloadLen={5}",
-                    msg.Type, msg.KeyCode, msg.X, msg.Y, frameId, payload.Length);
-            bool ok = false;
-            MessageReassembler.FragAndSend(
-                frameId, (byte)MessageType.InputEvent, payload,
-                (sid, data) => ok = _transport.Send(data), 0);
-            if (!ok && msg.Type != InputEventType.MouseMove)
-                Logger.Warn("SendInput transport.Send failed: type={0} keyCode={1} frameId={2}",
-                    msg.Type, msg.KeyCode, frameId);
+                Logger.Debug("SendInput: type={0} keyCode={1} x={2} y={3} payloadLen={4}",
+                    msg.Type, msg.KeyCode, msg.X, msg.Y, payload.Length);
+            _transport.Send(Framing.BuildMessage((byte)MessageType.InputEvent, payload));
         }
 
         /// <summary>

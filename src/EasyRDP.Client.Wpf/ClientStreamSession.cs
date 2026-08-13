@@ -16,11 +16,10 @@ namespace EasyRDP.Client.Wpf
     {
         private static readonly Logger Logger = LogManager.GetCurrentClassLogger();
 
-        private ITransportClient _transport;
+        private ITransport _transport;
         private IVideoDecoder _decoder;
         private FrameBuffer _frameBuffer;
         private IRenderTarget _renderTarget;
-        private MessageReassembler _reassembler;
         private volatile bool _running;
         // 0=未触发, 1=已触发；用 Interlocked 保证跨线程只触发一次
         private int _fatalRaisedFlag;
@@ -92,10 +91,10 @@ namespace EasyRDP.Client.Wpf
         /// <summary>已接收视频帧压缩数据总字节（码率统计数据源）。</summary>
         public long ReceivedBytes { get { return Interlocked.Read(ref _receivedBytes); } }
 
-        /// <summary>传输层丢帧率（0~1，来自 MessageReassembler 统计）。</summary>
+        /// <summary>传输层丢帧率（0~1）。重构后 TCP 传输无应用层分片重组，恒为 0（UDP 后端实现后由实现层上报）。</summary>
         public double PacketLossRate
         {
-            get { return _reassembler != null ? _reassembler.PacketLossRate : 0.0; }
+            get { return 0.0; }
         }
 
         /// <summary>Gets or sets the render target where decoded frames are displayed.</summary>
@@ -141,21 +140,19 @@ namespace EasyRDP.Client.Wpf
         /// 使服务端在 HandshakeRes 之后立刻发来的视频帧不会因为客户端尚未 Start 而丢失。
         /// 管线未就绪（InitPipeline 未完成）时收到的消息会先缓冲，就绪后按序回放。
         /// </summary>
-        public void BeginReceive(ITransportClient transport)
+        public void BeginReceive(ITransport transport)
         {
             lock (_pendingLock)
             {
                 if (_receiving) return;
                 _transport = transport;
                 _receiving = true;
-                _reassembler = new MessageReassembler();
-                _reassembler.MessageReceived += OnMessageReceived;
-                _transport.DataReceived += OnDataReceived;
+                _transport.MessageReceived += OnMessageReceived;
             }
         }
 
         /// <summary>Starts the stream session: begins receiving, decoding, and rendering frames.</summary>
-        public void Start(ITransportClient transport)
+        public void Start(ITransport transport)
         {
             if (_running) return;
             if (!_receiving)
@@ -196,12 +193,7 @@ namespace EasyRDP.Client.Wpf
                 Monitor.PulseAll(_decodeLock);
             }
             if (_transport != null)
-                _transport.DataReceived -= OnDataReceived;
-            if (_reassembler != null)
-            {
-                _reassembler.MessageReceived -= OnMessageReceived;
-                _reassembler = null;
-            }
+                _transport.MessageReceived -= OnMessageReceived;
             lock (_pendingLock)
             {
                 _pendingMessages.Clear();
@@ -238,53 +230,12 @@ namespace EasyRDP.Client.Wpf
             Stop();
         }
 
-        private void OnDataReceived(object sender, FragmentReceivedEventArgs e)
+        /// <summary>处理光标更新消息（完整 payload，无分片头/CRC）。</summary>
+        private void HandleCursorUpdate(byte[] payload)
         {
-            if (e == null || e.Data == null || e.Data.Length < 16) return;
-
-            // 探测消息类型：wire[0]=Magic, wire[1]=MessageType
-            // 光标更新独立处理，不与视频帧共享 MessageReassembler 的 FrameId 命名空间
-            byte msgType = e.Data[1];
-            if (msgType == (byte)MessageType.CursorUpdate)
-            {
-                ProcessCursorFragment(e.Data);
-                return;
-            }
-
-            // 其他消息类型走标准重组路径
-            _reassembler?.OnFragment(e);
-        }
-
-        private void ProcessCursorFragment(byte[] wire)
-        {
-            // wire format: Magic(1)+Type(1)+PayloadLen(4)+FrameId(4)+FragIdx(2)+FragCount(2)+CRC16(2)+FragData
-            // Minimum cursor payload: Visible(1)+X(4)+Y(4)+Width(4)+Height(4)+HotX(4)+HotY(4)+RgbaLen(4) = 29 bytes
-            const int WireHeaderSize = 16;
-            const int MinCursorPayload = 29;
-            const int MaxCursorPayload = 1024 * 1024; // 1MB cursor data is generous
-
-            // 验证分片参数：光标消息始终为单分片
-            ushort fragIdx = (ushort)(wire[10] | (wire[11] << 8));
-            ushort fragCount = (ushort)(wire[12] | (wire[13] << 8));
-            if (fragIdx != 0 || fragCount != 1)
-                return; // Multi-fragment cursor — discard
-
-            int fragDataLen = wire.Length - WireHeaderSize;
-            if (fragDataLen < MinCursorPayload || fragDataLen > MaxCursorPayload)
-                return; // Payload out of bounds — discard
-
-            // Verify CRC16
-            ushort expectedCrc = (ushort)(wire[14] | (wire[15] << 8));
-            ushort actualCrc = MessageReassembler.ComputeCrc16(wire, WireHeaderSize, fragDataLen);
-            if (actualCrc != expectedCrc)
-                return; // CRC mismatch — discard
-
-            // Parse cursor payload
-            byte[] cursorPayload = new byte[fragDataLen];
-            Buffer.BlockCopy(wire, WireHeaderSize, cursorPayload, 0, fragDataLen);
             try
             {
-                var msg = CursorUpdateMessage.Unpack(cursorPayload);
+                var msg = CursorUpdateMessage.Unpack(payload);
                 if (!_pipelineReady)
                 {
                     // 管线就绪前缓冲光标消息，由 FlushPendingCursor 在握手完成后回放，
@@ -383,6 +334,10 @@ namespace EasyRDP.Client.Wpf
             {
                 var msg = VideoFrameMessage.Unpack(e.Data);
                 EnqueueVideoFrame(msg);
+            }
+            else if (e.MessageType == (byte)MessageType.CursorUpdate)
+            {
+                HandleCursorUpdate(e.Data);
             }
             else if (e.MessageType == (byte)MessageType.ClipboardSync)
             {
@@ -605,8 +560,7 @@ namespace EasyRDP.Client.Wpf
                     (sid, payload) =>
                     {
                         // 用局部变量 transport，而非字段 _transport
-                        MessageReassembler.FragAndSend(0, (byte)MessageType.ClipFileContentsReq, payload,
-                            (s, d) => transport.Send(d), 0);
+                        transport.Send(Framing.BuildMessage((byte)MessageType.ClipFileContentsReq, payload));
                     },
                     localPaths =>
                     {
@@ -949,11 +903,7 @@ namespace EasyRDP.Client.Wpf
         /// <summary>
         /// 发送帧请求消息（阶段三流控）：通知服务端客户端已消费完上一帧、可以编码下一帧。
         /// 在渲染线程调用。
-        /// 
-        /// 重要：payload 必须非空（1 字节占位）。服务端 MessageReassembler.OnFragment 对
-        /// fragDataLen &lt;= 0 的分片直接丢弃（防御性空分片保护），空 payload 的请求
-        /// 会被静默丢掉 → 服务端 EncodeLoop 永久等待 → 画面冻结（已实测复现）。
-        /// payload 内容无意义（服务端不解析），仅用于绕过该保护。
+        /// payload 内容无意义（服务端不解析）。重构后空 payload 也支持，保留 1 字节占位保守起见。
         /// </summary>
         private void SendFramebufferUpdateRequest()
         {
@@ -961,9 +911,8 @@ namespace EasyRDP.Client.Wpf
             {
                 var transport = _transport;
                 if (transport == null) return;
-                // 1 字节占位 payload：避免被服务端重组器的空分片保护丢弃
-                MessageReassembler.FragAndSend(0, (byte)MessageType.FramebufferUpdateRequest,
-                    new byte[] { 0 }, (sid, data) => transport.Send(data), 0);
+                // 1 字节占位 payload（服务端不解析内容；重构后空 payload 也支持，保留占位保守起见）
+                transport.Send(Framing.BuildMessage((byte)MessageType.FramebufferUpdateRequest, new byte[] { 0 }));
             }
             catch (Exception ex)
             {
