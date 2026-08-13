@@ -70,6 +70,9 @@ namespace EasyRDP.Core.Transport
                 {
                     NetworkStream stream = _client.GetStream();
                     stream.Write(message, 0, message.Length);
+                    // 调试日志：记录发送的完整消息（type + 总长度），供排障追踪
+                    Logger.Debug("TcpTransport.Send: type=0x{0:X2} bytes={1}",
+                        message.Length > 1 ? message[1] : 0, message.Length);
                 }
                 catch (Exception ex)
                 {
@@ -126,6 +129,8 @@ namespace EasyRDP.Core.Transport
                         Logger.Warn("ReceiveLoop: invalid message dropped ({0} bytes)", wire.Length);
                         return;
                     }
+                    Logger.Debug("TcpTransport.Receive: type=0x{0:X2} payloadLen={1}",
+                        messageType, payload != null ? payload.Length : 0);
                     var handler = MessageReceived;
                     if (handler != null)
                         handler(this, new MessageReceivedEventArgs(0, messageType, payload));

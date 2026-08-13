@@ -57,6 +57,11 @@ namespace EasyRDP.Core.Transport
                 }
                 else
                 {
+                    if (_bufferPos > 0)
+                    {
+                        // 失步：缓冲内无有效帧头，丢弃字节（限频记录防刷屏）
+                        Logger.Debug("MessageFramingBuffer: discarding {0} bytes (no valid frame head)", _bufferPos);
+                    }
                     _bufferPos = 0;
                 }
                 return false;

@@ -104,6 +104,8 @@ namespace EasyRDP.Core.Transport
                 // frameId 在锁内分配：多线程（heartbeat/clipboard/UI/编码）并发 Send 时
                 // 保证单调递增不重复，避免两帧取到相同 frameId 导致接收端分片混淆。
                 uint frameId = _nextFrameId++;
+                Logger.Debug("UdpTransport.Send: type=0x{0:X2} payloadLen={1} fragCount={2} frameId={3}",
+                    messageType, totalLen, fragCount, frameId);
                 for (int i = 0; i < fragCount; i++)
                 {
                     int offset = i * MaxFragData;
@@ -117,7 +119,12 @@ namespace EasyRDP.Core.Transport
                     byte[] datagram = BuildDatagram(frameId, (ushort)i, (ushort)fragCount, messageType, (uint)totalLen, fragData);
                     try
                     {
-                        _client.Send(datagram, datagram.Length, _remote);
+                        // 已连接的 socket（客户端）用无 endPoint 重载；未连接（服务端共享监听）用显式 remote。
+                        // 已连接 socket 上调用 Send(..., endPoint) 会抛 WSAEISCONN。
+                        if (_client.Client.Connected)
+                            _client.Send(datagram, datagram.Length);
+                        else
+                            _client.Send(datagram, datagram.Length, _remote);
                     }
                     catch (Exception ex)
                     {
@@ -257,6 +264,8 @@ namespace EasyRDP.Core.Transport
 
         private readonly FrameState _realtime = new FrameState();
         private readonly Dictionary<byte, FrameState> _control = new Dictionary<byte, FrameState>();
+        // CRC 失败计数（诊断用，限频日志）
+        private int _crcErrorCount;
 
         public void OnDatagram(byte[] datagram)
         {
@@ -286,7 +295,13 @@ namespace EasyRDP.Core.Transport
 
             ushort actualCrc = Crc16.Compute(datagram, pos, fragDataLen);
             if (actualCrc != expectedCrc)
+            {
+                // CRC 失败视为损坏丢弃（限频记录防刷屏）
+                if ((++_crcErrorCount & 0x3F) == 1)
+                    Logger.Warn("UdpReassembler: CRC mismatch frameId={0} fragIdx={1}/{2} type=0x{3:X2} (total={4})",
+                        frameId, fragIdx, fragCount, messageType, _crcErrorCount);
                 return; // 损坏，丢弃
+            }
 
             FrameState state;
             if (IsRealtime(messageType))
@@ -303,6 +318,8 @@ namespace EasyRDP.Core.Transport
             byte[] full;
             if (state.Process(frameId, messageType, fragIdx, fragCount, (int)payloadLen, datagram, pos, fragDataLen, out full))
             {
+                Logger.Debug("UdpReassembler: assembled type=0x{0:X2} payloadLen={1} fragCount={2} frameId={3}",
+                    messageType, full != null ? full.Length : 0, fragCount, frameId);
                 var handler = MessageAssembled;
                 if (handler != null)
                     handler(messageType, full);

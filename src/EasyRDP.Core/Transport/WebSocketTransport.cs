@@ -71,6 +71,8 @@ namespace EasyRDP.Core.Transport
                 try
                 {
                     WriteFrame(0x2, message, _isClient); // opcode=binary, FIN=1；掩码方向由角色决定
+                    Logger.Debug("WebSocketTransport.Send: type=0x{0:X2} bytes={1}",
+                        message.Length > 1 ? message[1] : 0, message.Length);
                 }
                 catch (Exception ex)
                 {
@@ -205,6 +207,8 @@ namespace EasyRDP.Core.Transport
                 Logger.Warn("WebSocket: invalid message dropped ({0} bytes)", wire.Length);
                 return;
             }
+            Logger.Debug("WebSocketTransport.Receive: type=0x{0:X2} payloadLen={1}",
+                messageType, payload != null ? payload.Length : 0);
             var handler = MessageReceived;
             if (handler != null)
                 handler(this, new MessageReceivedEventArgs(0, messageType, payload));
