@@ -75,6 +75,8 @@ namespace EasyRDP.Core.Transport
 
                 Logger.Info("WebSocket connected to {0}:{1}", host, port);
                 Log("Connected to " + endpoint);
+                // 握手完成，清除读超时：否则空闲 10s 后 ReceiveLoop 的 ReadByte 会抛 IOException 断连
+                stream.ReadTimeout = System.Threading.Timeout.Infinite;
                 return new WebSocketTransport(stream, true);
             }
             catch (Exception ex)
@@ -101,7 +103,9 @@ namespace EasyRDP.Core.Transport
         {
             var sb = new StringBuilder();
             var buf = new byte[1];
-            while (sb.Length < 65536)
+            // 整体 deadline（10s）：防止服务端慢速响应时无限阻塞
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            while (sb.Length < 65536 && sw.ElapsedMilliseconds < 10000)
             {
                 int n = stream.Read(buf, 0, 1);
                 if (n <= 0)

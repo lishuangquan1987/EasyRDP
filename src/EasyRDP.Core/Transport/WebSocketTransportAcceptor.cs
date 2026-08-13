@@ -157,7 +157,10 @@ namespace EasyRDP.Core.Transport
         {
             var sb = new StringBuilder();
             var buf = new byte[1];
-            while (sb.Length < 65536)
+            // 整体 deadline（10s）：ReadTimeout 只是单次 Read 超时，逐字节攻击者每 9s 发 1 字节即可无限阻塞；
+            // 用 Stopwatch 限制握手头读取总时长。
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            while (sb.Length < 65536 && sw.ElapsedMilliseconds < 10000)
             {
                 int n = stream.Read(buf, 0, 1);
                 if (n <= 0)
