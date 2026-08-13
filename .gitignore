@@ -14,3 +14,6 @@
 Thumbs.db
 reasonix.toml
 .idea/
+
+# WPF 临时构建文件
+*_wpftmp.csproj
