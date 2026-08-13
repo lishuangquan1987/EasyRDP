@@ -89,10 +89,13 @@ namespace EasyRDP.Core.Transport
                     }
 
                     var stream = client.GetStream();
+                    // 握手阶段设置读超时（10s），防止恶意客户端连上不发数据阻塞 AcceptLoop（DoS）；
+                    // 握手完成后交由 WebSocketTransport 接收，清除超时。
+                    stream.ReadTimeout = 10000;
 
-                    // 读 HTTP Upgrade 请求头
+                    // 读 HTTP Upgrade 请求头（Upgrade 值大小写不敏感）
                     string request = ReadHttpHeaders(stream);
-                    if (request.IndexOf("Upgrade: websocket") < 0)
+                    if (request.IndexOf("Upgrade: websocket", StringComparison.OrdinalIgnoreCase) < 0)
                     {
                         try { client.Close(); } catch { }
                         continue;
@@ -115,6 +118,9 @@ namespace EasyRDP.Core.Transport
                     byte[] respBytes = Encoding.ASCII.GetBytes(response);
                     stream.Write(respBytes, 0, respBytes.Length);
                     stream.Flush();
+
+                    // 握手完成，清除读超时（后续帧读取由 WebSocketTransport 负责）
+                    stream.ReadTimeout = System.Threading.Timeout.Infinite;
 
                     string remote = "";
                     try { remote = client.Client.RemoteEndPoint.ToString(); } catch { }

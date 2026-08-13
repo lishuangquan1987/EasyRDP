@@ -1528,18 +1528,32 @@ namespace EasyRDP.Server.Wpf
         private void DisconnectSession(uint sessionId)
         {
             Logger.Info("Disconnecting session {0}", sessionId);
-            SessionInfo info;
+            SessionInfo info = null;
             ITransport transport = null;
+            bool hasSession;
             lock (_lock)
             {
-                if (!_sessions.TryGetValue(sessionId, out info))
-                    return;
-                _sessions.Remove(sessionId);
+                hasSession = _sessions.TryGetValue(sessionId, out info);
+                if (hasSession)
+                {
+                    _sessions.Remove(sessionId);
+                    _activeCount--;
+                }
+                // 无论握手是否完成，都清理 per-session 字典，防止「连上但握手前断连」时泄漏
                 _transports.TryGetValue(sessionId, out transport);
                 _transports.Remove(sessionId);
                 _lastActivity.Remove(sessionId);
                 _remoteEndpoints.Remove(sessionId);
-                _activeCount--;
+            }
+
+            if (!hasSession)
+            {
+                // 握手前断连：无 Session 可清理，仅断开 transport
+                if (transport != null)
+                {
+                    try { transport.Disconnect(); } catch { }
+                }
+                return;
             }
 
             // 清理 per-session 延迟渲染状态：Dispose Provider（停止响应 FileContentsReq）

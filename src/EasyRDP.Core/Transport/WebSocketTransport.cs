@@ -70,7 +70,7 @@ namespace EasyRDP.Core.Transport
                     return;
                 try
                 {
-                    WriteFrame(0x2, message, true); // opcode=binary, FIN=1
+                    WriteFrame(0x2, message, _isClient); // opcode=binary, FIN=1；掩码方向由角色决定
                 }
                 catch (Exception ex)
                 {
@@ -133,7 +133,7 @@ namespace EasyRDP.Core.Transport
                     }
                     else if (opcode == 0x9) // ping → pong
                     {
-                        WriteFrame(0xA, payload, false);
+                        WriteFrame(0xA, payload, _isClient);
                     }
                     else if (opcode == 0xA) // pong
                     {
@@ -246,8 +246,11 @@ namespace EasyRDP.Core.Transport
                 if (clientMask)
                 {
                     byte[] maskKey = new byte[4];
-                    var rng = new Random();
-                    rng.NextBytes(maskKey);
+                    // 用加密级随机源（RFC 6455 10.3 要求掩码密钥不可预测）
+                    using (var rng = new RNGCryptoServiceProvider())
+                    {
+                        rng.GetBytes(maskKey);
+                    }
                     _stream.Write(maskKey, 0, 4);
                     byte[] masked = new byte[len];
                     for (int i = 0; i < len; i++)

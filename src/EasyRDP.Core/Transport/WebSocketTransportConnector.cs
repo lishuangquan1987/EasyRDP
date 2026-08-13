@@ -39,6 +39,8 @@ namespace EasyRDP.Core.Transport
                 tcp.EndConnect(result);
 
                 var stream = tcp.GetStream();
+                // 握手阶段设置读超时，防止服务端不响应时永久阻塞
+                stream.ReadTimeout = 10000;
 
                 // 客户端握手请求
                 string key = GenerateKey();
@@ -87,8 +89,11 @@ namespace EasyRDP.Core.Transport
         private static string GenerateKey()
         {
             byte[] bytes = new byte[16];
-            var rng = new Random();
-            rng.NextBytes(bytes);
+            // Sec-WebSocket-Key 要求不可预测（RFC 6455 4.1），用加密级随机源
+            using (var rng = new System.Security.Cryptography.RNGCryptoServiceProvider())
+            {
+                rng.GetBytes(bytes);
+            }
             return Convert.ToBase64String(bytes);
         }
 

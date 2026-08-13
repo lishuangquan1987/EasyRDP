@@ -16,6 +16,9 @@ namespace EasyRDP.Core.Transport
     {
         private static readonly Logger Logger = LogManager.GetCurrentClassLogger();
 
+        /// <summary>未完成握手的会话上限：防止伪造源 IP 单包无限增长会话条目（UDP 无连接，无 TCP backlog 保护）。</summary>
+        private const int MaxPendingConnections = 16;
+
         private UdpClient _listener;
         private readonly Dictionary<IPEndPoint, UdpTransport> _transports = new Dictionary<IPEndPoint, UdpTransport>();
         private readonly object _lock = new object();
@@ -84,16 +87,28 @@ namespace EasyRDP.Core.Transport
 
                     UdpTransport transport;
                     bool isNew = false;
+                    bool rejected = false;
                     lock (_lock)
                     {
                         if (!_transports.TryGetValue(remote, out transport))
                         {
-                            transport = new UdpTransport(_listener, remote, false);
-                            transport.Disconnected += (s, e) => RemoveTransport(remote);
-                            _transports[remote] = transport;
-                            isNew = true;
+                            if (_transports.Count >= MaxPendingConnections)
+                            {
+                                // 超限：丢弃该 datagram，不创建新会话
+                                rejected = true;
+                            }
+                            else
+                            {
+                                transport = new UdpTransport(_listener, remote, false);
+                                transport.Disconnected += (s, e) => RemoveTransport(remote);
+                                _transports[remote] = transport;
+                                isNew = true;
+                            }
                         }
                     }
+
+                    if (rejected)
+                        continue; // 超限丢弃，不触发 ClientConnected 也不处理
 
                     if (isNew)
                     {

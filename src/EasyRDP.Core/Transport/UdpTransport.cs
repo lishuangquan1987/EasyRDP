@@ -90,7 +90,6 @@ namespace EasyRDP.Core.Transport
             if (!Framing.TryParse(message, out messageType, out payload))
                 return;
 
-            uint frameId = _nextFrameId++;
             int totalLen = payload.Length;
             int fragCount = (totalLen + MaxFragData - 1) / MaxFragData;
             if (fragCount == 0)
@@ -102,6 +101,9 @@ namespace EasyRDP.Core.Transport
             {
                 if (_client == null || _disconnected)
                     return;
+                // frameId 在锁内分配：多线程（heartbeat/clipboard/UI/编码）并发 Send 时
+                // 保证单调递增不重复，避免两帧取到相同 frameId 导致接收端分片混淆。
+                uint frameId = _nextFrameId++;
                 for (int i = 0; i < fragCount; i++)
                 {
                     int offset = i * MaxFragData;
