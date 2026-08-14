@@ -44,7 +44,7 @@ namespace EasyRDP.Core.Transport
             if (_bufferPos < Framing.HeaderSize)
                 return false;
 
-            // 找帧头：Magic + Type 为已知类型（联合校验避免 payload 内 0xE5 误判）
+            // 找帧头：Magic + Type 为已知类型 + PayloadLen ≤ 上限（联合校验避免 payload 内 0xE5 误判）
             int start = FindFrameStart();
             if (start < 0)
             {
@@ -112,14 +112,31 @@ namespace EasyRDP.Core.Transport
             return true;
         }
 
-        /// <summary>在缓冲中定位有效帧头（Magic + 已知 Type）。返回 -1 表示未找到。</summary>
+        /// <summary>
+        /// 在缓冲中定位有效帧头（Magic + 已知 Type + PayloadLen ≤ 上限）。返回 -1 表示未找到。
+        /// 6 字节头未到齐时只校验 Magic+Type（PayloadLen 待数据到齐后再判）；
+        /// 头到齐后还需校验 PayloadLen 不超 MaxSafePayloadSize，避免 payload 内
+        /// 恰好出现 0xE5 + 已知 Type 的字节组合被误判为帧头（移除 CRC16 后仅靠 Magic 重对齐更易受干扰）。
+        /// </summary>
         private int FindFrameStart()
         {
             int maxStart = _bufferPos - 1; // 至少留 1 字节给 Type
             for (int i = 0; i < maxStart; i++)
             {
-                if (_buffer[i] == Constants.FrameMagic && Framing.IsKnownMessageType(_buffer[i + 1]))
-                    return i;
+                if (_buffer[i] != Constants.FrameMagic || !Framing.IsKnownMessageType(_buffer[i + 1]))
+                    continue;
+
+                // 6 字节头已到齐时，联合校验 PayloadLen 上限
+                if (_bufferPos >= i + Framing.HeaderSize)
+                {
+                    uint payloadLen = (uint)_buffer[i + 2]
+                        | ((uint)_buffer[i + 3] << 8)
+                        | ((uint)_buffer[i + 4] << 16)
+                        | ((uint)_buffer[i + 5] << 24);
+                    if (payloadLen > (uint)Constants.MaxSafePayloadSize)
+                        continue; // 误判，继续向后扫描
+                }
+                return i;
             }
             return -1;
         }

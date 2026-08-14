@@ -16,6 +16,7 @@ namespace EasyRDP.Core.Transport
     {
         private static readonly Logger Logger = LogManager.GetCurrentClassLogger();
 
+        /// <summary>存活连接数硬上限（含 pending 与已握手建立）：防止恶意客户端批量建连耗尽 FD/线程/内存。</summary>
         private const int MaxPendingConnections = 16;
 
         private TcpListener _listener;

@@ -23,7 +23,6 @@ namespace EasyRDP.Client.Wpf
         private volatile bool _running;
         // 0=未触发, 1=已触发；用 Interlocked 保证跨线程只触发一次
         private int _fatalRaisedFlag;
-        private Thread _receiveThread;
         private Thread _renderThread;
         // 解码专用线程：视频帧解码不再占用 TCP 接收线程，
         // 避免 CursorUpdate/Clipboard 等控制消息被解码阻塞（否则鼠标回显延迟随解码耗时增长）。
@@ -161,10 +160,8 @@ namespace EasyRDP.Client.Wpf
                 _transport = transport;
             _running = true;
 
-            _receiveThread = new Thread(ReceiveLoop);
-            _receiveThread.IsBackground = true;
-            _receiveThread.Start();
-
+            // 接收已由 ITransport 内部接收线程事件驱动（MessageReceived），
+            // 本会话无需自建接收线程，只保留解码 + 渲染两个线程。
             _decodeThread = new Thread(DecodeLoop);
             _decodeThread.IsBackground = true;
             _decodeThread.Start();
@@ -208,7 +205,6 @@ namespace EasyRDP.Client.Wpf
             }
             _clipConsumers.Clear();
 
-            _receiveThread?.Join(3000);
             _decodeThread?.Join(3000);
             _decodeThread = null;
             _renderThread?.Join(3000);
@@ -837,15 +833,6 @@ namespace EasyRDP.Client.Wpf
                 HotY = msg.HotY,
                 RgbaPixels = msg.RgbaPixels
             });
-        }
-
-        // null op — actual receiving is event-driven
-        private void ReceiveLoop()
-        {
-            while (_running)
-            {
-                Thread.Sleep(100);
-            }
         }
 
         private void RenderLoop()

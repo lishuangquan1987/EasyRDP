@@ -2,18 +2,16 @@ namespace EasyRDP.Core.Transport
 {
     using System;
     /// <summary>
-    /// 完整消息事件参数。SessionId 为服务端路由辅助字段：TcpTransport 抛出时恒为 0，
-    /// 由 TransportHost 在订阅闭包中填充真实 sessionId 完成路由；客户端侧恒为 0。
+    /// 完整消息事件参数。与连接/会话角色无关，不携带 SessionId——
+    /// 服务端多会话路由由 TransportHost 在订阅闭包中捕获 sessionId 完成，与传输层解耦。
     /// </summary>
     public class MessageReceivedEventArgs : EventArgs
     {
-        public uint SessionId;
         public byte MessageType;
         public byte[] Data;
 
-        public MessageReceivedEventArgs(uint sessionId, byte messageType, byte[] data)
+        public MessageReceivedEventArgs(byte messageType, byte[] data)
         {
-            SessionId = sessionId;
             MessageType = messageType;
             Data = data;
         }

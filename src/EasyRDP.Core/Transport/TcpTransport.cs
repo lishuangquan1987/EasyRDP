@@ -19,6 +19,7 @@ namespace EasyRDP.Core.Transport
         private Thread _receiveThread;
         private volatile bool _running;
         private volatile bool _disconnected;
+        private int _disconnectGuard; // 0=未断开 1=已断开（Interlocked 保证 Disconnect 清理只执行一次，避免 Disconnected 重复触发）
         private int _started; // 0=未启动 1=已启动（Interlocked 防重复 Start）
         private readonly object _sendLock = new object();
 
@@ -92,7 +93,9 @@ namespace EasyRDP.Core.Transport
 
         public void Disconnect()
         {
-            if (_disconnected)
+            // 原子守卫：接收线程 finally 与 Send 失败路径可能并发调用 Disconnect，
+            // 检查-赋值非原子会导致 Disconnected 事件触发两次；用 Interlocked 保证清理只执行一次。
+            if (Interlocked.Exchange(ref _disconnectGuard, 1) != 0)
                 return;
             _disconnected = true;
             _running = false;
@@ -133,7 +136,7 @@ namespace EasyRDP.Core.Transport
                         messageType, payload != null ? payload.Length : 0);
                     var handler = MessageReceived;
                     if (handler != null)
-                        handler(this, new MessageReceivedEventArgs(0, messageType, payload));
+                        handler(this, new MessageReceivedEventArgs(messageType, payload));
                 }
                 catch (Exception ex)
                 {

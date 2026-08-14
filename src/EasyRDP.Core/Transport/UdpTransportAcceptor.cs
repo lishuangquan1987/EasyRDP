@@ -16,7 +16,10 @@ namespace EasyRDP.Core.Transport
     {
         private static readonly Logger Logger = LogManager.GetCurrentClassLogger();
 
-        /// <summary>未完成握手的会话上限：防止伪造源 IP 单包无限增长会话条目（UDP 无连接，无 TCP backlog 保护）。</summary>
+        /// <summary>
+        /// 存活会话条目上限：防止伪造源 IP 单包无限增长会话条目（UDP 无连接，无 TCP backlog 保护）。
+        /// 条目在首包到达时创建、断连时移除；活跃会话数由 TransportHost 的 maxSessions 另行限制。
+        /// </summary>
         private const int MaxPendingConnections = 16;
 
         private UdpClient _listener;

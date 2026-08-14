@@ -31,6 +31,7 @@ namespace EasyRDP.Core.Transport
         private Thread _receiveThread;
         private volatile bool _running;
         private volatile bool _disconnected;
+        private int _disconnectGuard; // 0=未断开 1=已断开（Interlocked 保证 Disconnect 清理只执行一次）
         private int _started;
         private uint _nextFrameId = 1;
         private readonly object _sendLock = new object();
@@ -53,7 +54,7 @@ namespace EasyRDP.Core.Transport
             {
                 var handler = MessageReceived;
                 if (handler != null)
-                    handler(this, new MessageReceivedEventArgs(0, type, payload));
+                    handler(this, new MessageReceivedEventArgs(type, payload));
             };
         }
 
@@ -137,7 +138,7 @@ namespace EasyRDP.Core.Transport
 
         public void Disconnect()
         {
-            if (_disconnected)
+            if (Interlocked.Exchange(ref _disconnectGuard, 1) != 0)
                 return;
             _disconnected = true;
             _running = false;

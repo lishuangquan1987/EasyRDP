@@ -1010,25 +1010,23 @@ namespace EasyRDP.Server.Wpf
             // 订阅完成后才 Start() 启动接收，避免首包在订阅前到达而丢失（首包竞态）。
             transport.MessageReceived += (s, args) =>
             {
-                // TcpTransport 抛事件时 SessionId=0；这里填充真实 sessionId，
-                // 后续 OnMessageReceived 及其 Handler 仍按 e.SessionId 路由，无需改动。
-                args.SessionId = sessionId;
+                // 闭包捕获 sessionId 完成多会话路由（SessionId 不再由事件参数携带）。
                 lock (_lock)
                 {
                     _lastActivity[sessionId] = DateTime.UtcNow;
                 }
-                OnMessageReceived(args);
+                OnMessageReceived(sessionId, args);
             };
             transport.Disconnected += (s, args) => OnTransportDisconnected(sessionId);
 
             transport.Start();
         }
 
-        private void OnMessageReceived(MessageReceivedEventArgs e)
+        private void OnMessageReceived(uint sessionId, MessageReceivedEventArgs e)
         {
             if (e.MessageType == (byte)MessageType.HandshakeReq)
             {
-                HandleHandshake(e);
+                HandleHandshake(sessionId, e);
             }
             else
             {
@@ -1036,11 +1034,11 @@ namespace EasyRDP.Server.Wpf
                 SessionInfo info;
                 lock (_lock)
                 {
-                    if (!_sessions.TryGetValue(e.SessionId, out info))
+                    if (!_sessions.TryGetValue(sessionId, out info))
                     {
                         // 诊断：会话不存在时记录，定位 InputEvent 丢失是否因会话查找失败
                         if (e.MessageType == (byte)MessageType.InputEvent)
-                            Logger.Warn("InputEvent dropped: sessionId={0} not found in _sessions", e.SessionId);
+                            Logger.Warn("InputEvent dropped: sessionId={0} not found in _sessions", sessionId);
                         return;
                     }
                 }
@@ -1049,7 +1047,7 @@ namespace EasyRDP.Server.Wpf
                 {
                     if (info.Input == null)
                     {
-                        Logger.Warn("InputEvent dropped: sessionId={0} info.Input is null", e.SessionId);
+                        Logger.Warn("InputEvent dropped: sessionId={0} info.Input is null", sessionId);
                     }
                     else
                     {
@@ -1058,7 +1056,7 @@ namespace EasyRDP.Server.Wpf
                         // 与客户端 SendInput 日志对照可定位消息丢失环节。
                         // MouseDown=4 MouseUp=5 KeyDown=1 KeyUp=2 MouseMove=3 MouseWheel=6
                         Logger.Debug("InputEvent dispatch: sessionId={0} inputType={1} keyCode={2}",
-                            e.SessionId, inputMsg.Type, inputMsg.KeyCode);
+                            sessionId, inputMsg.Type, inputMsg.KeyCode);
                         info.Input.HandleInput(inputMsg);
                         // 阶段二：鼠标按下/抬起时通知流会话（ZRLE CopyRect 触发条件），
                         // 仅在 ZRLE 模式下编码器会响应此状态，H264 路径无副作用。
@@ -1070,25 +1068,25 @@ namespace EasyRDP.Server.Wpf
                 }
                 else if (e.MessageType == (byte)MessageType.ClipboardSync)
                 {
-                    HandleClipboardSync(e);
+                    HandleClipboardSync(sessionId, e);
                 }
                 else if (e.MessageType == (byte)MessageType.ClipFormatList)
                 {
-                    HandleClipFormatListFromClient(e);
+                    HandleClipFormatListFromClient(sessionId, e);
                 }
                 else if (e.MessageType == (byte)MessageType.ClipFileContentsReq)
                 {
-                    HandleClipFileContentsReqFromClient(e);
+                    HandleClipFileContentsReqFromClient(sessionId, e);
                 }
                 else if (e.MessageType == (byte)MessageType.ClipFileContentsRes)
                 {
-                    HandleClipFileContentsResFromClient(e);
+                    HandleClipFileContentsResFromClient(sessionId, e);
                 }
                 else if (e.MessageType == (byte)MessageType.ImageClipboardStart
                          || e.MessageType == (byte)MessageType.ImageClipboardData
                          || e.MessageType == (byte)MessageType.ImageClipboardEnd)
                 {
-                    HandleImageClipboardFromClient(e);
+                    HandleImageClipboardFromClient(sessionId, e);
                 }
                 else if (e.MessageType == (byte)MessageType.FramebufferUpdateRequest)
                 {
@@ -1105,7 +1103,7 @@ namespace EasyRDP.Server.Wpf
                     // 心跳探测的回包路径不经过此处）直接忽略。TCP 下该消息极轻量（≤24 字节线格式）。
                     if (e.Data != null && e.Data.Length >= 8)
                     {
-                        SendMessage(e.SessionId, (byte)MessageType.Keepalive, e.Data);
+                        SendMessage(sessionId, (byte)MessageType.Keepalive, e.Data);
                     }
                 }
                 else if (e.MessageType == (byte)MessageType.DiagnosticInfoRequest)
@@ -1114,11 +1112,11 @@ namespace EasyRDP.Server.Wpf
                     // 采集一次缓存，不阻塞；失败静默（面板对应项显示未知）。
                     try
                     {
-                        SendDiagnosticInfo(e.SessionId);
+                        SendDiagnosticInfo(sessionId);
                     }
                     catch (Exception diagEx)
                     {
-                        Logger.Warn(diagEx, "SendDiagnosticInfo failed for session {0}", e.SessionId);
+                        Logger.Warn(diagEx, "SendDiagnosticInfo failed for session {0}", sessionId);
                     }
                 }
             }
@@ -1129,24 +1127,20 @@ namespace EasyRDP.Server.Wpf
         /// 创建 per-session FileClipboardConsumer，启动后台下载线程按需拉取文件内容。
         /// 下载完成后入队，由 ClipboardLoop 在 STA 线程调用 SetFiles 设置 CF_HDROP。
         /// </summary>
-        private void HandleClipFormatListFromClient(MessageReceivedEventArgs e)
+        private void HandleClipFormatListFromClient(uint sessionId, MessageReceivedEventArgs e)
         {
             try
             {
                 var msg = ClipFormatListMessage.Unpack(e.Data);
-                string sessionTag = "server_" + e.SessionId;
-                string key = e.SessionId + "_" + msg.TransferId;
+                string sessionTag = "server_" + sessionId;
+                string key = sessionId + "_" + msg.TransferId;
 
-                // 创建 Consumer：通过 transportServer 向客户端发送 ClipFileContentsReq
+                // 创建 Consumer：通过 transport 向客户端发送 ClipFileContentsReq
                 var consumer = new FileClipboardConsumer(msg.TransferId, msg.Files, sessionTag,
                     (sidArg, payload) =>
                     {
-                        // sidArg=0（Consumer 不区分 session，由本回调封装）；用 e.SessionId 发送
-                        // FragAndSend 签名：(frameId, messageType, payload, sendAction, sessionId)
-                        // 控制流 frameId=0；sessionId=e.SessionId（传给 sendAction → SendTo）
-                        // 之前误把 e.SessionId 传给 frameId、0 传给 sessionId，
-                        // 导致 SendTo(0, ...) 静默失败，FileContentsReq 永远发不到客户端
-                        SendMessage(e.SessionId, (byte)MessageType.ClipFileContentsReq, payload);
+                        // sidArg 被忽略（Consumer 不区分 session，由本回调封装）；用外层 sessionId 发送
+                        SendMessage(sessionId, (byte)MessageType.ClipFileContentsReq, payload);
                     },
                     localPaths =>
                     {
@@ -1155,7 +1149,7 @@ namespace EasyRDP.Server.Wpf
                         _serverClipConsumers.TryRemove(key, out removed);
 
                         Logger.Info("Server file clipboard download complete: session={0} transferId={1} files={2}",
-                            e.SessionId, msg.TransferId, localPaths != null ? localPaths.Length : 0);
+                            sessionId, msg.TransferId, localPaths != null ? localPaths.Length : 0);
                         if (localPaths != null && localPaths.Length > 0)
                             EnqueueServerClipboardFiles(localPaths);
                     });
@@ -1173,13 +1167,13 @@ namespace EasyRDP.Server.Wpf
                     {
                         lastMilestone = milestone;
                         Logger.Info("Server clipboard download progress: session={0} transferId={1} {2}% ({3} / {4} bytes)",
-                            e.SessionId, msg.TransferId, milestone, downloaded, total);
+                            sessionId, msg.TransferId, milestone, downloaded, total);
                     }
                 };
 
                 consumer.StartDownload();
                 Logger.Info("Server received ClipFormatList: session={0} transferId={1} fileCount={2}",
-                    e.SessionId, msg.TransferId, msg.Files.Count);
+                    sessionId, msg.TransferId, msg.Files.Count);
             }
             catch (Exception ex)
             {
@@ -1191,7 +1185,7 @@ namespace EasyRDP.Server.Wpf
         /// 处理客户端发来的 ClipFileContentsReq（延迟渲染）：客户端请求服务端的文件内容。
         /// 路由到 per-session FileClipboardProvider，由 Provider 读取文件并响应 ClipFileContentsRes。
         /// </summary>
-        private void HandleClipFileContentsReqFromClient(MessageReceivedEventArgs e)
+        private void HandleClipFileContentsReqFromClient(uint sessionId, MessageReceivedEventArgs e)
         {
             try
             {
@@ -1199,10 +1193,10 @@ namespace EasyRDP.Server.Wpf
                 FileClipboardProvider provider;
                 lock (_clipProviderLock)
                 {
-                    if (!_serverClipProviders.TryGetValue(e.SessionId, out provider))
+                    if (!_serverClipProviders.TryGetValue(sessionId, out provider))
                     {
                         Logger.Warn("ClipFileContentsReq from session {0} but no provider: transferId={1}",
-                            e.SessionId, msg.TransferId);
+                            sessionId, msg.TransferId);
                         return;
                     }
                 }
@@ -1223,12 +1217,12 @@ namespace EasyRDP.Server.Wpf
         /// 处理客户端发来的 ClipFileContentsRes（延迟渲染）：客户端返回的文件内容块。
         /// 路由到 per-session FileClipboardConsumer，由 Consumer 写入临时文件。
         /// </summary>
-        private void HandleClipFileContentsResFromClient(MessageReceivedEventArgs e)
+        private void HandleClipFileContentsResFromClient(uint sessionId, MessageReceivedEventArgs e)
         {
             try
             {
                 var msg = ClipFileContentsResMessage.Unpack(e.Data);
-                string key = e.SessionId + "_" + msg.TransferId;
+                string key = sessionId + "_" + msg.TransferId;
                 FileClipboardConsumer consumer;
                 if (_serverClipConsumers.TryGetValue(key, out consumer))
                 {
@@ -1237,7 +1231,7 @@ namespace EasyRDP.Server.Wpf
                 else
                 {
                     Logger.Warn("ClipFileContentsRes for unknown transfer: session={0} transferId={1}",
-                        e.SessionId, msg.TransferId);
+                        sessionId, msg.TransferId);
                 }
             }
             catch (Exception ex)
@@ -1263,23 +1257,23 @@ namespace EasyRDP.Server.Wpf
         /// 用 per-session 的 ImageClipboardReceiver 管理接收状态。
         /// 收到 End 时，把 CF_DIB 字节入队，由 ClipboardLoop 在 STA 线程调用 SetImageDibBytes。
         /// </summary>
-        private void HandleImageClipboardFromClient(MessageReceivedEventArgs e)
+        private void HandleImageClipboardFromClient(uint sessionId, MessageReceivedEventArgs e)
         {
             try
             {
                 if (e.MessageType == (byte)MessageType.ImageClipboardStart)
                 {
                     var msg = ImageClipboardStartMessage.Unpack(e.Data);
-                    string key = e.SessionId + "_" + msg.TransferId;
+                    string key = sessionId + "_" + msg.TransferId;
                     var receiver = new ImageClipboardReceiver(msg.TransferId, msg.TotalSize);
                     _serverImageReceivers[key] = receiver;
                     Logger.Info("Server received ImageClipboardStart: session={0} transferId={1} totalSize={2}",
-                        e.SessionId, msg.TransferId, msg.TotalSize);
+                        sessionId, msg.TransferId, msg.TotalSize);
                 }
                 else if (e.MessageType == (byte)MessageType.ImageClipboardData)
                 {
                     var msg = ImageClipboardDataMessage.Unpack(e.Data);
-                    string key = e.SessionId + "_" + msg.TransferId;
+                    string key = sessionId + "_" + msg.TransferId;
                     ImageClipboardReceiver receiver;
                     if (!_serverImageReceivers.TryGetValue(key, out receiver))
                     {
@@ -1291,7 +1285,7 @@ namespace EasyRDP.Server.Wpf
                 else if (e.MessageType == (byte)MessageType.ImageClipboardEnd)
                 {
                     var msg = ImageClipboardEndMessage.Unpack(e.Data);
-                    string key = e.SessionId + "_" + msg.TransferId;
+                    string key = sessionId + "_" + msg.TransferId;
                     ImageClipboardReceiver receiver;
                     if (!_serverImageReceivers.TryRemove(key, out receiver))
                     {
@@ -1300,7 +1294,7 @@ namespace EasyRDP.Server.Wpf
                     }
                     byte[] dibBytes = receiver.Finish();
                     Logger.Info("Server ImageClipboardEnd: session={0} transferId={1} dibSize={2}",
-                        e.SessionId, msg.TransferId, dibBytes != null ? dibBytes.Length : 0);
+                        sessionId, msg.TransferId, dibBytes != null ? dibBytes.Length : 0);
                     if (dibBytes != null && dibBytes.Length > 0)
                         EnqueueServerClipboardImage(dibBytes);
                 }
@@ -1324,7 +1318,7 @@ namespace EasyRDP.Server.Wpf
         /// <summary>
         /// 处理客户端发来的剪贴板同步消息。把文本入队，由 STA 线程设置到系统剪贴板。
         /// </summary>
-        private void HandleClipboardSync(MessageReceivedEventArgs e)
+        private void HandleClipboardSync(uint sessionId, MessageReceivedEventArgs e)
         {
             try
             {
@@ -1335,29 +1329,29 @@ namespace EasyRDP.Server.Wpf
                     if (!string.IsNullOrEmpty(text))
                     {
                         EnqueueClipboardText(text);
-                        Logger.Info("Clipboard sync from session {0}: len={1}", e.SessionId, text.Length);
+                        Logger.Info("Clipboard sync from session {0}: len={1}", sessionId, text.Length);
                     }
                 }
             }
             catch (Exception ex)
             {
-                Logger.Warn(ex, "ClipboardSync unpack failed from session {0}", e.SessionId);
+                Logger.Warn(ex, "ClipboardSync unpack failed from session {0}", sessionId);
             }
         }
 
-        private void HandleHandshake(MessageReceivedEventArgs e)
+        private void HandleHandshake(uint sessionId, MessageReceivedEventArgs e)
         {
             var req = HandshakeReq.Unpack(e.Data);
             Logger.Info("Handshake request from sessionId={0}: version={1} username={2}",
-                e.SessionId, req.Version, req.Username);
+                sessionId, req.Version, req.Username);
 
             HandshakeRes res;
             if (req.Version != Constants.ProtocolVersion)
             {
                 Logger.Warn("Version mismatch: client={0} server={1}", req.Version, Constants.ProtocolVersion);
                 res = new HandshakeRes { Result = HandshakeResult.VersionMismatch };
-                SendResponse(e.SessionId, res);
-                DisconnectSession(e.SessionId);
+                SendResponse(sessionId, res);
+                DisconnectSession(sessionId);
                 return;
             }
 
@@ -1368,8 +1362,8 @@ namespace EasyRDP.Server.Wpf
                 {
                     Logger.Warn("Server busy: activeCount={0} maxSessions={1}", _activeCount, _maxSessions);
                     res = new HandshakeRes { Result = HandshakeResult.ServerBusy };
-                    SendResponse(e.SessionId, res);
-                    DisconnectSession(e.SessionId);
+                    SendResponse(sessionId, res);
+                    DisconnectSession(sessionId);
                     return;
                 }
             }
@@ -1379,8 +1373,8 @@ namespace EasyRDP.Server.Wpf
             {
                 Logger.Warn("Auth failed for username='{0}'", req.Username);
                 res = new HandshakeRes { Result = HandshakeResult.AuthFailed };
-                SendResponse(e.SessionId, res);
-                DisconnectSession(e.SessionId);
+                SendResponse(sessionId, res);
+                DisconnectSession(sessionId);
                 return;
             }
 
@@ -1393,8 +1387,8 @@ namespace EasyRDP.Server.Wpf
                 // 无公共编码器（含服务端无编码器）直接拒绝，避免客户端拿到 Success 后黑屏。
                 Logger.Warn("No common codec: clientCaps={0} serverCaps={1}", req.Capabilities, serverCaps);
                 res = new HandshakeRes { Result = HandshakeResult.NoCommonCodec };
-                SendResponse(e.SessionId, res);
-                DisconnectSession(e.SessionId);
+                SendResponse(sessionId, res);
+                DisconnectSession(sessionId);
                 return;
             }
 
@@ -1406,7 +1400,7 @@ namespace EasyRDP.Server.Wpf
                 // 按 ServerSettings.ChangeDetectionMode 创建帧变化检测器注入会话。
                 // 切换在下次会话接入时生效，已有会话保持原检测器不变。
                 var changeDetector = ChangeDetectorFactory.Create(_changeDetectionMode);
-                Logger.Info("Session {0}: change detector created, mode={1}", e.SessionId, _changeDetectionMode);
+                Logger.Info("Session {0}: change detector created, mode={1}", sessionId, _changeDetectionMode);
                 var streamSession = new ServerStreamSession(_captureService, (sid, data) =>
                 {
                     SendRaw(sid, data);
@@ -1417,11 +1411,11 @@ namespace EasyRDP.Server.Wpf
                 streamSession.FatalError += (s, args) =>
                 {
                     string message = args != null ? args.Message : "Unknown";
-                    Logger.Error("Session {0}: stream fatal error: {1}", e.SessionId, message);
+                    Logger.Error("Session {0}: stream fatal error: {1}", sessionId, message);
                     // 线程池调度，避免与编码线程自我 Join 死锁
                     System.Threading.ThreadPool.QueueUserWorkItem(state =>
                     {
-                        try { DisconnectSession(e.SessionId); }
+                        try { DisconnectSession(sessionId); }
                         catch (Exception ex) { Logger.Warn(ex, "Fatal-error disconnect failed"); }
                     });
                 };
@@ -1430,7 +1424,7 @@ namespace EasyRDP.Server.Wpf
 
                 lock (_lock)
                 {
-                    _sessions[e.SessionId] = new SessionInfo
+                    _sessions[sessionId] = new SessionInfo
                     {
                         Stream = streamSession,
                         Input = inputSession
@@ -1443,7 +1437,7 @@ namespace EasyRDP.Server.Wpf
                 EnsureCaptureRunning();
 
                 // Start — may throw if encoder init fails
-                streamSession.Start(e.SessionId, negotiated.Value);
+                streamSession.Start(sessionId, negotiated.Value);
 
                 // Only send Success after session fully starts
                 // 注意：握手分辨率必须用编码实际分辨率（_lastW/_lastH，向上取偶后），
@@ -1457,10 +1451,10 @@ namespace EasyRDP.Server.Wpf
                     ScreenWidth = streamSession.EncodeWidth,
                     ScreenHeight = streamSession.EncodeHeight
                 };
-                SendResponse(e.SessionId, res);
+                SendResponse(sessionId, res);
                 Logger.Info("Handshake success: sessionId={0} codec={1} resolution={2}x{3}",
-                    e.SessionId, negotiated.Value, bounds.Width, bounds.Height);
-                Logger.Info("Session {0} stream started with codec {1}", e.SessionId, negotiated.Value);
+                    sessionId, negotiated.Value, bounds.Width, bounds.Height);
+                Logger.Info("Session {0} stream started with codec {1}", sessionId, negotiated.Value);
 
                 // Fire session attached event
                 var handler = SessionAttached;
@@ -1469,21 +1463,21 @@ namespace EasyRDP.Server.Wpf
                     string remote;
                     lock (_lock)
                     {
-                        if (!_remoteEndpoints.TryGetValue(e.SessionId, out remote))
+                        if (!_remoteEndpoints.TryGetValue(sessionId, out remote))
                             remote = "?";
                     }
                     string codec = negotiated.Value.ToString();
                     string resolution = bounds.Width + "x" + bounds.Height;
-                    handler(e.SessionId, remote, codec, resolution);
+                    handler(sessionId, remote, codec, resolution);
                 }
             }
             catch (Exception ex)
             {
                 // Session startup failed — send error response and clean up
-                Logger.Error(ex, "Handshake session startup failed for sessionId={0}", e.SessionId);
+                Logger.Error(ex, "Handshake session startup failed for sessionId={0}", sessionId);
                 res = new HandshakeRes { Result = HandshakeResult.InternalError };
-                SendResponse(e.SessionId, res);
-                DisconnectSession(e.SessionId);
+                SendResponse(sessionId, res);
+                DisconnectSession(sessionId);
             }
         }
 

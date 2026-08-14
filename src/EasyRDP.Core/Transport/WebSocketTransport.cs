@@ -24,6 +24,7 @@ namespace EasyRDP.Core.Transport
         private Thread _receiveThread;
         private volatile bool _running;
         private volatile bool _disconnected;
+        private int _disconnectGuard; // 0=未断开 1=已断开（Interlocked 保证 Disconnect 清理只执行一次）
         private int _started;
         private readonly object _sendLock = new object();
         // 分片消息累积缓冲（WS message 可能跨多个帧）
@@ -84,7 +85,7 @@ namespace EasyRDP.Core.Transport
 
         public void Disconnect()
         {
-            if (_disconnected)
+            if (Interlocked.Exchange(ref _disconnectGuard, 1) != 0)
                 return;
             _disconnected = true;
             _running = false;
@@ -211,7 +212,7 @@ namespace EasyRDP.Core.Transport
                 messageType, payload != null ? payload.Length : 0);
             var handler = MessageReceived;
             if (handler != null)
-                handler(this, new MessageReceivedEventArgs(0, messageType, payload));
+                handler(this, new MessageReceivedEventArgs(messageType, payload));
         }
 
         // ── 帧编解码 ──

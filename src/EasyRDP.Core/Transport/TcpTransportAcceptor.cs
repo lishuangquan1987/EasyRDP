@@ -12,7 +12,10 @@ namespace EasyRDP.Core.Transport
     {
         private static readonly Logger Logger = LogManager.GetCurrentClassLogger();
 
-        /// <summary>未完成握手的连接硬上限：防止恶意客户端只建连不发握手耗尽 FD/线程/内存。</summary>
+        /// <summary>
+        /// 存活连接数硬上限（含 pending 与已握手建立）：防止恶意客户端批量建连耗尽 FD/线程/内存。
+        /// 已握手会话数由 TransportHost 的 maxSessions 单独限制；此处是 accept 层的总连接数兜底。
+        /// </summary>
         private const int MaxPendingConnections = 16;
 
         private TcpListener _listener;
@@ -79,7 +82,8 @@ namespace EasyRDP.Core.Transport
                     TcpClient client = _listener.AcceptTcpClient();
                     client.NoDelay = true;
 
-                    // 握手前限流：pending 连接超限直接断开（TransportHost 的 maxSessions 只在握手成功后计数）
+                    // 总连接数限流：存活连接（含 pending 与已建立）超限直接断开。
+                    // TransportHost 的 maxSessions 在握手成功后另行限制活跃会话数。
                     int pendingCount;
                     lock (_lock) { pendingCount = _transports.Count; }
                     if (pendingCount >= MaxPendingConnections)
