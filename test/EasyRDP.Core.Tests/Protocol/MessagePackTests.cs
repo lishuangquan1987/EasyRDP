@@ -32,7 +32,9 @@ namespace EasyRDP.Core.Tests.Protocol
                 Result = HandshakeResult.Success,
                 Codec = CodecId.H264Software,
                 ScreenWidth = 1920,
-                ScreenHeight = 1080
+                ScreenHeight = 1080,
+                ContentWidth = 1913,
+                ContentHeight = 1160
             };
             byte[] packed = original.Pack();
             var restored = HandshakeRes.Unpack(packed);
@@ -41,10 +43,12 @@ namespace EasyRDP.Core.Tests.Protocol
             Assert.Equal(original.Codec, restored.Codec);
             Assert.Equal(original.ScreenWidth, restored.ScreenWidth);
             Assert.Equal(original.ScreenHeight, restored.ScreenHeight);
+            Assert.Equal(original.ContentWidth, restored.ContentWidth);
+            Assert.Equal(original.ContentHeight, restored.ContentHeight);
         }
 
         [Fact]
-        public void HandshakeRes_PayloadLength_ShouldBe10Bytes()
+        public void HandshakeRes_PayloadLength_ShouldBe18Bytes()
         {
             var res = new HandshakeRes
             {
@@ -53,7 +57,7 @@ namespace EasyRDP.Core.Tests.Protocol
                 ScreenHeight = 0
             };
             byte[] packed = res.Pack();
-            Assert.Equal(10, packed.Length);
+            Assert.Equal(18, packed.Length);
         }
 
         [Fact]

@@ -1440,16 +1440,18 @@ namespace EasyRDP.Server.Wpf
                 streamSession.Start(sessionId, negotiated.Value);
 
                 // Only send Success after session fully starts
-                // 注意：握手分辨率必须用编码实际分辨率（_lastW/_lastH，向上取偶后），
-                // 而非 bounds.Width/Height（原始屏幕尺寸）。
-                // 客户端用此值计算 aspect ratio 和坐标映射，必须与视频实际分辨率一致，
-                // 否则即使 1px 偏差也会导致 letterbox 计算和鼠标映射不精确。
+                // 注意：ScreenWidth/Height 必须用编码实际分辨率（EncodeWidth/_lastW，向上取偶后），
+                // 客户端用其初始化解码器与显示；ContentWidth/Height 用物理屏幕尺寸，
+                // 客户端用其建立鼠标坐标映射（与服务端 SetCursorPos 坐标空间一致，
+                // 不随 D11 编码降采样改变）。
                 res = new HandshakeRes
                 {
                     Result = HandshakeResult.Success,
                     Codec = negotiated.Value,
                     ScreenWidth = streamSession.EncodeWidth,
-                    ScreenHeight = streamSession.EncodeHeight
+                    ScreenHeight = streamSession.EncodeHeight,
+                    ContentWidth = bounds.Width,
+                    ContentHeight = bounds.Height
                 };
                 SendResponse(sessionId, res);
                 Logger.Info("Handshake success: sessionId={0} codec={1} resolution={2}x{3}",

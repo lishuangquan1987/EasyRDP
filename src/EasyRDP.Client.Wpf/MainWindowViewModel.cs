@@ -802,8 +802,13 @@ namespace EasyRDP.Client.Wpf
 
             _streamSession.RenderTarget = _renderTarget;
             _streamSession.InitPipeline(handshakeRes.Codec, handshakeRes.ScreenWidth, handshakeRes.ScreenHeight);
-            _remoteScreenWidth = handshakeRes.ScreenWidth;
-            _remoteScreenHeight = handshakeRes.ScreenHeight;
+            // 鼠标映射空间用内容分辨率（物理屏幕，与服务端 SetCursorPos 坐标空间一致），
+            // 不能用编码分辨率——D11 降档后二者不同，混用会导致鼠标落点整体缩放偏移。
+            // 旧服务端握手缺 Content* 字段（值 0）时回退到 ScreenWidth/Height。
+            _remoteScreenWidth = handshakeRes.ContentWidth > 0
+                ? handshakeRes.ContentWidth : handshakeRes.ScreenWidth;
+            _remoteScreenHeight = handshakeRes.ContentHeight > 0
+                ? handshakeRes.ContentHeight : handshakeRes.ScreenHeight;
             // 订阅远程光标更新（形状 + 位置）：WpfRenderTarget.UpdateCursor 在接收线程触发，
             // MainWindow 订阅 RemoteCursorChanged 后在 UI 线程渲染光标叠加层
             _renderTarget.CursorChanged += OnRemoteCursorChanged;
@@ -822,7 +827,8 @@ namespace EasyRDP.Client.Wpf
             RenderBitmap = _renderTarget.Bitmap;
 
             _inputSession = new ClientInputSession();
-            _inputSession.Start(_transport, handshakeRes.ScreenWidth, handshakeRes.ScreenHeight);
+            // 输入会话映射空间同样用内容分辨率（与 _remoteScreenWidth/Height 一致）
+            _inputSession.Start(_transport, _remoteScreenWidth, _remoteScreenHeight);
 
             _streamSession.Start(_transport);
             Logger.Info("Client stream session started, codec={0} resolution={1}x{2}",
