@@ -53,13 +53,18 @@ namespace EasyRDP.Server.Wpf
         private readonly bool[] _captureBufInUse = new bool[6];
         private int _lastW, _lastH;
 
-        /// <summary>编码实际宽度（向上取偶后），客户端用此值计算坐标映射。</summary>
+        /// <summary>编码实际宽度（向上取偶后），客户端用此值初始化解码器与显示。</summary>
         public int EncodeWidth { get { return _lastW; } }
-        /// <summary>编码实际高度（向上取偶后），客户端用此值计算坐标映射。</summary>
+        /// <summary>编码实际高度（向上取偶后），客户端用此值初始化解码器与显示。</summary>
         public int EncodeHeight { get { return _lastH; } }
-        // 内容坐标空间尺寸（帧尺寸，可能大于编码尺寸）
+        // 内容坐标空间尺寸 = 物理屏幕尺寸（鼠标坐标映射基准）。
+        // 与捕获/编码尺寸解耦：D11 降采样只改变捕获帧尺寸，不改变内容坐标空间。
         private int _contentW, _contentH;
-        // 编码降采样缓冲：捕获帧全分辨率存入 _captureBufs，编码前降采样到 _lastW×_lastH
+        // 内容分辨率周期重查计数器（每 600 帧重查一次物理屏幕尺寸，检测显示器分辨率切换）
+        private int _contentCheckCounter;
+        // 托管降采样兜底缓冲：捕获帧与编码尺寸不一致时
+        // （D11 档位切换过渡帧、屏幕奇数宽度偶对齐）把帧缩放到 _lastW×_lastH。
+        // 稳态下捕获帧已按档位 StretchBlt 预缩放，此路径不再参与每帧热路径。
         private byte[] _encodeBuf;
 
         // Sequence
@@ -77,8 +82,8 @@ namespace EasyRDP.Server.Wpf
         // 阈值基于弱机实测：ZRLE 静态帧 ~100ms、动态帧 300ms+；OpenH264 软编低一个量级。
         private int _downscaleStreak;
         private int _upscaleStreak;
-        private const int DownscaleStreakLimit = 20;  // 连续 20 帧编码耗时超标 → 降一档
-        private const int UpscaleStreakLimit = 30;    // 连续 30 帧编码耗时充裕 → 升一档
+        private const int DownscaleStreakLimit = 10;  // 连续 10 帧编码耗时超标 → 降一档（弱机快速降档，缩短 1~2 FPS 的持续期）
+        private const int UpscaleStreakLimit = 45;    // 连续 45 帧编码耗时充裕 → 升一档（升档保守，避免降/升档振荡）
         private const double DownscaleThresholdMs = 100.0;  // 编码耗时 > 100ms 视为超标
         private const double UpscaleThresholdMs = 60.0;     // 编码耗时 < 60ms 视为充裕
         // 码率档位（bps）：默认 15Mbps，发送瓶颈/高负载时逐级下调
@@ -237,6 +242,13 @@ namespace EasyRDP.Server.Wpf
                 var bounds = _captureService.GetPrimaryScreen();
                 _contentW = bounds.Width;
                 _contentH = bounds.Height;
+                // 初始档位启发式：单核弱机（XP 虚拟机典型：Environment.ProcessorCount=1）
+                // 且屏幕宽度 >1280 时直接从 1280 起步——否则全分辨率编码仅 1~2 FPS，
+                // 要等 30 帧滑动窗口 + 连续超时帧数达标才触发 D11 降档，开局体验极差。
+                // 多核/小屏保持全分辨率（0），由 D11 按需调整；单核误判时 D11 升档会恢复全分辨率。
+                _adaptiveMaxEncodeWidth =
+                    (Environment.ProcessorCount <= 1 && bounds.Width > 1280) ? 1280 : 0;
+                ApplyCaptureMaxWidth();
                 // 编码分辨率：主屏尺寸超出上限时等比降采样（内容坐标空间不变，仅提速）。
                 // OpenH264 I420 要求偶数宽高：向上取偶。上限由 D11 自适应维护（0=全分辨率）。
                 int encodeW = bounds.Width;
@@ -253,7 +265,7 @@ namespace EasyRDP.Server.Wpf
 
                 _encoder.Initialize(_lastW, _lastH, TargetBitrate);
 
-                // Pre-allocate capture buffers（按主屏全分辨率；降采样在编码线程完成）
+                // Pre-allocate capture buffers（按主屏全分辨率分配，降采样后帧更小也能容纳）
                 int size = bounds.Width * bounds.Height * 4;
                 for (int i = 0; i < _captureBufs.Length; i++)
                 {
@@ -313,7 +325,12 @@ namespace EasyRDP.Server.Wpf
             // 恢复捕获间隔（Start 时流控模式降为 100ms），避免影响后续 H264 会话的 60fps 需求
             var captureImpl = _captureService as CaptureService;
             if (captureImpl != null)
+            {
                 captureImpl.FrameIntervalMs = 16;
+                // 复位捕获分辨率上限，避免降档状态泄漏到后续会话
+                _adaptiveMaxEncodeWidth = 0;
+                captureImpl.SetCaptureMaxWidth(0);
+            }
 
             // 3. Clear queues + push sentinel values to unblock waiting threads.
             //    Order matters: Clear then Enqueue under same lock prevents a race
@@ -588,29 +605,15 @@ namespace EasyRDP.Server.Wpf
                 }
                 lastEncodeTimestamp = Stopwatch.GetTimestamp();
 
-                // 内容尺寸变化检测（如显示器分辨率切换）
-                bool resolutionChanged = false;
-                if (frame.Width != _contentW || frame.Height != _contentH)
-                {
-                    Logger.Info("Session {0}: content changed {1}x{2} -> {3}x{4}",
-                        _sessionId, _contentW, _contentH, frame.Width, frame.Height);
-                    _contentW = frame.Width;
-                    _contentH = frame.Height;
-                    resolutionChanged = true;
-                }
+                // 内容分辨率 = 物理屏幕尺寸（鼠标坐标空间），会话期间通常固定。
+                // 捕获帧尺寸现在可能已被 D11 降采样（StretchBlt 一步截屏+缩放），
+                // 不能再用 frame.Width/Height 判断内容变化，改为周期重查物理屏幕尺寸。
+                bool resolutionChanged = CheckContentResolutionChanged();
 
-                // 编码分辨率计算 + 编码器重建
-                // 分辨率上限由 D11 自适应维护（_adaptiveMaxEncodeWidth，0=全分辨率）
-                int newEncodeW = _contentW;
-                int newEncodeH = _contentH;
-                int maxEncodeW = _adaptiveMaxEncodeWidth;
-                if (maxEncodeW > 0 && newEncodeW > maxEncodeW)
-                {
-                    newEncodeH = Math.Max(1, (int)((long)newEncodeH * maxEncodeW / newEncodeW));
-                    newEncodeW = maxEncodeW;
-                }
-                newEncodeW = (newEncodeW + 1) & ~1;
-                newEncodeH = (newEncodeH + 1) & ~1;
+                // 编码分辨率 = 捕获帧尺寸（CaptureService 已按 D11 档位 StretchBlt 降采样，
+                // 帧尺寸即目标编码尺寸，无需再托管缩放）。向上取偶保证 I420 布局安全。
+                int newEncodeW = (frame.Width + 1) & ~1;
+                int newEncodeH = (frame.Height + 1) & ~1;
                 if (resolutionChanged)
                 {
                     // 分辨率变化后旧参考帧失效，重置检测器（下次 Detect 必然返回 ShouldEncode=true）
@@ -638,7 +641,9 @@ namespace EasyRDP.Server.Wpf
                     pixelsToEncode = frame.Pixels;
                     if (frame.Width != _lastW || frame.Height != _lastH)
                     {
-                        // 降采样到编码分辨率（内容坐标空间不变，仅降低像素量提速）
+                        // 托管降采样兜底：仅 D11 档位切换的过渡帧会走到这里
+                        // （捕获线程尚未产出目标尺寸帧，或屏幕奇数宽度偶对齐）。
+                        // 稳态下捕获帧尺寸已等于编码尺寸（StretchBlt 已降采样）。
                         DownscaleBgra(frame.Pixels, frame.Width, frame.Height,
                             _encodeBuf, _lastW, _lastH);
                         pixelsToEncode = _encodeBuf;
@@ -802,6 +807,9 @@ namespace EasyRDP.Server.Wpf
                             if (next != _adaptiveMaxEncodeWidth)
                             {
                                 _adaptiveMaxEncodeWidth = next;
+                                // 同步到捕获服务：StretchBlt 一步截屏+降采样，
+                                // 编码线程不再做昂贵的托管逐像素缩放。
+                                ApplyCaptureMaxWidth();
                                 Logger.Info("D11: encode slow ({0:F1}ms) — downscale maxEncodeWidth={1}",
                                     avgMs, next);
                             }
@@ -813,6 +821,8 @@ namespace EasyRDP.Server.Wpf
                             if (next != _adaptiveMaxEncodeWidth)
                             {
                                 _adaptiveMaxEncodeWidth = next;
+                                // 恢复全分辨率/升档时同样同步捕获尺寸。
+                                ApplyCaptureMaxWidth();
                                 Logger.Info("D11: encode fast ({0:F1}ms) — upscale maxEncodeWidth={1}",
                                     avgMs, next);
                             }
@@ -849,6 +859,10 @@ namespace EasyRDP.Server.Wpf
                     // 用编码器实际尺寸（取偶后），保证客户端解码缓冲与 SPS 一致
                     Width = result.Width,
                     Height = result.Height,
+                    // 内容坐标空间 = 物理屏幕尺寸。客户端必须用 Content* 映射鼠标坐标，
+                    // 用 Width/Height 显示 —— D11 降采样后二者不再相等。
+                    ContentWidth = _contentW,
+                    ContentHeight = _contentH,
                     IsKeyframe = result.IsKeyframe,
                     SequenceNumber = _sequenceNumber++,
                     Data = result.Data
@@ -950,6 +964,48 @@ namespace EasyRDP.Server.Wpf
         }
 
         /// <summary>
+        /// 把当前 D11 分辨率档位同步到 CaptureService。
+        /// 捕获服务用 StretchBlt 一步完成截屏+降采样，编码线程的托管缩放退化为
+        /// 过渡帧兜底（避免 1080p 弱机单核上 100~300ms/帧的逐像素缩放开销）。
+        /// </summary>
+        private void ApplyCaptureMaxWidth()
+        {
+            var captureImpl = _captureService as CaptureService;
+            if (captureImpl != null)
+                captureImpl.SetCaptureMaxWidth(_adaptiveMaxEncodeWidth);
+        }
+
+        /// <summary>
+        /// 周期重查物理屏幕尺寸，检测显示器分辨率切换（内容坐标空间变化）。
+        /// 捕获帧尺寸已不能用于此判断——它可能被 D11 降采样（StretchBlt）改变。
+        /// 每 600 帧重查一次（GetSystemMetrics 开销极小），有变化时返回 true，
+        /// 由调用方重置检测器并强制关键帧。
+        /// </summary>
+        private bool CheckContentResolutionChanged()
+        {
+            if ((++_contentCheckCounter % 600) != 0)
+                return false;
+            try
+            {
+                var bounds = _captureService.GetPrimaryScreen();
+                if (bounds.Width != _contentW || bounds.Height != _contentH)
+                {
+                    Logger.Info("Session {0}: content changed {1}x{2} -> {3}x{4}",
+                        _sessionId, _contentW, _contentH, bounds.Width, bounds.Height);
+                    _contentW = bounds.Width;
+                    _contentH = bounds.Height;
+                    return true;
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn(ex, "Session {0}: GetPrimaryScreen failed during content resolution check",
+                    _sessionId);
+            }
+            return false;
+        }
+
+        /// <summary>
         /// D11 分辨率降档：0（全分辨率）→1920→1280→960（最低档，不再下降）。
         /// </summary>
         private static int NextDownscaleStep(int current)
@@ -979,15 +1035,33 @@ namespace EasyRDP.Server.Wpf
             int dstBytes = dstW * dstH * 4;
             if (src == null || dst == null || dst.Length < dstBytes)
                 return;
+            // 预计算每列源像素范围 [sx0, sx1)：远程桌面降采样比 ≤2（1914→960），
+            // 每个目标像素最多覆盖 1~2 个源像素，预计算消除内层循环中的逐像素乘除法。
+            int[] sx0s = new int[dstW];
+            int[] sx1s = new int[dstW];
+            for (int dx = 0; dx < dstW; dx++)
+            {
+                int s0 = dx * srcW / dstW;
+                int s1 = (dx + 1) * srcW / dstW;
+                if (s1 <= s0) s1 = s0 + 1;
+                if (s1 > srcW) s1 = srcW;
+                sx0s[dx] = s0;
+                sx1s[dx] = s1;
+            }
+
             for (int dy = 0; dy < dstH; dy++)
             {
                 int sy0 = dy * srcH / dstH;
-                int sy1 = Math.Max(sy0 + 1, (dy + 1) * srcH / dstH);
+                int sy1 = (dy + 1) * srcH / dstH;
+                if (sy1 <= sy0) sy1 = sy0 + 1;
+                if (sy1 > srcH) sy1 = srcH;
+
+                int doffBase = dy * dstW * 4;
                 for (int dx = 0; dx < dstW; dx++)
                 {
-                    int sx0 = dx * srcW / dstW;
-                    int sx1 = Math.Max(sx0 + 1, (dx + 1) * srcW / dstW);
-                    int b = 0, g = 0, r = 0, a = 0;
+                    int sx0 = sx0s[dx];
+                    int sx1 = sx1s[dx];
+                    int b = 0, g = 0, r = 0;
                     int cnt = 0;
                     for (int sy = sy0; sy < sy1; sy++)
                     {
@@ -998,15 +1072,16 @@ namespace EasyRDP.Server.Wpf
                             b += src[off];
                             g += src[off + 1];
                             r += src[off + 2];
-                            a += src[off + 3];
                             cnt++;
                         }
                     }
-                    int doff = (dy * dstW + dx) * 4;
-                    dst[doff] = (byte)(b / cnt);
-                    dst[doff + 1] = (byte)(g / cnt);
-                    dst[doff + 2] = (byte)(r / cnt);
-                    dst[doff + 3] = (byte)(a / cnt);
+                    // cnt ∈ {1,2,4}（行/列各 1~2 个源像素）：用移位代替整数除法提速。
+                    int shift = cnt == 4 ? 2 : (cnt == 2 ? 1 : 0);
+                    int doff = doffBase + dx * 4;
+                    dst[doff] = (byte)(b >> shift);
+                    dst[doff + 1] = (byte)(g >> shift);
+                    dst[doff + 2] = (byte)(r >> shift);
+                    dst[doff + 3] = 255; // 屏幕内容恒不透明，alpha 直接写满
                 }
             }
         }

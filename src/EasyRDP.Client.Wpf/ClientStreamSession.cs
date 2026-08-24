@@ -28,6 +28,11 @@ namespace EasyRDP.Client.Wpf
         // 避免 CursorUpdate/Clipboard 等控制消息被解码阻塞（否则鼠标回显延迟随解码耗时增长）。
         private Thread _decodeThread;
         private long _frameCount;
+        // 内容坐标空间尺寸（物理屏幕，鼠标映射基准）。与服务端 SetCursorPos 坐标空间一致，
+        // 不随编码分辨率（D11 降采样）变化。InitPipeline 以握手分辨率初始化，
+        // 之后由每帧 ContentWidth/ContentHeight 校正（旧服务端缺字段时回退到帧尺寸）。
+        private int _contentWidth;
+        private int _contentHeight;
         // 已接收视频帧压缩数据总字节（诊断码率统计用，Interlocked 累加）
         private long _receivedBytes;
         private int _decodeFailures;
@@ -128,6 +133,9 @@ namespace EasyRDP.Client.Wpf
             _frameBuffer = new FrameBuffer();
             // 预设置帧尺寸：否则 FrameWidth=0，首帧必触发一次无谓的解码器重建
             _frameBuffer.SetSize(width, height);
+            // 内容坐标空间初始化为握手分辨率（全分辨率下与物理屏幕一致，仅偶对齐 1px 差）
+            _contentWidth = width;
+            _contentHeight = height;
             if (_renderTarget != null)
                 _renderTarget.Resize(width, height);
             _pipelineReady = true;
@@ -731,7 +739,8 @@ namespace EasyRDP.Client.Wpf
                 return;
             }
 
-            // Resolution change
+            // 编码/显示分辨率变化：重建解码器与渲染目标（D11 降采样后帧尺寸变化）。
+            // 只影响显示尺寸，不影响鼠标映射（映射用内容坐标空间）。
             if (_decoder != null && (msg.Width != FrameWidth || msg.Height != FrameHeight))
             {
                 Logger.Info("Resolution changed: {0}x{1} -> {2}x{3}",
@@ -739,11 +748,22 @@ namespace EasyRDP.Client.Wpf
                 _decoder.Reset();
                 _decoder.Initialize(msg.Width, msg.Height);
                 _renderTarget?.Resize(msg.Width, msg.Height);
-                // 通知上层同步坐标映射（输入会话与显示尺寸）
-                // 注意：此处由解码线程触发，订阅者如需更新 UI 状态必须自行调度到 UI 线程。
+            }
+
+            // 内容坐标空间变化（物理屏幕尺寸）：通知上层更新鼠标映射空间。
+            // 必须用 Content*（服务端 SetCursorPos 坐标空间），不能随编码分辨率降采样而变，
+            // 否则 D11 降档后鼠标落点整体缩放偏移。旧服务端无 Content* 字段时回退到帧尺寸。
+            int contentW = msg.ContentWidth > 0 ? msg.ContentWidth : msg.Width;
+            int contentH = msg.ContentHeight > 0 ? msg.ContentHeight : msg.Height;
+            if (contentW != _contentWidth || contentH != _contentHeight)
+            {
+                Logger.Info("Content resolution changed: {0}x{1} -> {2}x{3}",
+                    _contentWidth, _contentHeight, contentW, contentH);
+                _contentWidth = contentW;
+                _contentHeight = contentH;
                 var resHandler = ResolutionChanged;
                 if (resHandler != null)
-                    resHandler(msg.Width, msg.Height);
+                    resHandler(contentW, contentH);
             }
 
             int frameSize = msg.Width * msg.Height * 4;

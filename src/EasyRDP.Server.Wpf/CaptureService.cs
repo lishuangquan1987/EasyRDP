@@ -23,10 +23,15 @@ namespace EasyRDP.Server.Wpf
         private Thread _captureThread;
         private volatile bool _running;
         private int _frameIntervalMs = 16; // ~60fps
-        // 捕获/编码分辨率上限：0 = 不降分辨率，按屏幕原生分辨率捕获与编码
-        // （用户明确要求不降低远程画面清晰度）。>0 时用 GDI StretchBlt 一步
-        // 完成“截屏 + 降采样”（弱机可调低提速，如 1280/960）。
-        public const int CaptureMaxWidth = 0;
+        // 捕获/编码分辨率上限：0 = 不降分辨率，按屏幕原生分辨率捕获与编码。
+        // >0 时用 GDI StretchBlt 一步完成“截屏 + 降采样”，把昂贵的托管逐像素
+        // 缩放（原 DownscaleBgra，弱机单核上 1080p 实测 100~300ms/帧）卸载给
+        // 显示驱动。D11 运行时自适应在编码持续超速时把此值从 0 降到 1920/1280/960，
+        // 恢复后升回 0。由 ServerStreamSession 通过 SetCaptureMaxWidth 动态设置。
+        private volatile int _captureMaxWidth;
+        // 捕获宽度变化信号：编码线程设置后，捕获线程在下一轮迭代立即重算目标分辨率
+        // （避免等待每 600 帧一次的 bounds 周期刷新，降档延迟最多约一个截屏周期 ~16ms）。
+        private volatile bool _captureWidthDirty;
         // 生命周期锁：Start/Stop 在并发会话接入/断开下必须串行（防止检查-执行竞态产生双线程）
         private readonly object _lifecycleLock = new object();
 
@@ -38,6 +43,25 @@ namespace EasyRDP.Server.Wpf
         {
             get { return _frameIntervalMs; }
             set { _frameIntervalMs = value; }
+        }
+
+        /// <summary>Gets the current capture/encode max width (0 = full native resolution).</summary>
+        public int CaptureMaxWidth
+        {
+            get { return _captureMaxWidth; }
+        }
+
+        /// <summary>
+        /// 动态设置捕获分辨率上限（D11 自适应调用）。0 = 全分辨率；
+        /// >0 = 用 StretchBlt 直接按该宽度等比降采样捕获，编码线程不再做托管缩放。
+        /// 线程安全：编码线程调用，捕获线程下一轮迭代读取。
+        /// </summary>
+        public void SetCaptureMaxWidth(int width)
+        {
+            if (_captureMaxWidth == width) return;
+            _captureMaxWidth = width;
+            _captureWidthDirty = true;
+            Logger.Info("CaptureService: capture max width set to {0} (0=full resolution)", width);
         }
 
         public event Action<ScreenFrame> FrameCaptured;
@@ -181,6 +205,14 @@ namespace EasyRDP.Server.Wpf
             {
                 try
                 {
+                    // D11 降/升档时立即重算目标分辨率（不等 600 帧周期刷新），
+                    // 使 StretchBlt 降采样尽快生效，避免编码线程继续做托管缩放。
+                    if (_captureWidthDirty)
+                    {
+                        _captureWidthDirty = false;
+                        refreshCaptureBounds();
+                        boundsRefreshCounter = 0;
+                    }
                     if (++boundsRefreshCounter >= 600)
                     {
                         boundsRefreshCounter = 0;

@@ -140,6 +140,8 @@ namespace EasyRDP.Core.Tests.Protocol
                 Height = 1080,
                 IsKeyframe = true,
                 SequenceNumber = 1234567890L,
+                ContentWidth = 1913,
+                ContentHeight = 1160,
                 Data = new byte[] { 0x00, 0x00, 0x00, 0x01, 0x65 }
             };
             byte[] packed = original.Pack();
@@ -149,6 +151,8 @@ namespace EasyRDP.Core.Tests.Protocol
             Assert.Equal(original.Height, restored.Height);
             Assert.Equal(original.IsKeyframe, restored.IsKeyframe);
             Assert.Equal(original.SequenceNumber, restored.SequenceNumber);
+            Assert.Equal(original.ContentWidth, restored.ContentWidth);
+            Assert.Equal(original.ContentHeight, restored.ContentHeight);
             Assert.Equal(original.Data, restored.Data);
         }
     }

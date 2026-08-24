@@ -1519,22 +1519,20 @@ namespace EasyRDP.Client.Wpf
         }
 
         /// <summary>
-        /// 视频编码尺寸变化回调（解码线程触发）。
-        /// 更新坐标映射空间为实际视频帧尺寸 —— WPF Image 用 Stretch=Uniform 按视频
-        /// 实际尺寸计算显示区域（letterbox 黑边），MapCoordinates 必须用同一尺寸
-        /// 计算 aspect ratio，否则黑边偏移导致鼠标坐标失准。
-        /// 当前 CaptureMaxWidth=0（不降采样），视频帧尺寸 = 屏幕物理尺寸（取偶后），
-        /// 取偶差异 1px 对 SetCursorPos 的影响可忽略。
+        /// 内容坐标空间变化回调（解码线程触发）——即服务端物理屏幕尺寸。
+        /// 只更新鼠标映射空间。视频显示尺寸（可能被 D11 降采样）由 ClientStreamSession
+        /// 直接调整渲染目标，不经过此回调，避免降档后鼠标落点整体缩放偏移。
+        /// MapCoordinates 用内容分辨率计算 aspect ratio 与坐标缩放，
+        /// 与服务端 SetCursorPos 的物理像素坐标空间严格一致。
         /// </summary>
         private void OnRemoteResolutionChanged(int width, int height)
         {
             if (width <= 0 || height <= 0) return;
             if (width == _remoteScreenWidth && height == _remoteScreenHeight) return;
-            Logger.Info("Video encode resolution changed: {0}x{1} (mapping space updated from {2}x{3})",
+            Logger.Info("Content resolution changed: {0}x{1} (mouse mapping space updated from {2}x{3})",
                 width, height, _remoteScreenWidth, _remoteScreenHeight);
             _remoteScreenWidth = width;
             _remoteScreenHeight = height;
-            FrameSize = string.Format("{0}x{1}", width, height);
             _inputSession?.OnResolutionChanged(width, height);
         }
 

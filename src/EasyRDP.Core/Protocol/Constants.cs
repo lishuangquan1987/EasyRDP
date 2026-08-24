@@ -4,7 +4,12 @@ namespace EasyRDP.Core.Protocol
     public static class Constants
     {
         /// <summary>Protocol version identifier used during handshake.</summary>
-        public const byte ProtocolVersion = 0x03;
+        /// <remarks>
+        /// v3 → v4：VideoFrameMessage 头新增 ContentWidth/ContentHeight 字段
+        /// （内容坐标空间与编码分辨率分离，修复 D11 降采样后鼠标偏移）。
+        /// 新旧版本不兼容（帧头布局不同），握手版本检查会明确拒绝混用。
+        /// </remarks>
+        public const byte ProtocolVersion = 0x04;
         /// <summary>Frame magic byte used for message framing.</summary>
         public const byte FrameMagic = 0xE5;
         /// <summary>Maximum allowed frame size (50 MB).</summary>
