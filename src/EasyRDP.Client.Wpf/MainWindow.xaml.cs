@@ -426,7 +426,12 @@ public partial class MainWindow : Window
 
     /// <summary>
     /// 把光标掩码（AND 1bpp + XOR BGRA32）合成为 BGRA32 像素。
-    /// AND=1 → 透明覆盖；AND=0 → 直接使用 XOR 像素（alpha 即透明度）。
+    /// AND=1 → 透明；AND=0 → 使用 XOR 像素。
+    /// alpha 兜底规则：XOR alpha 全 0 时（经典 DDB 光标无 alpha 通道，
+    /// 虚拟机显示驱动 GetDIBits 回读为 0），AND=0 的像素一律不透明（255）；
+    /// 否则直接使用 XOR alpha（现代 alpha 光标/服务端 DrawIconEx 合成结果）。
+    /// 服务端自 2026-08-25 起用 DrawIconEx 渲染光标（正确 alpha + 按 alpha==0
+    /// 推导 AND 掩码），此兜底仅对旧服务端数据生效，防止透明背景被涂黑。
     /// </summary>
     private static byte[] ComposeCursorBgra(CursorInfo cursor)
     {
@@ -440,8 +445,21 @@ public partial class MainWindow : Window
         int expected = andStride * h + xorStride * h;
         if (src.Length < expected) return null;
 
-        byte[] dst = new byte[w * h * 4];
         int xorBase = andStride * h;
+
+        // XOR alpha 统计：全 0 = 经典 DDB 光标（alpha 通道无信息）
+        int alphaNonZero = 0;
+        int alphaMax = 0;
+        for (int i = 0; i < h * xorStride; i += 4)
+        {
+            byte a = src[xorBase + i + 3];
+            if (a != 0) alphaNonZero++;
+            if (a == 255) alphaMax++;
+        }
+        bool alphaAllZero = alphaNonZero == 0;
+
+        byte[] dst = new byte[w * h * 4];
+        int andSetCount = 0;
         for (int row = 0; row < h; row++)
         {
             for (int col = 0; col < w; col++)
@@ -449,6 +467,7 @@ public partial class MainWindow : Window
                 int andByteIdx = row * andStride + (col >> 3);
                 int andBit = 7 - (col & 7);
                 bool andSet = ((src[andByteIdx] >> andBit) & 1) != 0;
+                if (andSet) andSetCount++;
 
                 int si = xorBase + row * xorStride + col * 4;
                 byte b = src[si];
@@ -459,10 +478,11 @@ public partial class MainWindow : Window
                 {
                     b = g = r = a = 0; // 挖空区域全透明
                 }
-                // AND=0 时直接使用 XOR 像素的 BGRA/alpha：
-                // 单色光标已由 EasyDesk 捕获端转换为真实 alpha（透明=0，黑白=255），
-                // 彩色光标 alpha 即透明度。旧规则把 alpha=0 强制为不透明黑，
-                // 会把现代 alpha 光标的透明区域涂黑，或掩盖空形状数据。
+                else if (alphaAllZero)
+                {
+                    // 经典光标 alpha 通道无信息：AND=0 的像素一律不透明
+                    a = 255;
+                }
 
                 int di = (row * w + col) * 4;
                 dst[di] = b;
@@ -471,7 +491,47 @@ public partial class MainWindow : Window
                 dst[di + 3] = a;
             }
         }
+
+        // 一次性诊断（每进程首个形状）：输出 AND/alpha 统计 + 合成结果 ASCII 图，
+        // 用于定位"光标矩形黑框/光标不可见"类问题（判定黑框是否来自光标位图本身）
+        if (!_cursorDiagLogged)
+        {
+            _cursorDiagLogged = true;
+            LogCursorDiagnostics(w, h, andSetCount, alphaNonZero, alphaMax, dst);
+        }
         return dst;
+    }
+
+    /// <summary>光标合成结果是否已输出过一次性诊断（每进程一次）。</summary>
+    private static bool _cursorDiagLogged;
+
+    /// <summary>输出首个光标形状的合成诊断：AND/alpha 统计 + ASCII 图（#=不透明 .=透明）。</summary>
+    private static void LogCursorDiagnostics(int w, int h, int andSetCount,
+        int alphaNonZero, int alphaMax, byte[] composed)
+    {
+        try
+        {
+            var sb = new System.Text.StringBuilder(256 + h * (w + 2));
+            sb.Append("Cursor composition diag: size=").Append(w).Append('x').Append(h)
+              .Append(" andSet=").Append(andSetCount)
+              .Append(" alphaNonZero=").Append(alphaNonZero)
+              .Append(" alphaMax=").Append(alphaMax)
+              .Append(" map(#=opaque .=transparent):");
+            for (int row = 0; row < h; row++)
+            {
+                sb.Append('|');
+                for (int col = 0; col < w; col++)
+                {
+                    byte a = composed[(row * w + col) * 4 + 3];
+                    sb.Append(a != 0 ? '#' : '.');
+                }
+            }
+            Logger.Info(sb.ToString());
+        }
+        catch
+        {
+            // 诊断失败不影响光标渲染
+        }
     }
 
     /// <summary>判断合成后的 BGRA 位图是否含有非透明像素（用于空形状兜底）。</summary>

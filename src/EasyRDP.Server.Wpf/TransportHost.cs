@@ -249,6 +249,8 @@ namespace EasyRDP.Server.Wpf
         }
 
         private bool _captureStartFailureLogged;
+        // InputEvent 分发日志降频计数（~120Hz 鼠标流每 20 条记录一次，弱机单核避免日志刷盘拖慢链路）
+        private int _inputDispatchLogCounter;
 
         /// <summary>启动失败只记一次日志，避免无 GPU 等降级环境下每次接入都刷警告。</summary>
         private void LogCaptureStartFailure(string message, Exception ex)
@@ -1055,8 +1057,12 @@ namespace EasyRDP.Server.Wpf
                         // 诊断：记录 InputEvent 的 InputEventType（payload 第 1 字节），
                         // 与客户端 SendInput 日志对照可定位消息丢失环节。
                         // MouseDown=4 MouseUp=5 KeyDown=1 KeyUp=2 MouseMove=3 MouseWheel=6
-                        Logger.Debug("InputEvent dispatch: sessionId={0} inputType={1} keyCode={2}",
-                            sessionId, inputMsg.Type, inputMsg.KeyCode);
+                        // 降频：鼠标移动 ~120Hz，逐条 DEBUG 落盘在弱机单核上拖慢链路，每 20 条记录一次。
+                        if (Interlocked.Increment(ref _inputDispatchLogCounter) % 20 == 0)
+                        {
+                            Logger.Debug("InputEvent dispatch: sessionId={0} inputType={1} keyCode={2}",
+                                sessionId, inputMsg.Type, inputMsg.KeyCode);
+                        }
                         info.Input.HandleInput(inputMsg);
                         // 阶段二：鼠标按下/抬起时通知流会话（ZRLE CopyRect 触发条件），
                         // 仅在 ZRLE 模式下编码器会响应此状态，H264 路径无副作用。

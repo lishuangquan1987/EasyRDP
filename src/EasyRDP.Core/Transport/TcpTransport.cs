@@ -22,6 +22,10 @@ namespace EasyRDP.Core.Transport
         private int _disconnectGuard; // 0=未断开 1=已断开（Interlocked 保证 Disconnect 清理只执行一次，避免 Disconnected 重复触发）
         private int _started; // 0=未启动 1=已启动（Interlocked 防重复 Start）
         private readonly object _sendLock = new object();
+        // InputEvent 收发日志降频计数：鼠标移动 ~120Hz，逐条 DEBUG 落盘在弱机单核上
+        // 拖慢链路（文件 IO + 字符串格式化），每 20 条记录一次即可定位丢包问题。
+        private int _inputSendLogCounter;
+        private int _inputRecvLogCounter;
 
         public event EventHandler<MessageReceivedEventArgs> MessageReceived;
         public event EventHandler Disconnected;
@@ -71,9 +75,15 @@ namespace EasyRDP.Core.Transport
                 {
                     NetworkStream stream = _client.GetStream();
                     stream.Write(message, 0, message.Length);
-                    // 调试日志：记录发送的完整消息（type + 总长度），供排障追踪
-                    Logger.Debug("TcpTransport.Send: type=0x{0:X2} bytes={1}",
-                        message.Length > 1 ? message[1] : 0, message.Length);
+                    // 调试日志：记录发送的完整消息（type + 总长度），供排障追踪。
+                    // InputEvent（~120Hz 鼠标流）降频为每 20 条记录一次。
+                    bool isInputEvent = message.Length > 1
+                        && message[1] == (byte)MessageType.InputEvent;
+                    if (!isInputEvent || Interlocked.Increment(ref _inputSendLogCounter) % 20 == 0)
+                    {
+                        Logger.Debug("TcpTransport.Send: type=0x{0:X2} bytes={1}",
+                            message.Length > 1 ? message[1] : 0, message.Length);
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -132,8 +142,13 @@ namespace EasyRDP.Core.Transport
                         Logger.Warn("ReceiveLoop: invalid message dropped ({0} bytes)", wire.Length);
                         return;
                     }
-                    Logger.Debug("TcpTransport.Receive: type=0x{0:X2} payloadLen={1}",
-                        messageType, payload != null ? payload.Length : 0);
+                    // InputEvent（~120Hz 鼠标流）降频为每 20 条记录一次
+                    bool isInputEvent = messageType == (byte)MessageType.InputEvent;
+                    if (!isInputEvent || Interlocked.Increment(ref _inputRecvLogCounter) % 20 == 0)
+                    {
+                        Logger.Debug("TcpTransport.Receive: type=0x{0:X2} payloadLen={1}",
+                            messageType, payload != null ? payload.Length : 0);
+                    }
                     var handler = MessageReceived;
                     if (handler != null)
                         handler(this, new MessageReceivedEventArgs(messageType, payload));
