@@ -75,8 +75,8 @@ namespace EasyRDP.Server.Wpf
         private long _encodeSum;
         private const int AdaptiveWindow = 30;
         // 编码分辨率上限：0 = 不降分辨率（全分辨率）。>0 时编码线程按该宽度等比降采样。
-        // D11 运行时自适应调整：编码耗时持续超标降档（1920→1280→960），恢复后升档回全分辨率。
-        // 最低档 960×540（弱机 640×360 完全不可读，禁止自动降到该档以下）。
+        // D11 运行时自适应调整：编码耗时持续超标降档（1920→1280），恢复后升档回全分辨率。
+        // 最低档 1280（清晰度优先：再低文字无法辨认，负载过高时由帧率自适应承担降速）。
         private volatile int _adaptiveMaxEncodeWidth;
         // 分辨率档位自适应计数：降档/升档都需要连续多帧达到阈值才动作，避免抖动。
         // 阈值基于弱机实测：ZRLE 静态帧 ~100ms、动态帧 300ms+；OpenH264 软编低一个量级。
@@ -801,8 +801,8 @@ namespace EasyRDP.Server.Wpf
                             _downscaleStreak = 0;
                             int next = NextDownscaleStep(_adaptiveMaxEncodeWidth);
                             // 档位不低于实际内容宽度时（如 1600 宽屏首档 1920 不生效），
-                            // 循环跳档直到低于内容宽或到最低档 960（序列单调递减，无死循环）。
-                            while (next >= _contentW && next > 960)
+                            // 循环跳档直到低于内容宽或到最低档 1280（清晰度底线）。
+                            while (next >= _contentW && next > 1280)
                                 next = NextDownscaleStep(next);
                             if (next != _adaptiveMaxEncodeWidth)
                             {
@@ -1006,21 +1006,21 @@ namespace EasyRDP.Server.Wpf
         }
 
         /// <summary>
-        /// D11 分辨率降档：0（全分辨率）→1920→1280→960（最低档，不再下降）。
+        /// D11 分辨率降档：0（全分辨率）→1920→1280（最低档，不再下降）。
+        /// 清晰度优先：1280×776 是远程桌面文字可读性的底线，
+        /// 低于此档（960）文字与图标已无法辨认；负载过高时宁可降帧率不再降分辨率。
         /// </summary>
         private static int NextDownscaleStep(int current)
         {
             if (current == 0) return 1920;
-            if (current > 1280) return 1280;
-            return 960;
+            return 1280;
         }
 
         /// <summary>
-        /// D11 分辨率升档：960→1280→1920→0（恢复全分辨率）。
+        /// D11 分辨率升档：1280→1920→0（恢复全分辨率）。
         /// </summary>
         private static int NextUpscaleStep(int current)
         {
-            if (current < 1280) return 1280;
             if (current < 1920) return 1920;
             return 0;
         }
@@ -1035,7 +1035,7 @@ namespace EasyRDP.Server.Wpf
             int dstBytes = dstW * dstH * 4;
             if (src == null || dst == null || dst.Length < dstBytes)
                 return;
-            // 预计算每列源像素范围 [sx0, sx1)：远程桌面降采样比 ≤2（1914→960），
+            // 预计算每列源像素范围 [sx0, sx1)：远程桌面降采样比 ≤2（1914→1280），
             // 每个目标像素最多覆盖 1~2 个源像素，预计算消除内层循环中的逐像素乘除法。
             int[] sx0s = new int[dstW];
             int[] sx1s = new int[dstW];

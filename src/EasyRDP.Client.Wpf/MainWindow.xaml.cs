@@ -40,6 +40,10 @@ public partial class MainWindow : Window
     private bool _remoteCursorVisible;
     private int _cursorHotX;
     private int _cursorHotY;
+    // 光标叠加层当前缩放（缓存，避免每次鼠标移动都重设 Width/Height 触发重绘闪烁）
+    private double _cursorScaleX;
+    private double _cursorScaleY;
+    private bool _cursorScaleSet;
     // 点击位置标记（诊断）及其隐藏定时器
     private DispatcherTimer _clickMarkerTimer;
     // 剪贴板监听窗口句柄（OnSourceInitialized 注册，OnClosing 注销）
@@ -267,6 +271,11 @@ public partial class MainWindow : Window
                 return;
             }
 
+            // 无论远程光标是否可显示，先记录服务端回显坐标：
+            // 点击诊断（lastEcho）与"本地鼠标未移动"时的兜底定位都依赖此值。
+            // 旧实现把赋值放在回退分支之后，远程光标不可用时 lastEcho 恒为 (0,0)。
+            _lastRemoteCursorX = cursor.X;
+            _lastRemoteCursorY = cursor.Y;
             _remoteCursorVisible = cursor.Visible;
             _cursorHotX = cursor.HotX;
             _cursorHotY = cursor.HotY;
@@ -279,12 +288,15 @@ public partial class MainWindow : Window
                 // 避免光标在编辑等场景下凭空消失；仅记录诊断日志。
                 if (bgra != null && HasOpaquePixels(bgra))
                 {
-                    if (_cursorBitmap == null
+                    bool sizeChanged = _cursorBitmap == null
                         || _cursorBitmap.PixelWidth != cursor.Width
-                        || _cursorBitmap.PixelHeight != cursor.Height)
+                        || _cursorBitmap.PixelHeight != cursor.Height;
+                    if (sizeChanged)
                     {
                         _cursorBitmap = new WriteableBitmap(
                             cursor.Width, cursor.Height, 96, 96, PixelFormats.Bgra32, null);
+                        // 新位图尺寸可能不同：重置缩放缓存，强制重算叠加层尺寸
+                        _cursorScaleSet = false;
                     }
                     _cursorBitmap.WritePixels(
                         new Int32Rect(0, 0, cursor.Width, cursor.Height),
@@ -298,25 +310,20 @@ public partial class MainWindow : Window
                 }
             }
 
-            if (!_remoteCursorVisible)
+            if (!_remoteCursorVisible || _cursorBitmap == null)
             {
-                HideRemoteCursor();
-                return;
-            }
-            // 无可见的远程光标位图时回退到本地光标，避免"鼠标看不见"：
-            // 服务端光标被应用隐藏/捕获失败时会发送空形状（Width=0）且恒为 Visible=true，
-            // 此时远程叠加层无可渲染内容，隐藏本地光标会导致用户完全看不到鼠标。
-            if (_cursorBitmap == null)
-            {
+                // 远程光标不可用 → 回退本地光标。
+                // 只做状态切换，不在每次更新时反复设置 Cursor 属性：
+                // 每帧设置 Cursor 会触发系统光标重新求值，表现为本地鼠标闪烁。
                 HideRemoteCursor();
                 return;
             }
 
-            _lastRemoteCursorX = cursor.X;
-            _lastRemoteCursorY = cursor.Y;
-            RemoteCursorImage.Visibility = Visibility.Visible;
-            // 隐藏本地箭头光标，只显示远程光标形状
-            RenderImage.Cursor = Cursors.None;
+            // 显示远程光标叠加层：仅状态切换时设置（避免高频设置造成光标闪烁）
+            if (RemoteCursorImage.Visibility != Visibility.Visible)
+                RemoteCursorImage.Visibility = Visibility.Visible;
+            if (RenderImage.Cursor != Cursors.None)
+                RenderImage.Cursor = Cursors.None;
             // 位置策略（关键，曾导致"非全屏水平偏移 150~200px"视觉错位）：
             // - _hasLocalCursorPos=true（用户移动过鼠标）：锚定本地鼠标位置（零延迟）
             //   不重新调用 PositionRemoteCursorAtLocal —— 旧代码在每次回显到达时
@@ -392,9 +399,20 @@ public partial class MainWindow : Window
     /// 按视频缩放比例调整光标叠加层尺寸：光标形状与画面内容等比例缩放，
     /// 避免客户端窗口与远程分辨率不一致时光标形状偏大/偏小造成错位感。
     /// </summary>
+    /// <remarks>
+    /// 仅在缩放比例变化时更新尺寸：鼠标移动 ~100Hz，每帧设置 Width/Height/Stretch
+    /// 会持续触发叠加层的布局重算与重绘，是叠加层闪烁/抖动的一个来源。
+    /// </remarks>
     private void ResizeRemoteCursor(double scaleX, double scaleY)
     {
         if (_cursorBitmap == null) return;
+        if (_cursorScaleSet
+            && Math.Abs(_cursorScaleX - scaleX) < 0.0001
+            && Math.Abs(_cursorScaleY - scaleY) < 0.0001)
+            return;
+        _cursorScaleX = scaleX;
+        _cursorScaleY = scaleY;
+        _cursorScaleSet = true;
         RemoteCursorImage.Width = _cursorBitmap.PixelWidth * scaleX;
         RemoteCursorImage.Height = _cursorBitmap.PixelHeight * scaleY;
         RemoteCursorImage.Stretch = Stretch.Fill;
@@ -416,12 +434,14 @@ public partial class MainWindow : Window
         return new Rect((iw - w) / 2, (ih - h) / 2, w, h);
     }
 
-    /// <summary>隐藏远程光标叠加层并恢复本地系统光标。</summary>
+    /// <summary>隐藏远程光标叠加层并恢复本地系统光标（仅状态切换，避免高频设置 Cursor 导致闪烁）。</summary>
     private void HideRemoteCursor()
     {
         _remoteCursorVisible = false;
-        RemoteCursorImage.Visibility = Visibility.Collapsed;
-        RenderImage.Cursor = null;
+        if (RemoteCursorImage.Visibility != Visibility.Collapsed)
+            RemoteCursorImage.Visibility = Visibility.Collapsed;
+        if (RenderImage.Cursor != null)
+            RenderImage.Cursor = null;
     }
 
     /// <summary>

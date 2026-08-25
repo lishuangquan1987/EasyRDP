@@ -26,7 +26,8 @@ namespace EasyRDP.Server.Wpf
         // 捕获/编码分辨率上限：0 = 不降分辨率，按屏幕原生分辨率捕获与编码。
         // >0 时用 GDI StretchBlt 一步完成“截屏 + 降采样”，把昂贵的托管逐像素
         // 缩放（原 DownscaleBgra，弱机单核上 1080p 实测 100~300ms/帧）卸载给
-        // 显示驱动。D11 运行时自适应在编码持续超速时把此值从 0 降到 1920/1280/960，
+        // 显示驱动。D11 运行时自适应在编码持续超速时把此值从 0 降到 1920/1280
+        // （1280 为清晰度底线，不再降 960），
         // 恢复后升回 0。由 ServerStreamSession 通过 SetCaptureMaxWidth 动态设置。
         private volatile int _captureMaxWidth;
         // 捕获宽度变化信号：编码线程设置后，捕获线程在下一轮迭代立即重算目标分辨率
