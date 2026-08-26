@@ -25,6 +25,31 @@ namespace EasyRDP.Server.Wpf
         private readonly ICursorTracker _cursorTracker;
         private readonly object _lock = new object();
 
+        /// <summary>
+        /// 抽样统计 BGRA 像素中"非黑"像素数（B/G/R 任一非零即非黑）。
+        /// 抽样步长 8 像素 × 8 行，覆盖全帧（避免只数到边缘留黑区误判）。
+        /// 用于对照客户端解码还原比例，定位 ZRLE 黑屏上游/下游。
+        /// </summary>
+        private static long CountNonBlackPixels(byte[] bgra, int width, int height)
+        {
+            if (bgra == null || width <= 0 || height <= 0)
+                return 0;
+            long count = 0;
+            int stride = width * 4;
+            int step = 8;
+            for (int y = 0; y < height; y += step)
+            {
+                int rowBase = y * stride;
+                for (int x = 0; x < width; x += step)
+                {
+                    int o = rowBase + x * 4;
+                    if (bgra[o] != 0 || bgra[o + 1] != 0 || bgra[o + 2] != 0)
+                        count++;
+                }
+            }
+            return count;
+        }
+
         private uint _sessionId;
         private CodecId _codec;
         private IVideoEncoder _encoder;
@@ -857,6 +882,24 @@ namespace EasyRDP.Server.Wpf
 
                 _consecutiveEncodeFailures = 0;
                 Interlocked.Increment(ref _framesEncoded);
+
+                // 像素完整性诊断：编码输入 BGRA 帧是否完整（黑屏排查用，对照客户端还原比例）。
+                // 仅首帧 + 每 100 帧统计，抽样扫描（每 8 像素 × 每 8 行），开销可忽略。
+                if (_framesEncoded == 1 || _framesEncoded % 100 == 0)
+                {
+                    try
+                    {
+                        long nonBlack = CountNonBlackPixels(pixelsToEncode, frame.Width, frame.Height);
+                        Logger.Info("Session {0}: Encode input pixel check frameCount={1} seq={2} res={3}x{4} nonBlackRatio={5:P1}",
+                            _sessionId, _framesEncoded, _sequenceNumber, frame.Width, frame.Height,
+                            (double)nonBlack / Math.Max(1, ((long)frame.Width * frame.Height) / 64));
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Warn(ex, "Session {0}: Encode input pixel check threw", _sessionId);
+                    }
+                }
+
                 if (_framesEncoded == 1)
                     Logger.Info("Session {0}: FIRST frame encoded ok, seq={1} size={2} keyframe={3} encodeMs={4:F1}",
                         _sessionId, _sequenceNumber, result.Data.Length, result.IsKeyframe, encodeMs);

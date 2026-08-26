@@ -840,6 +840,43 @@ namespace EasyRDP.Client.Wpf
                     dirtyRects != null ? dirtyRects.Length : -1);
             else if (_frameCount % 100 == 0)
                 Logger.Debug("Frames decoded: {0}, last seq={1} dataLen={2}", _frameCount, msg.SequenceNumber, msg.Data.Length);
+
+            // 像素完整性诊断：ZRLE 解码还原是否完整无偏差（黑屏排查）。
+            // 只统计前 3 帧 + 每 100 帧，抽样扫描（每 8 像素 × 每 8 行），
+            // 单帧 <0.5ms 开销，不影响 FPS。
+            if (_frameCount <= 3 || _frameCount % 100 == 0)
+            {
+                long nonBlack = CountNonBlackPixels(writeSlot, msg.Width, msg.Height);
+                Logger.Info("Decode pixel check: frameCount={0} seq={1} codec={2} nonBlackRatio={3:P1} (sample={4}/{5})",
+                    _frameCount, msg.SequenceNumber, Codec,
+                    (double)nonBlack / Math.Max(1, ((long)msg.Width * msg.Height) / 64),
+                    nonBlack, ((long)msg.Width * msg.Height) / 64);
+            }
+        }
+
+        /// <summary>
+        /// 抽样统计 BGRA 像素中"非黑"像素数量（B/G/R 任一非零即非黑）。
+        /// 抽样步长 8 像素 × 8 行，覆盖全帧分布（避免只数到边缘留黑区导致的误判）。
+        /// 用于诊断 ZRLE 解码还原是否完整：若首帧非黑比例 <5%，说明还原产物基本全黑。
+        /// </summary>
+        private static long CountNonBlackPixels(byte[] bgra, int width, int height)
+        {
+            if (bgra == null || width <= 0 || height <= 0)
+                return 0;
+            long count = 0;
+            int stride = width * 4;
+            int step = 8;
+            for (int y = 0; y < height; y += step)
+            {
+                int rowBase = y * stride;
+                for (int x = 0; x < width; x += step)
+                {
+                    int o = rowBase + x * 4;
+                    if (bgra[o] != 0 || bgra[o + 1] != 0 || bgra[o + 2] != 0)
+                        count++;
+                }
+            }
+            return count;
         }
 
         /// <summary>触发一次 FatalError（不可恢复故障，UI 层据此提示并断开）。</summary>
