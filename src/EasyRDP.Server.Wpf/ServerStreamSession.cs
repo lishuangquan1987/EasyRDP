@@ -141,6 +141,11 @@ namespace EasyRDP.Server.Wpf
         private volatile bool _flowControlEnabled;
         /// <summary>OnFramebufferUpdateRequest 诊断日志计数器（每 100 次请求打印一次）。</summary>
         private int _frameReqDiagCounter;
+        // 解码脱同步恢复：客户端请求关键帧（H264 丢参考帧后请求 IDR 快速恢复）。
+        // 置位后 EncodeLoop 忽略"内容无变化跳过"，并强制下一帧为 IDR。
+        // 客户端解码失败（dsRefLost/dsNoParamSets）后 P 帧持续失败，只能等周期性 IDR
+        // （低帧率下 10~15s）；收到本请求后立即给出一帧 IDR，1~2 帧内恢复画面。
+        private volatile bool _keyframeRequested;
 
         // Threads
         private Thread _encodeThread;
@@ -206,9 +211,10 @@ namespace EasyRDP.Server.Wpf
             Logger.Info("ServerStreamSession {0} starting with codec {1}", sessionId, codec);
             // 版本诊断标识：部署后日志可见，用于确认运行的二进制包含 EncodeLoop 流控修复。
             // 若日志无此行或 flowControlFix != v3-2026-08-09，说明部署的是旧构建。
-            Logger.Info("=== EasyRDP Server build: {0} flowControlFix={1} ===",
+            Logger.Info("=== EasyRDP Server build: {0} flowControlFix={1} keyframeFix={2} ===",
                 EasyRDP.Core.Diagnostics.BuildInfo.Describe(),
-                EasyRDP.Core.Diagnostics.BuildInfo.FlowControlFixVersion);
+                EasyRDP.Core.Diagnostics.BuildInfo.FlowControlFixVersion,
+                EasyRDP.Core.Diagnostics.BuildInfo.KeyframeRequestFixVersion);
 
             // Create encoder — H264 是唯一支持的编码方式，不再回退到原始像素
             _encoder = EncoderFactory.Create(codec);
@@ -667,7 +673,7 @@ namespace EasyRDP.Server.Wpf
                     // 全帧比较（FullFrameMemcmp 模式恒为 0/1）。
                     if (!isZrle && changeResult.TotalBlockCount > 0)
                         _contentChangeRatio = (float)changeResult.ChangedBlockCount / changeResult.TotalBlockCount;
-                    if (!changeResult.ShouldEncode && _framesSkipped < KeepaliveFrameInterval)
+                    if (!changeResult.ShouldEncode && _framesSkipped < KeepaliveFrameInterval && !_keyframeRequested)
                     {
                         // 内容无变化且未达到保活阈值：跳过编码节省 H.264 150-250ms
                         _framesSkipped++;
@@ -692,7 +698,9 @@ namespace EasyRDP.Server.Wpf
                     bool forceKey = resolutionChanged
                         || encodeSizeChanged
                         || _framesSkipped >= 60
-                        || (_sequenceNumber % KeyframeInterval == 0);
+                        || (_sequenceNumber % KeyframeInterval == 0)
+                        // 客户端请求的 IDR（解码脱同步恢复）：即使内容无变化也强制关键帧
+                        || _keyframeRequested;
 
                     Logger.Debug("Session {0}: calling Encode seq={1} forceKey={2} res={3}x{4} bgraLen={5}",
                         _sessionId, _sequenceNumber, forceKey, frame.Width, frame.Height, frame.Pixels.Length);
@@ -737,6 +745,9 @@ namespace EasyRDP.Server.Wpf
                     _changeDetector.Commit();
                 }
                 _framesSkipped = 0;
+                // 成功编码后清除关键帧请求标志。刻意放在编码成功之后而非 forceKey 判定处：
+                // 若本次编码失败走 continue，标志保留 → 下一轮继续强制 IDR 重试（恢复优先于节流）。
+                _keyframeRequested = false;
 
                 // 拷贝完成后像素缓冲不再被引用，释放所有权供下一帧截屏复用
                 lock (_lock) { _captureBufInUse[frame.BufferIndex] = false; }
@@ -1121,6 +1132,20 @@ namespace EasyRDP.Server.Wpf
                 _clientRequestPending = true;
                 Monitor.Pulse(_lock);
             }
+        }
+
+        /// <summary>
+        /// 处理客户端关键帧请求（解码脱同步恢复）。置位并唤醒编码线程；
+        /// EncodeLoop 检测到标志后忽略"内容无变化跳过"并强制生成 IDR。
+        /// 由 TransportHost 在收到 VideoKeyframeRequest 时调用（接收线程）。
+        /// 仅 H264 解码有参考帧链依赖；ZRLE/VP8 客户端不会发送本请求，标志位对其无副作用
+        /// （己方调用方按 codec 关注即可）。
+        /// </summary>
+        public void RequestKeyframe()
+        {
+            _keyframeRequested = true;
+            Logger.Info("Session {0}: keyframe (IDR) requested by client", _sessionId);
+            lock (_lock) { Monitor.Pulse(_lock); }
         }
 
         /// <summary>获取帧队列当前长度（诊断日志用；调用方不在 _lock 内时安全）。</summary>

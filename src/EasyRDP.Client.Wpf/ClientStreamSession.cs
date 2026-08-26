@@ -57,6 +57,11 @@ namespace EasyRDP.Client.Wpf
         private readonly object _decodeLock = new object();
         private VideoFrameMessage _pendingDecodeFrame;
         private int _decodeFrameDrops;
+        // 解码脱同步恢复：连续解码失败时向服务端请求关键帧（IDR）。
+        // 时间戳限速——out-of-sync 状态下每帧都失败，不能每帧都发请求（刷爆接收线程），
+        // 仅在距上次请求超过冷却期时才再发，服务端收到即强制 IDR。
+        private long _lastKeyframeRequestTicks;
+        private const long KeyframeRequestCooldownMs = 500;
 
         // 最近一次 RTT 测量值（毫秒）。由接收线程在 Keepalive 回显到达时写入，
         // 诊断/流控线程读取；volatile 保证可见性。未测到为 -1。
@@ -121,9 +126,10 @@ namespace EasyRDP.Client.Wpf
             _lastFrameRequestTicks = System.Diagnostics.Stopwatch.GetTimestamp();
             // 版本诊断标识：确认运行的客户端二进制包含 1 字节请求 payload 修复。
             // 若日志无此行或 requestPayloadFix != v2-1byte-payload，说明是旧构建。
-            Logger.Info("=== EasyRDP Client build: {0} requestPayloadFix={1} ===",
+            Logger.Info("=== EasyRDP Client build: {0} requestPayloadFix={1} keyframeFix={2} ===",
                 EasyRDP.Core.Diagnostics.BuildInfo.Describe(),
-                EasyRDP.Core.Diagnostics.BuildInfo.RequestPayloadFixVersion);
+                EasyRDP.Core.Diagnostics.BuildInfo.RequestPayloadFixVersion,
+                EasyRDP.Core.Diagnostics.BuildInfo.KeyframeRequestFixVersion);
             Logger.Info("InitPipeline: codec={0} resolution={1}x{2}", codec, width, height);
             _decoder = DecoderFactory.Create(codec);
             if (_decoder != null)
@@ -784,14 +790,27 @@ namespace EasyRDP.Client.Wpf
             var result = _decoder.Decode(msg.Data, writeSlot);
             if (result.Status != DecodeStatus.Ok)
             {
-                _decodeFailures++;
-                if (_decodeFailures <= 3 || _decodeFailures % 50 == 0)
-                    Logger.Warn("Decode failed: status={0} seq={1} keyframe={2} dataLen={3} (total failures={4})",
-                        result.Status, msg.SequenceNumber, msg.IsKeyframe, msg.Data.Length, _decodeFailures);
-                if (_decodeFailures == 100)
-                    RaiseFatal("Video decode failed repeatedly (" + _decodeFailures + " frames) - connection unusable");
+                if (result.Status == DecodeStatus.Failed)
+                {
+                    _decodeFailures++;
+                    if (_decodeFailures <= 3 || _decodeFailures % 50 == 0)
+                        Logger.Warn("Decode failed: status={0} seq={1} keyframe={2} dataLen={3} (total failures={4})",
+                            result.Status, msg.SequenceNumber, msg.IsKeyframe, msg.Data.Length, _decodeFailures);
+                    // 解码脱同步恢复：P 帧丢失参考帧（dsRefLost/dsNoParamSets）后后续 P 帧持续失败，
+                    // 只能等周期性 IDR 恢复（低帧率下 10~15s，长时间黑屏）。立即请求 IDR，
+                    // 服务端收到后强制生成关键帧，1~2 帧内恢复画面。
+                    if (Codec == CodecId.H264Software || Codec == CodecId.H264Hardware)
+                        RequestDecoderKeyframe();
+                    if (_decodeFailures == 100)
+                        RaiseFatal("Video decode failed repeatedly (" + _decodeFailures + " frames) - connection unusable");
+                }
+                // NeedMoreInput：解码成功但本帧无输出（H264 参考帧缓冲），非错误，不计失败不请求 IDR。
                 return;
             }
+
+            // 解码成功：重置连续失败计数（单次成功可能已恢复，避免累计误报 fatal）
+            if (_decodeFailures > 0)
+                _decodeFailures = 0;
 
             // 阶段二：ZRLE 帧提取脏矩形列表随帧提交（渲染层据此局部更新）。
             // ExtractRects 只解析区域头部（不解压数据），开销可忽略。
@@ -925,6 +944,35 @@ namespace EasyRDP.Client.Wpf
             {
                 // 发送失败（如连接已断开）：静默记录，Stop 流程会清理会话
                 Logger.Warn(ex, "SendFramebufferUpdateRequest failed");
+            }
+        }
+
+        /// <summary>
+        /// 解码脱同步恢复：向服务端请求关键帧（IDR）。（解码线程调用）
+        /// H264 解码器丢参考帧（P 帧链断裂）后除非收到新 IDR 否则持续失败，
+        /// 而周期性 IDR（服务端 KeyframeInterval/静态跳过）在低帧率下间隔可达 10~15s，
+        /// 表现为长时间黑屏/卡帧。收到本请求后服务端下次编码强制 IDR，1~2 帧内恢复画面。
+        /// 限速：out-of-sync 时每帧都失败，若每帧都发请求会刷爆接收线程，冷却期内不重复发。
+        /// </summary>
+        private void RequestDecoderKeyframe()
+        {
+            long now = System.Diagnostics.Stopwatch.GetTimestamp();
+            long cooldown = KeyframeRequestCooldownMs * System.Diagnostics.Stopwatch.Frequency / 1000;
+            if (now - _lastKeyframeRequestTicks < cooldown)
+                return;
+            _lastKeyframeRequestTicks = now;
+
+            var transport = _transport;
+            if (transport == null) return;
+            Logger.Info("Video decode out of sync (failures={0}), requesting keyframe IDR", _decodeFailures);
+            try
+            {
+                // 占位 payload（服务端不解析内容；1 字节绕过空分片保护丢弃，与 FramebufferUpdateRequest 一致）
+                transport.Send(Framing.BuildMessage((byte)MessageType.VideoKeyframeRequest, new byte[] { 0 }));
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn(ex, "RequestDecoderKeyframe send failed");
             }
         }
     }

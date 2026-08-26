@@ -86,6 +86,7 @@ namespace EasyRDP.Core.Protocol
                 || type == (byte)MessageType.ImageClipboardEnd
                 || type == (byte)MessageType.VideoFrame
                 || type == (byte)MessageType.FramebufferUpdateRequest
+                || type == (byte)MessageType.VideoKeyframeRequest
                 || type == (byte)MessageType.DiagnosticInfoRequest
                 || type == (byte)MessageType.DiagnosticInfo;
         }

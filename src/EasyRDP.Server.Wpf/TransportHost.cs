@@ -1102,6 +1102,12 @@ namespace EasyRDP.Server.Wpf
                     // （H264 未启用 _flowControlEnabled，EncodeLoop 不等待）。
                     info.Stream.OnFramebufferUpdateRequest();
                 }
+                else if (e.MessageType == (byte)MessageType.VideoKeyframeRequest)
+                {
+                    // 解码脱同步恢复（H264）：客户端解码失败（丢参考帧）后请求 IDR。
+                    // 服务端收到后强制下一帧为关键帧，1~2 帧内恢复画面，无需等周期性 IDR。
+                    info.Stream.RequestKeyframe();
+                }
                 else if (e.MessageType == (byte)MessageType.Keepalive)
                 {
                     // RTT 测量：客户端 Keepalive payload 携带发送时刻时间戳（8 字节 UtcNow.Ticks），

@@ -21,6 +21,12 @@ namespace EasyRDP.Core.Diagnostics
         public const string RequestPayloadFixVersion = "v2-1byte-payload";
 
         /// <summary>
+        /// 解码脱同步恢复修复版本标识（v1）：客户端连续解码失败时请求关键帧（IDR），
+        /// 服务端收到后强制生成 IDR 快速恢复画面（避免低帧率下等周期性 IDR 的 10~15s 黑屏）。
+        /// </summary>
+        public const string KeyframeRequestFixVersion = "v1-2026-08-26";
+
+        /// <summary>
         /// 构建描述：程序集版本 + exe 文件写入时间（UTC，即构建时间）+ 可执行文件路径。
         /// 用于与部署侧的 exe 时间戳直接对比。
         /// </summary>
