@@ -1,17 +1,21 @@
 namespace EasyRDP.Core.Rendering
 {
     using System.Diagnostics;
+    using NLog;
+
     /// <summary>
     /// 客户端本地帧缓冲。双槽双缓冲：解码线程写 slot A，渲染线程读 slot B，
     /// CommitFrame 原子交换。全链路 2 次数据搬运（解码器→写槽、读槽→GPU）。
     /// 线程安全：lock 保护所有操作（含 Sequence/FrameCount 读取——net40/XP 常为 32 位进程，
     /// long 读写非原子，必须加锁，否则 Sequence 会撕裂）。
-    /// 
+    ///
     /// 阶段二扩展：每槽关联 DirtyRects（ZRLE 脏矩形数组），
     /// 渲染线程借帧时可随 ReadFrameRef 取回，实现局部更新渲染。
     /// </summary>
     public class FrameBuffer
     {
+        private static readonly Logger Log = LogManager.GetCurrentClassLogger();
+
         private byte[][] _slots = new byte[2][];
         // 与 _slots 对应的脏矩形数组（ZRLE 帧的区域列表；H264 帧为 null）
         private ScreenRect[][] _dirtyRects = new ScreenRect[2][];
@@ -24,6 +28,11 @@ namespace EasyRDP.Core.Rendering
         private long _sequence;
         private long _readBorrowTicks;
         private readonly object _lock = new object();
+
+        // 诊断计数
+        private int _commitDrops;       // reader 占用导致丢弃的帧数
+        private int _commitTimeouts;    // reader 超时回收的次数
+        private int _borrowCount;       // 借帧成功总次数
 
         private static readonly long ReadBorrowTimeoutTicks;
 
@@ -109,9 +118,18 @@ namespace EasyRDP.Core.Rendering
                 {
                     long elapsed = Stopwatch.GetTimestamp() - _readBorrowTicks;
                     if (elapsed < ReadBorrowTimeoutTicks)
+                    {
+                        _commitDrops++;
+                        if (_commitDrops <= 5 || _commitDrops % 100 == 0)
+                            Log.Warn("CommitFrame DROPPED (reader busy): frameCount={0} drops={1} readingSlot={2}",
+                                _frameCount, _commitDrops, _readingSlot);
                         return false; // 正常占用，丢弃本帧
+                    }
                     // 超时强制回收
                     _readingSlot = -1;
+                    _commitTimeouts++;
+                    Log.Warn("CommitFrame TIMEOUT RECOVERY: frameCount={0} timeouts={1} elapsedMs={2}",
+                        _frameCount, _commitTimeouts, elapsed * 1000 / Stopwatch.Frequency);
                 }
                 _width = width;
                 _height = height;
@@ -120,6 +138,12 @@ namespace EasyRDP.Core.Rendering
                 _dirtyRects[_writeSlot] = dirtyRects;
                 _readSlot = _writeSlot;
                 _writeSlot = (_writeSlot + 1) % 2;
+                if (_frameCount <= 5 || _frameCount % 100 == 0)
+                {
+                    int rectCount = dirtyRects != null ? dirtyRects.Length : -1;
+                    Log.Info("CommitFrame ok: frameCount={0} seq={1} w={2} h={3} dirtyRects={4} writeSlot={5}",
+                        _frameCount, _sequence, width, height, rectCount, (_writeSlot + 1) % 2);
+                }
                 return true;
             }
         }
@@ -136,6 +160,7 @@ namespace EasyRDP.Core.Rendering
                     frame = new ReadFrameRef();
                     return false;
                 }
+                _borrowCount++;
                 frame = new ReadFrameRef
                 {
                     Pixels = _slots[_readSlot],
@@ -147,6 +172,12 @@ namespace EasyRDP.Core.Rendering
                 _readingSlot = _readSlot;
                 _readSlot = -1;
                 _readBorrowTicks = Stopwatch.GetTimestamp();
+                if (_borrowCount <= 5 || _borrowCount % 200 == 0)
+                {
+                    int rectCount = frame.DirtyRects != null ? frame.DirtyRects.Length : -1;
+                    Log.Info("TryBorrowReadFrame ok: borrow#{0} seq={1} w={2} h={3} dirtyRects={4}",
+                        _borrowCount, frame.Sequence, frame.Width, frame.Height, rectCount);
+                }
                 return true;
             }
         }
@@ -169,6 +200,8 @@ namespace EasyRDP.Core.Rendering
         {
             lock (_lock)
             {
+                Log.Info("Reset: frameCount={0} commitDrops={1} commitTimeouts={2} borrowCount={3}",
+                    _frameCount, _commitDrops, _commitTimeouts, _borrowCount);
                 _writeSlot = 0;
                 _readSlot = -1;
                 _readingSlot = -1;

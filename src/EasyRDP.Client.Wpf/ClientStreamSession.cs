@@ -191,7 +191,8 @@ namespace EasyRDP.Client.Wpf
         /// <summary>Stops the stream session, terminates background threads, and cleans up resources.</summary>
         public void Stop()
         {
-            Logger.Info("ClientStreamSession stopping, frames received: {0} decodeFailures: {1}", _frameCount, _decodeFailures);
+            Logger.Info("ClientStreamSession stopping, framesDecoded={0} decodeFailures={1} renderBorrowed={2} renderEmpty={3} renderErrors={4}",
+                _frameCount, _decodeFailures, _renderLoopBorrowed, _renderLoopEmpty, _renderLoopErrors);
             _running = false;
             _receiving = false;
             _pipelineReady = false;
@@ -819,15 +820,24 @@ namespace EasyRDP.Client.Wpf
             if (Codec == CodecId.Zrle && msg.Data != null)
             {
                 dirtyRects = ZrleRegionCodec.ExtractRects(msg.Data);
+                if (_frameCount <= 10 || _frameCount % 100 == 0)
+                {
+                    int rectCount = dirtyRects != null ? dirtyRects.Length : -1;
+                    Logger.Info("ExtractRects: seq={0} frameCount={1} dataLen={2} rects={3}",
+                        msg.SequenceNumber, _frameCount, msg.Data.Length, rectCount);
+                }
             }
 
-            _frameBuffer.CommitFrame(msg.Width, msg.Height, dirtyRects);
+            bool committed = _frameBuffer.CommitFrame(msg.Width, msg.Height, dirtyRects);
+            if (!committed && (_frameCount <= 10 || _frameCount % 100 == 0))
+                Logger.Warn("CommitFrame DROPPED (reader busy): seq={0} frameCount={1}", msg.SequenceNumber, _frameCount);
             Interlocked.Increment(ref _frameCount);
             Interlocked.Add(ref _receivedBytes, msg.Data != null ? msg.Data.Length : 0);
 
             if (_frameCount == 1)
-                Logger.Info("FIRST frame decoded: seq={0} size={1}x{2} keyframe={3} dataLen={4}",
-                    msg.SequenceNumber, msg.Width, msg.Height, msg.IsKeyframe, msg.Data.Length);
+                Logger.Info("FIRST frame decoded: seq={0} size={1}x{2} keyframe={3} dataLen={4} dirtyRects={5}",
+                    msg.SequenceNumber, msg.Width, msg.Height, msg.IsKeyframe, msg.Data.Length,
+                    dirtyRects != null ? dirtyRects.Length : -1);
             else if (_frameCount % 100 == 0)
                 Logger.Debug("Frames decoded: {0}, last seq={1} dataLen={2}", _frameCount, msg.SequenceNumber, msg.Data.Length);
         }
@@ -874,18 +884,41 @@ namespace EasyRDP.Client.Wpf
             });
         }
 
+        // 渲染线程诊断计数
+        private long _renderLoopBorrowed;    // 成功借到帧的次数
+        private long _renderLoopEmpty;       // 无帧可借的次数
+        private long _renderLoopErrors;      // 渲染异常次数
+
         private void RenderLoop()
         {
+            Logger.Info("RenderLoop thread started, flowControl={0}", _flowControlEnabled);
             while (_running)
             {
                 ReadFrameRef frame;
                 if (_frameBuffer != null && _frameBuffer.TryBorrowReadFrame(out frame))
                 {
+                    Interlocked.Increment(ref _renderLoopBorrowed);
+                    long borrowed = Interlocked.Read(ref _renderLoopBorrowed);
+                    if (borrowed <= 5 || borrowed % 100 == 0)
+                    {
+                        int rectCount = frame.DirtyRects != null ? frame.DirtyRects.Length : -1;
+                        Logger.Info("RenderLoop borrow#{0}: seq={1} w={2} h={3} dirtyRects={4} pixelsLen={5}",
+                            borrowed, frame.Sequence, frame.Width, frame.Height, rectCount,
+                            frame.Pixels != null ? frame.Pixels.Length : 0);
+                    }
                     try
                     {
                         // 阶段二：携带 DirtyRects 调用局部更新重载。
                         // ZRLE 无变化帧（0 区域）→ 渲染层跳过；H264（null）→ 全帧渲染。
-                        _renderTarget?.RenderFrame(frame.Pixels, frame.Width, frame.Height, frame.DirtyRects);
+                        if (_renderTarget != null)
+                        {
+                            _renderTarget.RenderFrame(frame.Pixels, frame.Width, frame.Height, frame.DirtyRects);
+                        }
+                        else
+                        {
+                            if (borrowed <= 3)
+                                Logger.Warn("RenderLoop borrow#{0}: _renderTarget is NULL!", borrowed);
+                        }
                         // 阶段三：画面有变化 → 渲染完成后立即请求下一帧（保持流畅）。
                         // 服务端等请求才编码发送 → 帧率 = 客户端消费能力，不积压不丢帧。
                         if (_flowControlEnabled)
@@ -898,6 +931,12 @@ namespace EasyRDP.Client.Wpf
                             }
                         }
                     }
+                    catch (Exception ex)
+                    {
+                        Interlocked.Increment(ref _renderLoopErrors);
+                        Logger.Error(ex, "RenderLoop EXCEPTION borrow#{0}: {1}", borrowed, ex.Message);
+                        // 不 throw：渲染线程异常退出会导致永远黑屏，必须吞掉继续
+                    }
                     finally
                     {
                         _frameBuffer.ReleaseReadFrame();
@@ -905,6 +944,13 @@ namespace EasyRDP.Client.Wpf
                 }
                 else
                 {
+                    Interlocked.Increment(ref _renderLoopEmpty);
+                    long empty = Interlocked.Read(ref _renderLoopEmpty);
+                    if (empty == 1 || (empty <= 5 && empty % 1 == 0))
+                    {
+                        if (empty == 1)
+                            Logger.Info("RenderLoop: no frame available (first time, normal during initial wait)");
+                    }
                     Thread.Sleep(5); // 无帧时等待，降低 CPU 占用
                 }
 
@@ -924,6 +970,8 @@ namespace EasyRDP.Client.Wpf
                     }
                 }
             }
+            Logger.Info("RenderLoop thread exiting, borrowed={0} empty={1} errors={2}",
+                _renderLoopBorrowed, _renderLoopEmpty, _renderLoopErrors);
         }
 
         /// <summary>
