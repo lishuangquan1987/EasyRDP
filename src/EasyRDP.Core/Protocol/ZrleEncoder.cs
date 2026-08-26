@@ -410,7 +410,14 @@ namespace EasyRDP.Core.Protocol
             return true;
         }
 
-        /// <summary>提取瓦片到预分配缓冲（避免 new byte[]）。</summary>
+        /// <summary>
+        /// 提取瓦片到预分配缓冲（避免 new byte[]），并把 alpha 通道写满 255。
+        /// alpha 修正的根因：GDI 屏捕（VMware/SVGA 等虚拟显示驱动 GetDIBits/StretchBlt 回读）
+        /// 的 BGRA alpha 字节为 0。H264 路径经 I420 往返转换（解码时 p[3]=255）掩盖了此问题，
+        /// 而 ZRLE 纯 BGRA 透传会原样把 alpha=0 下发给客户端；客户端 WPF 用预乘 alpha 的
+        /// Bgra32 渲染，alpha=0 时 RGB 被乘 0 → 整屏全透明显示为黑屏。屏幕内容恒不透明，
+        /// 故在编码入口统一写满 255（FillRect 与 Deflate 共用此缓冲，一处修正覆盖全部输出）。
+        /// </summary>
         private void ExtractTile(byte[] pixels, int x0, int y0, int w, int h, byte[] output)
         {
             int stride = _width * 4;
@@ -419,6 +426,11 @@ namespace EasyRDP.Core.Protocol
             {
                 Buffer.BlockCopy(pixels, (y0 + y) * stride + x0 * 4, output, y * tileStride, tileStride);
             }
+            // alpha 修正：BGRA 每像素第 4 字节（offset 3,7,11,...）写满 255。
+            // 仅对变化瓦片执行，静态帧零瓦片调用零开销；字节写成本远低于同瓦片 Deflate 压缩。
+            int totalBytes = tileStride * h;
+            for (int i = 3; i < totalBytes; i += 4)
+                output[i] = 255;
         }
 
         /// <summary>
