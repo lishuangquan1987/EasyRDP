@@ -89,13 +89,24 @@ namespace EasyRDP.Core.Tests.Protocol
         }
 
         [Fact]
-        public void BothSupportH264SoftwareAndZrle_ShouldReturnH264Software()
+        public void BothSupportHardwareAndZrle_ShouldReturnHardware()
         {
-            // H264 软编优先级高于 ZRLE（弱机编码速度优先；ZRLE 作为 H264 不可用回退）
+            // H264 硬编最高优先（硬件速度/能耗最优）
+            var result = CodecNegotiator.Negotiate(
+                CodecCapabilities.H264Software | CodecCapabilities.Zrle | CodecCapabilities.H264Hardware,
+                CodecCapabilities.H264Software | CodecCapabilities.Zrle | CodecCapabilities.H264Hardware);
+            Assert.Equal(CodecId.H264Hardware, result);
+        }
+
+        [Fact]
+        public void BothSupportH264SoftwareAndZrle_ShouldReturnZrle()
+        {
+            // 弱机（无硬件 H264）场景：ZRLE 区域增量优于软件 H264 全帧编码，
+            // 提升帧率——签名即"换成区域增量编码"（RealVNC 模式）。
             var result = CodecNegotiator.Negotiate(
                 CodecCapabilities.H264Software | CodecCapabilities.Zrle,
                 CodecCapabilities.H264Software | CodecCapabilities.Zrle);
-            Assert.Equal(CodecId.H264Software, result);
+            Assert.Equal(CodecId.Zrle, result);
         }
 
         [Fact]

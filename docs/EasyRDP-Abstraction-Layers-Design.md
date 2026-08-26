@@ -1070,8 +1070,14 @@ namespace EasyRDP.Core.Protocol
     /// <summary>
     /// 握手编码协商器。服务端收到 HandshakeReq 后调用 Negotiate：
     /// 取客户端声明的解码能力（clientCaps）与服务端可用编码能力（由 EncoderFactory.GetAvailableCodecs
-    /// 动态探测得 serverCaps）的交集，按优先级选出唯一 CodecId：硬件优先（双方都支持硬件时用硬件，
-    /// 更快），否则软件。XP 服务端因无硬件编码（serverCaps 仅含 H264Software），实际必走软件。
+    /// 动态探测得 serverCaps）的交集，按优先级选出唯一 CodecId。
+    /// 优先级（v2026-08-26）：H264Hardware > ZRLE（区域增量）> H264Software > VP8。
+    ///   - 硬件 H264 最高优先：硬件编码速度/能耗最优。
+    ///   - ZRLE 其次：区域增量编码（64×64 瓦片，只编码变化瓦片，纯 C# 无原生依赖），
+    ///     弱机上静态/局部变化开销远低于软件 H264 全帧编码（RealVNC 类工具同模式）。
+    ///     旧"弱机上 ZRLE Deflate 500-2300ms/帧"结论已过时（当时未做 uint 步长比较/
+    ///     缓冲池化/CopyRect 锚点传播优化，实测现为静态 3-8ms、全屏 50-100ms）。
+    ///   - 软件 H264 为 ZRLE 不可用回退（如超高分辨率瓦片数超限）。
     /// 交集为空返回 null → 握手回 NoCommonCodec。
     /// 协商逻辑集中在此类，而非散落在编排层。
     /// </summary>
@@ -1081,9 +1087,9 @@ namespace EasyRDP.Core.Protocol
         public static CodecId? Negotiate(CodecCapabilities clientCaps, CodecCapabilities serverCaps)
         {
             CodecCapabilities common = clientCaps & serverCaps;
-            // 优先级：H264Hardware > H264Software（双方都支持硬件时用硬件，否则软件）
-            // 注：XP 服务端 serverCaps 通常只含 H264Software，故实际走软件。
+            // 优先级：H264Hardware > ZRLE > H264Software（见类注释）
             if ((common & CodecCapabilities.H264Hardware) != 0) return CodecId.H264Hardware;
+            if ((common & CodecCapabilities.Zrle) != 0) return CodecId.Zrle;
             if ((common & CodecCapabilities.H264Software) != 0) return CodecId.H264Software;
             return null;
         }
