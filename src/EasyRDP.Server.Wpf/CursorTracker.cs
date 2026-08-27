@@ -109,8 +109,11 @@ namespace EasyRDP.Server.Wpf
                 _running = true;
                 _pollThread = new Thread(PollLoop);
                 _pollThread.IsBackground = true;
-                // 降优先级：光标轮询是后台任务，避免与输入处理/编码竞争 CPU
-                _pollThread.Priority = ThreadPriority.BelowNormal;
+                // 光标轮询优先级：Normal（高于截屏/编码的 BelowNormal）。
+                // 光标跟手是远程桌面的第一优先级体验：弱机 CPU 饱和时若与截屏同处
+                // BelowNormal，光标更新可能被截屏(300ms)/编码线程饿死，表现为鼠标漂移/卡顿。
+                // 提至 Normal 保证 60Hz 光标位置与形状更新始终及时送达客户端（本地叠加渲染）。
+                _pollThread.Priority = ThreadPriority.Normal;
                 _pollThread.Start();
             }
         }

@@ -1,5 +1,6 @@
 #nullable disable
 using System;
+using System.Diagnostics;
 using System.Threading;
 using EasyDesk.Core;
 using EasyDesk.Core.Models;
@@ -19,6 +20,10 @@ namespace EasyRDP.Server.Wpf
         [System.Runtime.InteropServices.DllImport("user32.dll")]
         private static extern int GetSystemMetrics(int nIndex);
 
+        // msvcrt.memcmp — Windows 内置 CRT 内存比较（返回 0 表示相等）。byte[] 自动 pin 后传首地址。
+        [System.Runtime.InteropServices.DllImport("msvcrt.dll", EntryPoint = "memcmp", SetLastError = false)]
+        private static extern int Memcmp(byte[] a, byte[] b, System.IntPtr count);
+
         private readonly IScreenCapturer _capturer;
         private Thread _captureThread;
         private volatile bool _running;
@@ -35,6 +40,21 @@ namespace EasyRDP.Server.Wpf
         private volatile bool _captureWidthDirty;
         // 生命周期锁：Start/Stop 在并发会话接入/断开下必须串行（防止检查-执行竞态产生双线程）
         private readonly object _lifecycleLock = new object();
+
+        // ── 静止跳过截屏（D13）──
+        // 弱机 BitBlt 全帧截屏实测 250~300ms/帧（Win7 虚拟机 + Hyper-V 虚拟显卡），
+        // 是 FPS 上不去的主因。桌面静止时用"低成本缩略图"探测变化，静止则跳过
+        // 昂贵的全帧 StretchBlt；只有检测到变化才做全帧截屏。这样静置时截屏开销
+        // 从 ~300ms/帧 降到 ~几 ms/帧，编码线程不再空等，FPS 得以释放给实际变化。
+        // 缩略图：全帧等比缩小 N 倍的 BGRA 像素，memcmp 批量对比。
+        private const int ThumbDivisor = 8;                 // 缩略图边长 = 原尺寸/8
+        private const int ThumbKeepaliveIntervalMs = 500;   // 静止时强制全帧截屏的间隔（保活）
+        private int _thumbW, _thumbH;                       // 当前缩略图尺寸
+        private byte[] _thumbBuffer;                        // 最新缩略图 BGRA 像素（复用缓冲）
+        private byte[] _thumbPrev;                          // 上一参考缩略图 BGRA 像素（比较基准）
+        private bool _thumbReady;                           // 缩略图是否已初始化（首帧需全截）
+        private long _thumbLastKeepaliveTicks;              // 上次全帧截屏时刻（保活节流）
+        private int _thumbCaptureCount;                     // 缩略图采样次数（诊断）
 
         /// <summary>Gets whether the capture loop is currently running.</summary>
         public bool IsRunning { get { return _running; } }
@@ -219,6 +239,27 @@ namespace EasyRDP.Server.Wpf
                         boundsRefreshCounter = 0;
                         refreshCaptureBounds();
                     }
+
+                    // D13 静止跳过截屏：先用低成本缩略图探测桌面是否变化。
+                    // 静止 → 跳过昂贵的全帧 StretchBlt（仅间隔保活一次全帧，维持连接活跃）；
+                    // 有变化 → 走正常全帧截屏路径。
+                    // 注意：仅当 bounds 计算成功（targetW>0）时缩略图探测才有意义；
+                    // bounds 失败时应走下方 CaptureScreen 兜底分支，不能在此跳过。
+                    bool thumbnailChanged = false;
+                    if (targetW > 0 && targetH > 0)
+                    {
+                        thumbnailChanged = ProbeThumbnailChanged(
+                            screenX, screenY, screenW, screenH, targetW, targetH);
+                    }
+                    if (targetW > 0 && targetH > 0
+                        && !thumbnailChanged && !_thumbNeedFull())
+                    {
+                        // 桌面静止：跳过全帧截屏，等待下一个采集周期
+                        Thread.Sleep(_frameIntervalMs);
+                        continue;
+                    }
+                    _thumbLastKeepaliveTicks = Stopwatch.GetTimestamp();
+
                     ScreenFrame frame;
                     if (targetW > 0 && targetH > 0)
                     {
@@ -263,6 +304,114 @@ namespace EasyRDP.Server.Wpf
                 Thread.Sleep(_frameIntervalMs);
             }
             Logger.Info("CaptureLoop: exited, total captures={0}", captureCount);
+        }
+
+        /// <summary>
+        /// D13 静止跳过截屏——低成本缩略图变化探测。
+        /// 用 CaptureScaled 缩略图（目标尺寸 = 全帧/ThumbDivisor）只抓少量像素做 memcmp 批量比较，
+        /// 开销 ~几 ms/帧（远小于全帧 BitBlt 的 250~300ms）。返回 true 表示桌面有变化，需要全帧截屏。
+        /// 尺寸变化（缩略图重建）时必然返回 true，保证新尺寸首次全截。
+        /// 实现细节：抓取到的缩略图是独立 HGlobal 缓冲，比较后立即释放；失败时保守返回 true
+        /// （宁可多截一次全帧，也不漏过变化）。双缓冲（_thumbPrev/_thumbBuffer）复用避免分配。
+        /// </summary>
+        private bool ProbeThumbnailChanged(int sx, int sy, int sw, int sh, int targetW, int targetH)
+        {
+            int tw = Math.Max(16, targetW / ThumbDivisor);
+            int th = Math.Max(16, targetH / ThumbDivisor);
+            long swStart = Stopwatch.GetTimestamp();
+            try
+            {
+                ScreenFrame thumb = _capturer.CaptureScaled(sx, sy, sw, sh, tw, th);
+                try
+                {
+                    int thumbBytes = tw * th * 4;
+                    if (thumb.Scan0 == IntPtr.Zero || thumbBytes <= 0)
+                        return true; // 抓取失败，保守全截
+
+                    bool sizeChanged = !_thumbReady
+                        || _thumbW != tw || _thumbH != th
+                        || _thumbBuffer == null || _thumbBuffer.Length != thumbBytes;
+                    if (sizeChanged)
+                    {
+                        _thumbW = tw;
+                        _thumbH = th;
+                        if (_thumbBuffer == null || _thumbBuffer.Length != thumbBytes)
+                            _thumbBuffer = new byte[thumbBytes];
+                        if (_thumbPrev == null || _thumbPrev.Length != thumbBytes)
+                            _thumbPrev = new byte[thumbBytes];
+                        // 尺寸变化/首次：无参考缩略图，返回有变化（触发全截）
+                        System.Runtime.InteropServices.Marshal.Copy(
+                            thumb.Scan0, _thumbPrev, 0, thumbBytes);
+                        _thumbReady = true;
+                        _thumbCaptureCount++;
+                        return true;
+                    }
+
+                    // 拷贝最新缩略图到 _thumbBuffer，再用 memcmp 与上一参考 _thumbPrev 批量比较
+                    // （82KB 级 memcmp 走 CRT 优化路径 ~微秒，远快于逐字节 ReadByte 的 interop 开销）。
+                    System.Runtime.InteropServices.Marshal.Copy(
+                        thumb.Scan0, _thumbBuffer, 0, thumbBytes);
+                    bool changed;
+                    try
+                    {
+                        changed = Memcmp(_thumbBuffer, _thumbPrev, (System.IntPtr)thumbBytes) != 0;
+                    }
+                    catch
+                    {
+                        // msvcrt.dll 缺失等异常情况退回逐字节比较
+                        changed = false;
+                        for (int i = 0; i < thumbBytes; i++)
+                        {
+                            if (_thumbBuffer[i] != _thumbPrev[i])
+                            {
+                                changed = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    _thumbCaptureCount++;
+                    // 无论是否变化都更新参考（供下次比较）；仅变化时保留本次，静止时两 buffer 相同无影响
+                    byte[] tmp = _thumbPrev;
+                    _thumbPrev = _thumbBuffer;
+                    _thumbBuffer = tmp;
+                    return changed;
+                }
+                finally
+                {
+                    if (thumb.Scan0 != IntPtr.Zero)
+                        System.Runtime.InteropServices.Marshal.FreeHGlobal(thumb.Scan0);
+                }
+            }
+            catch (Exception ex)
+            {
+                if (_thumbCaptureCount <= 1 || _thumbCaptureCount % 600 == 0)
+                    Logger.Warn(ex, "ProbeThumbnailChanged failed — conservative full capture (count={0})", _thumbCaptureCount);
+                return true; // 探测失败保守全截
+            }
+            finally
+            {
+                // 缩略图探测耗时诊断（弱机 BitBlt 慢时用于验证缩略图是否真的"低成本"）
+                if (_thumbCaptureCount == 1 || _thumbCaptureCount % 600 == 0)
+                {
+                    double swMs = (Stopwatch.GetTimestamp() - swStart) * 1000.0 / Stopwatch.Frequency;
+                    Logger.Info("ProbeThumbnail: thumb={0}x{1} full={2}x{3} probeMs={4:F1} captures={5}",
+                        _thumbW, _thumbH, targetW, targetH, swMs, _thumbCaptureCount);
+                }
+            }
+        }
+
+        /// <summary>
+        /// 判断是否需要强制全帧截屏一次（保活）。桌面静止且未到 ThumbKeepaliveIntervalMs
+        /// 时返回 false（可跳过）；达到保活间隔则返回 true（强制一次全帧，维持连接活跃，
+        /// 与 ServerStreamSession 的保活帧语义一致，防止客户端误判断连）。
+        /// </summary>
+        private bool _thumbNeedFull()
+        {
+            if (!_thumbReady) return true; // 未初始化：首帧必须全截
+            long now = Stopwatch.GetTimestamp();
+            long elapsedMs = (now - _thumbLastKeepaliveTicks) * 1000 / Stopwatch.Frequency;
+            return elapsedMs >= ThumbKeepaliveIntervalMs;
         }
     }
 }
