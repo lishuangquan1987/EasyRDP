@@ -91,8 +91,24 @@
 
 ### 3.4 工具链与环境
 
-- **需要 WDK7（Version 7600）**（当前环境未安装，需先安装）
-- 构建：WDK 7 的 build 环境（`setenv` / NMake 或 VS2008 驱动工程）
+- **需要 WDK 7.1（Version 7600）**（当前环境未安装，需先安装）
+- 官方下载：**Windows Driver Kit Version 7.1.0**（微软下载中心 id=11800）
+  - 页面：`https://www.microsoft.com/en-us/download/details.aspx?id=11800`
+  - 文件名：`GRMWDK_EN_7600_1.ISO`（619.8 MB）
+  - 支持系统含 **Windows XP SP3**（匹配本项目目标）
+  - 直链（已验证可下载）：
+    `https://download.microsoft.com/download/4/a/2/4a25c7d5-efbe-4182-b6a9-ae6850409a78/GRMWDK_EN_7600_1.ISO`
+- 安装步骤：
+  1. 挂载/解压 `GRMWDK_EN_7600_1.ISO`（Windows 10 可直接双击挂载；XP/7 用虚拟光驱或解压工具）
+  2. 运行 ISO 内 `setup.exe`，安装到默认路径（通常 `C:\WinDDK\7600.16385.1`）
+  3. 安装完成后会生成 WDK build 环境
+- 构建（驱动工程位于 `EasyDesk/src/EasyDesk.Windows/Mirror/driver/`）：
+  ```
+  # 打开 WDK 7.1 build 环境（含设置环境变量）
+  C:\WinDDK\7600.16385.1\bin\setenv.bat ...\MirrorDisp  chk  WNET
+  build -cZ
+  ```
+  或复制 `MirrorDisp`/`MirrorMini` 到 WDK 示例工程目录后 `build`
 - 驱动签名：
   - **XP 32 位**：不需要强签名（XP x64 需签名）
   - **Win7**：需要测试签名（测试模式 `bcdedit /set testsigning on`）或 WHQL 签名（正式发布）
