@@ -134,7 +134,7 @@ EasyDesk/src/EasyDesk.Windows/NativeMethods/（驱动访问 P/Invoke，按需）
 
 **方案选项**：
 
-- **方案 X（推荐）**：`IScreenCapturer` 增加可选接口 `ITryGetChanges`（如 `bool TryReadChanges(out ScreenRect[] rects)`），BitBlt/DXGI 实现返回 `false`（无脏矩形，走整帧），镜像驱动返回 `true`。`CaptureService` 优先调用它，有脏矩形则只编码变化区域。**接口向后兼容**（现有实现不受影响），但**违背 D10 "接口不变"** 的原文。
+- **方案 X（推荐）**：新增独立可选接口 `ICaptureChangesReader`（含 `bool TryReadChanges(out ScreenRect[] rects)`）。`IScreenCapturer` 本身不变（net40 无接口默认方法，保持向后兼容），BitBlt/DXGI 不实现该接口，镜像驱动实现之。`CaptureService` 用 `capturer as ICaptureChangesReader` 检测，有脏矩形则只编码变化区域。**接口向后兼容**（现有实现与调用方不受影响），通过"新增可选接口"而非"修改现有接口"实现，**不违背 D10 "接口不变" 的实质**（D10 指的是 `IScreenCapturer` 主接口不变）。
 - **方案 Y（保守）**：保持接口完全不变，镜像驱动也走整帧 `CaptureScreen`。实现最简单、严格符合 D10，但**拿不到镜像驱动的脏矩形收益**，只剩"读驱动缓冲比 BitBlt 快"的优势。
 
 > 建议采用 **方案 X**：镜像驱动的 90% 价值在脏矩形增量，仅靠"读缓冲快"提升有限。是否接受 `IScreenCapturer` 接口小改（新增可选方法），需你拍板。
