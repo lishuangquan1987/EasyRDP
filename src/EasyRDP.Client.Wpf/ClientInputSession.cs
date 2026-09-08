@@ -150,9 +150,9 @@ namespace EasyRDP.Client.Wpf
         /// <summary>MapCoordinates 诊断日志计数器（每 50 次映射打印一次全流程参数）。</summary>
         private int _mapDiagCounter;
 
-        /// <summary>把客户端控件坐标映射到服务端屏幕坐标。</summary>
+        /// <summary>把客户端控件坐标映射到服务端屏幕坐标（按缩放模式计算实际绘制区域）。</summary>
         public void MapCoordinates(double controlX, double controlY, double controlW, double controlH,
-            out int serverX, out int serverY)
+            out int serverX, out int serverY, ZoomMode zoomMode = ZoomMode.Fit)
         {
             if (_screenWidth <= 0 || _screenHeight <= 0 || controlW <= 0 || controlH <= 0)
             {
@@ -161,7 +161,28 @@ namespace EasyRDP.Client.Wpf
                 return;
             }
 
-            // 客户端 Image 用 Stretch=Uniform，宽高比不一致时内容居中并留有黑边。
+            // Stretch=Fill：无黑边，全矩形等比拉伸，直接映射。
+            if (zoomMode == ZoomMode.Stretch)
+            {
+                double px = controlX < 0 ? 0 : (controlX > controlW ? controlW : controlX);
+                double py = controlY < 0 ? 0 : (controlY > controlH ? controlH : controlY);
+                serverX = (int)(px / controlW * _screenWidth);
+                serverY = (int)(py / controlH * _screenHeight);
+                return;
+            }
+
+            // Stretch=None：内容在控件左上角按原始像素 1:1 绘制，超出部分裁切。
+            // 可见区域 = min(控件尺寸, 屏幕尺寸)，无黑边无偏移。
+            if (zoomMode == ZoomMode.Actual)
+            {
+                double px = controlX < 0 ? 0 : (controlX > controlW ? controlW : controlX);
+                double py = controlY < 0 ? 0 : (controlY > controlH ? controlH : controlY);
+                serverX = (int)(px < _screenWidth ? px : _screenWidth);
+                serverY = (int)(py < _screenHeight ? py : _screenHeight);
+                return;
+            }
+
+            // Stretch=Uniform（默认）：宽高比不一致时内容居中并留有黑边。
             // 先算出实际绘制区域（居中），黑边内的坐标钳制到绘制区边缘，
             // 再把绘制区坐标映射到服务端像素坐标，避免比例不一致时光标位置失真。
             double aspect = (double)_screenWidth / _screenHeight;
@@ -179,14 +200,14 @@ namespace EasyRDP.Client.Wpf
             }
             double offX = (controlW - drawW) / 2.0;
             double offY = (controlH - drawH) / 2.0;
-            double px = controlX - offX;
-            double py = controlY - offY;
-            if (px < 0) px = 0;
-            else if (px > drawW) px = drawW;
-            if (py < 0) py = 0;
-            else if (py > drawH) py = drawH;
-            serverX = (int)(px / drawW * _screenWidth);
-            serverY = (int)(py / drawH * _screenHeight);
+            double px2 = controlX - offX;
+            double py2 = controlY - offY;
+            if (px2 < 0) px2 = 0;
+            else if (px2 > drawW) px2 = drawW;
+            if (py2 < 0) py2 = 0;
+            else if (py2 > drawH) py2 = drawH;
+            serverX = (int)(px2 / drawW * _screenWidth);
+            serverY = (int)(py2 / drawH * _screenHeight);
             // 诊断日志（每 50 次）：映射全流程参数，验证 draw/off/px/py 计算。
             // 若 draw 与 control 不一致（黑边扣除生效）而用户仍报偏移，
             // 说明偏移不在映射层，需检查渲染/回显路径。
@@ -196,7 +217,7 @@ namespace EasyRDP.Client.Wpf
                     controlX, controlY, controlW, controlH,
                     _screenWidth, _screenHeight,
                     drawW, drawH, offX, offY,
-                    px, py, serverX, serverY);
+                    px2, py2, serverX, serverY);
             }
         }
     }

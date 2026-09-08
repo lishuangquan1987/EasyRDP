@@ -1866,7 +1866,7 @@ namespace EasyRDP.Client.Wpf
         {
             if (_inputSession == null || !_running) return;
             int sx, sy;
-            _inputSession.MapCoordinates(imageX, imageY, imageW, imageH, out sx, out sy);
+            _inputSession.MapCoordinates(imageX, imageY, imageW, imageH, out sx, out sy, ZoomMode);
             // 诊断：每 20 条记录一次本地坐标/渲染区/映射结果，与服务端 requested 对比定位点击偏移
             if ((++_mouseMoveDiagCounter % 20) == 0)
                 Logger.Debug("MouseMove local=({0:F0},{1:F0}) area={2:F0}x{3:F0} mapped=({4},{5})",
@@ -2045,10 +2045,28 @@ namespace EasyRDP.Client.Wpf
 
         public void ToggleFullscreen()
         {
-            var window = Application.Current?.MainWindow as MainWindow;
+            var window = FindMainWindow();
             if (window == null) return;
             window.SetFullscreenMode(!window.IsFullscreenMode);
             Logger.Info(window.IsFullscreenMode ? "Entered fullscreen" : "Exited fullscreen");
+        }
+
+        /// <summary>双窗口架构下 Application.MainWindow 是浏览窗口，必须从窗口集合找控制窗口。
+        /// 优先当前活动窗口（多控制窗口时切换触发者）。</summary>
+        private static MainWindow FindMainWindow()
+        {
+            if (Application.Current == null) return null;
+            foreach (System.Windows.Window w in Application.Current.Windows)
+            {
+                if (w is MainWindow mw && mw.IsActive)
+                    return mw;
+            }
+            foreach (System.Windows.Window w in Application.Current.Windows)
+            {
+                if (w is MainWindow mw)
+                    return mw;
+            }
+            return null;
         }
 
         /// <summary>
@@ -2058,7 +2076,7 @@ namespace EasyRDP.Client.Wpf
         /// </summary>
         public void ExitFullscreen()
         {
-            var window = Application.Current?.MainWindow as MainWindow;
+            var window = FindMainWindow();
             if (window == null || !window.IsFullscreenMode)
                 return;
             window.SetFullscreenMode(false);

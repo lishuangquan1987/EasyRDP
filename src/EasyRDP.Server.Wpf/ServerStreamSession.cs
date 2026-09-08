@@ -178,6 +178,11 @@ namespace EasyRDP.Server.Wpf
         // 客户端解码失败（dsRefLost/dsNoParamSets）后 P 帧持续失败，只能等周期性 IDR
         // （低帧率下 10~15s）；收到本请求后立即给出一帧 IDR，1~2 帧内恢复画面。
         private volatile bool _keyframeRequested;
+        // 切回 ZRLE 时强制下一帧全量编码（花屏根因修复）：
+        // H264 是有损编码，客户端显示的是 H264 解码画面（与原始像素有轻微差异），
+        // 而 ZRLE 参考帧基于服务端原始像素 → 切回后的 ZRLE 增量帧基线不一致 → 花屏。
+        // 强制一帧全量后客户端重建完整画面，基线重新对齐。
+        private volatile bool _forceZrleKeyNext;
 
         // ── D14：动态混合编码（ZRLE 基线 + H264 高动态分流）──
         // 日志实证：ZRLE 无损 Deflate 在大变化场景（视频/滚动/全屏切换）单帧 100-366ms，
@@ -832,7 +837,9 @@ namespace EasyRDP.Server.Wpf
                         || _framesSkipped >= 60
                         || (_sequenceNumber % KeyframeInterval == 0)
                         // 客户端请求的 IDR（解码脱同步恢复）：即使内容无变化也强制关键帧
-                        || _keyframeRequested;
+                        || _keyframeRequested
+                        // D14 修复：切回 ZRLE 后首帧全量（H264 有损与 ZRLE 参考帧基线对齐）
+                        || _forceZrleKeyNext;
 
                     Logger.Debug("Session {0}: calling Encode seq={1} forceKey={2} res={3}x{4} bgraLen={5}",
                         _sessionId, _sequenceNumber, forceKey, frame.Width, frame.Height, frame.Pixels.Length);
@@ -881,6 +888,8 @@ namespace EasyRDP.Server.Wpf
                 // 成功编码后清除关键帧请求标志。刻意放在编码成功之后而非 forceKey 判定处：
                 // 若本次编码失败走 continue，标志保留 → 下一轮继续强制 IDR 重试（恢复优先于节流）。
                 _keyframeRequested = false;
+                // 同样在编码成功后清除 ZRLE 全量标志（若失败保留，下一轮继续全量重建）
+                _forceZrleKeyNext = false;
 
                 // 拷贝完成后像素缓冲不再被引用，释放所有权供下一帧截屏复用
                 lock (_lock) { _captureBufInUse[frame.BufferIndex] = false; }
@@ -1309,6 +1318,9 @@ namespace EasyRDP.Server.Wpf
                 _encoder = _zrleEncoder;
                 _h264Active = false;
                 _h264LowStreak = 0;
+                // 强制下一帧 ZRLE 全量编码：客户端画面基线从 H264（有损）切换到 ZRLE（无损）
+                // 必须重建，否则增量帧基于错误基线产生花屏
+                _forceZrleKeyNext = true;
                 // 切回 ZRLE 流控模式：恢复 50ms 捕获间隔（D15 延迟优化，见 Start 注释）
                 ApplyCaptureInterval(50);
                 Logger.Info("Session {0}: D14 codec switch H264Software -> ZRLE ({1}), res={2}x{3}",

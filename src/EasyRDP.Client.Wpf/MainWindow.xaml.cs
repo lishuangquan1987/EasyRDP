@@ -465,8 +465,10 @@ public partial class MainWindow : Window
         RemoteCursorImage.Stretch = Stretch.Fill;
     }
 
-    /// <summary>计算 RenderImage（Rectangle+ImageBrush）在 Uniform 拉伸下实际渲染的矩形（处理黑边 letterbox）。
-    /// Rectangle 撑满 RenderBorder，画面在 Rectangle 内 Uniform 居中，黑边在 Rectangle 内部。</summary>
+    /// <summary>计算 RenderImage（Rectangle+ImageBrush）在当前缩放模式下实际渲染的矩形。
+    /// Rectangle 撑满 RenderBorder，画面在 Rectangle 内按 Stretch 模式绘制：
+    /// Fit=Uniform 居中留黑边、Stretch=Fill 全矩形无黑边、Actual=None 左上角原始尺寸。
+    /// 黑边始终在 Rectangle 内部，因此 rect.X/Y 即画面相对元素左上角的偏移。</summary>
     private Rect GetRenderImageRect()
     {
         double iw = RenderImage.ActualWidth;
@@ -475,10 +477,21 @@ public partial class MainWindow : Window
         int sh = _vm.RemoteScreenHeight;
         if (iw <= 0 || ih <= 0 || sw <= 0 || sh <= 0)
             return Rect.Empty;
-        double scale = Math.Min(iw / sw, ih / sh);
-        double w = sw * scale;
-        double h = sh * scale;
-        return new Rect((iw - w) / 2, (ih - h) / 2, w, h);
+        switch (_vm.ZoomMode)
+        {
+            case ZoomMode.Stretch:
+                // Fill：无黑边，全矩形拉伸
+                return new Rect(0, 0, iw, ih);
+            case ZoomMode.Actual:
+                // None：左上角原始像素，超出部分裁切（可见区 = min(控件, 屏幕)）
+                return new Rect(0, 0, Math.Min(iw, sw), Math.Min(ih, sh));
+            default:
+                // Uniform：等比缩放，居中留黑边
+                double scale = Math.Min(iw / sw, ih / sh);
+                double w = sw * scale;
+                double h = sh * scale;
+                return new Rect((iw - w) / 2, (ih - h) / 2, w, h);
+        }
     }
 
     /// <summary>隐藏远程光标叠加层并恢复本地系统光标（仅状态切换，避免高频设置 Cursor 导致闪烁）。</summary>
@@ -828,8 +841,10 @@ public partial class MainWindow : Window
     /// <param name="fullscreen">true=进入全屏，false=退出全屏。</param>
     public void SetFullscreenUI(bool fullscreen)
     {
-        TopBar.Visibility = fullscreen ? Visibility.Collapsed : Visibility.Visible;
-        ActionBar.Visibility = fullscreen ? Visibility.Collapsed : Visibility.Visible;
+        // 精简模式：TopBar/ActionBar 常驻隐藏（功能已全部收进悬浮工具条），
+        // 只按全屏状态切换底部状态栏，最大化远程画面区。
+        TopBar.Visibility = Visibility.Collapsed;
+        ActionBar.Visibility = Visibility.Collapsed;
         BottomBar.Visibility = fullscreen ? Visibility.Collapsed : Visibility.Visible;
     }
 
