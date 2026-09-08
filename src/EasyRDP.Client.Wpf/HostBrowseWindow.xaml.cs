@@ -9,17 +9,22 @@ using NLog;
 namespace EasyRDP.Client.Wpf
 {
     /// <summary>
-    /// 浏览窗口（RealVNC Viewer 风格）：显示最近连接缩略图网格。
-    /// 双击卡片直连；右键弹出 连接/删除 菜单。
+    /// 浏览窗口（1:1 复刻 RealVNC Viewer）：菜单栏 File/View/Help +
+    /// 品牌行（logo + 地址输入框 + Sign in）+ 白色 5 列缩略图网格。
+    /// 单击选中（灰高亮），双击直连；右键 连接/重命名/删除。
     /// 连接在独立的新 MainWindow（控制窗口）中打开，本窗口始终保留。
     /// </summary>
     public partial class HostBrowseWindow : Window
     {
         private static readonly Logger Logger = LogManager.GetCurrentClassLogger();
         private readonly RecentConnectionStore _store = new RecentConnectionStore();
+        private RecentConnection _selected;
 
         /// <summary>最近连接列表（DataTemplate 数据源）。</summary>
         public ObservableCollection<RecentConnection> Connections { get; } = new ObservableCollection<RecentConnection>();
+
+        /// <summary>地址输入框文本（绑定到 XAML 地址栏）。</summary>
+        public string AddressText { get; set; } = "";
 
         public HostBrowseWindow()
         {
@@ -35,11 +40,10 @@ namespace EasyRDP.Client.Wpf
             foreach (var r in _store.Load())
             {
                 r.ThumbnailSource = ThumbnailCache.LoadThumbnail(r.Host);
+                r.IsSelected = false;
+                r.IsActive = false;
                 Connections.Add(r);
             }
-            StatusText.Text = Connections.Count > 0
-                ? string.Format("共 {0} 个最近连接", Connections.Count)
-                : "还没有最近连接——在顶部输入主机地址并点 Connect";
         }
 
         /// <summary>解析 "host[:port]" 输入，打开控制窗口并连接。</summary>
@@ -62,30 +66,36 @@ namespace EasyRDP.Client.Wpf
             Logger.Info("HostBrowse: opened control window for {0}:{1}", host, port);
         }
 
-        // ====== 事件 ======
-
-        /// <summary>地址栏 Connect 按钮。</summary>
-        private void ConnectButton_Click(object sender, RoutedEventArgs e)
+        /// <summary>设置卡片选中态（单选，取消其它选中）。</summary>
+        private void SelectCard(RecentConnection rc)
         {
-            ConnectToHost(HostBox.Text);
+            if (_selected != null && !ReferenceEquals(_selected, rc))
+                _selected.IsSelected = false;
+            if (rc != null)
+            {
+                rc.IsSelected = true;
+                _selected = rc;
+            }
         }
 
-        /// <summary>地址栏回车。</summary>
-        protected override void OnKeyDown(KeyEventArgs e)
+        // ====== 事件 ======
+
+        /// <summary>品牌行地址输入框回车连接。</summary>
+        private void HostBox_KeyDown(object sender, KeyEventArgs e)
         {
             if (e.Key == Key.Enter)
             {
                 ConnectToHost(HostBox.Text);
                 e.Handled = true;
-                return;
             }
-            base.OnKeyDown(e);
         }
 
-        /// <summary>卡片单击选择、双击直连。</summary>
+        /// <summary>卡片：单击选中、双击直连。</summary>
         private void Card_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
         {
-            if (e.ClickCount == 2 && sender is Border border && border.DataContext is RecentConnection rc)
+            if (!(sender is Border border) || !(border.DataContext is RecentConnection rc)) return;
+            SelectCard(rc);
+            if (e.ClickCount == 2)
             {
                 ConnectToHost(rc.Host);
                 e.Handled = true;
@@ -99,6 +109,13 @@ namespace EasyRDP.Client.Wpf
                 ConnectToHost(host);
         }
 
+        /// <summary>右键菜单：重命名（占位——当前用 DisplayName，提示即可）。</summary>
+        private void MenuRename_Click(object sender, RoutedEventArgs e)
+        {
+            MessageBox.Show(this, "重命名功能暂未实现（当前版本使用 IP 作为标识）。", "Rename",
+                MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+
         /// <summary>右键菜单：删除最近连接（含缩略图缓存）。</summary>
         private void MenuDelete_Click(object sender, RoutedEventArgs e)
         {
@@ -106,7 +123,39 @@ namespace EasyRDP.Client.Wpf
             _store.Remove(host);
             ThumbnailCache.DeleteThumbnail(host);
             ReloadConnections();
-            StatusText.Text = "已删除 " + host;
+        }
+
+        /// <summary>菜单 File > New Connection：聚焦地址输入框。</summary>
+        private void MenuNewConnection_Click(object sender, RoutedEventArgs e)
+        {
+            HostBox.Focus();
+            HostBox.SelectAll();
+        }
+
+        /// <summary>菜单 File/View > Refresh：重载缩略图列表。</summary>
+        private void MenuRefresh_Click(object sender, RoutedEventArgs e)
+        {
+            ReloadConnections();
+        }
+
+        /// <summary>菜单 File > Exit。</summary>
+        private void MenuExit_Click(object sender, RoutedEventArgs e)
+        {
+            Close();
+        }
+
+        /// <summary>菜单 Help > About。</summary>
+        private void MenuAbout_Click(object sender, RoutedEventArgs e)
+        {
+            MessageBox.Show(this, "EasyRDP Client\nRealVNC Viewer 风格浏览窗口",
+                "About", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+
+        /// <summary>Sign in...（视觉占位，与 RealVNC 布局一致）。</summary>
+        private void SignIn_Click(object sender, RoutedEventArgs e)
+        {
+            MessageBox.Show(this, "账号登录为视觉占位（与 RealVNC 布局一致），后续版本接入。",
+                "Sign in", MessageBoxButton.OK, MessageBoxImage.Information);
         }
 
         /// <summary>从右键菜单的 PlacementTarget 取卡片 DataContext（RecentConnection.Host）。</summary>

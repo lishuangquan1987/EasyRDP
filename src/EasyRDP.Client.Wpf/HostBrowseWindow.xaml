@@ -1,83 +1,114 @@
 <Window x:Class="EasyRDP.Client.Wpf.HostBrowseWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="EasyRDP 最近连接" Height="640" Width="980"
-        MinHeight="400" MinWidth="760"
+        Title="VNC Viewer" Height="720" Width="1200"
+        MinHeight="480" MinWidth="900"
         WindowStartupLocation="CenterScreen"
-        Background="{StaticResource WindowBackgroundBrush}">
-    <Grid>
-        <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="*"/>
-            <RowDefinition Height="Auto"/>
-        </Grid.RowDefinitions>
+        Background="#FFFFFF">
+    <Window.Resources>
+        <!-- 卡片缩略图与 IP 模板（1:1 复刻 RealVNC Viewer 缩略图网格） -->
+        <DataTemplate x:Key="ThumbCardTemplate">
+            <Border x:Name="CardBorder" Width="200" Height="180" Margin="12,10"
+                    Background="White" Cursor="Hand"
+                    MouseLeftButtonDown="Card_MouseLeftButtonDown">
+                <Border.Style>
+                    <Style TargetType="Border">
+                        <Setter Property="Background" Value="White"/>
+                        <Style.Triggers>
+                            <!-- 选中态：灰色高亮 -->
+                            <DataTrigger Binding="{Binding IsSelected}" Value="True">
+                                <Setter Property="Background" Value="#E8F0FE"/>
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </Border.Style>
+                <Border.ContextMenu>
+                    <ContextMenu>
+                        <MenuItem Header="Connect" Click="MenuConnect_Click"/>
+                        <MenuItem Header="Rename" Click="MenuRename_Click"/>
+                        <MenuItem Header="Delete" Click="MenuDelete_Click"/>
+                    </ContextMenu>
+                </Border.ContextMenu>
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+                    <!-- 缩略图（正方形，未加载时占位灰块） -->
+                    <Grid Grid.Row="0" Margin="4">
+                        <Image Source="{Binding ThumbnailSource}" Stretch="UniformToFill"/>
+                        <Border x:Name="ThumbPlaceholder" Background="#EEF1F4">
+                            <Path Data="M0,0 L24,0 L24,16 L0,16 Z" Fill="#B8C2CC" Stretch="Uniform"
+                                  Width="40" Height="40" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                    </Grid>
+                    <!-- IP 地址（居中，卡片底部） -->
+                    <TextBlock Grid.Row="1" Text="{Binding Host}" FontSize="13" Foreground="#263238"
+                               HorizontalAlignment="Center" Margin="0,6,0,8"/>
+                    <!-- 左上角活动状态红点 -->
+                    <Ellipse Width="10" Height="10" Fill="#E4002B"
+                             HorizontalAlignment="Left" VerticalAlignment="Top" Margin="9"
+                             Visibility="{Binding IsActive, Converter={StaticResource BoolToVis}}"/>
+                </Grid>
+            </Border>
+        </DataTemplate>
+    </Window.Resources>
 
-        <!-- 顶部：品牌 + 地址栏 -->
-        <Border Grid.Row="0" Background="{StaticResource ToolbarDarkBrush}" Padding="14,10">
-            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                <TextBlock Text="&#x25CF;" Foreground="{StaticResource AccentBrush}" FontSize="14"
-                           VerticalAlignment="Center" Margin="0,0,8,0"/>
-                <TextBlock Text="EasyRDP" Style="{StaticResource BrandTextStyle}" Margin="0,0,24,0"/>
-                <TextBlock Text="HOST" Style="{StaticResource ToolbarLabelStyle}" Margin="0,0,6,0"/>
-                <TextBox x:Name="HostBox" Width="220"
-                         Style="{StaticResource ToolbarTextBoxStyle}"
-                         ToolTip="输入 IP 或 主机名[:端口]，回车或点 Connect 连接"/>
-                <Button Content="Connect" Style="{StaticResource PrimaryButtonStyle}"
-                        Click="ConnectButton_Click" Margin="6,0,0,0"/>
-            </StackPanel>
+    <DockPanel>
+        <!-- ====== 菜单栏：File / View / Help ====== -->
+        <Menu DockPanel.Dock="Top" Background="#F7F8FA" BorderBrush="#E2E6EA" BorderThickness="0,0,0,1" Height="26">
+            <MenuItem Header="File">
+                <MenuItem Header="New Connection..." Click="MenuNewConnection_Click"/>
+                <MenuItem Header="Refresh Thumbnails" Click="MenuRefresh_Click"/>
+                <Separator/>
+                <MenuItem Header="Exit" Click="MenuExit_Click"/>
+            </MenuItem>
+            <MenuItem Header="View">
+                <MenuItem Header="Refresh" Click="MenuRefresh_Click"/>
+            </MenuItem>
+            <MenuItem Header="Help">
+                <MenuItem Header="About" Click="MenuAbout_Click"/>
+            </MenuItem>
+        </Menu>
+
+        <!-- ====== 品牌行：logo + 地址输入框 + Sign in ====== -->
+        <Border DockPanel.Dock="Top" Background="White" BorderBrush="#E2E6EA" BorderThickness="0,0,0,1" Padding="16,10">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <!-- vnc connect 品牌 -->
+                <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,20,0">
+                    <TextBlock Text="&#x25CF;" Foreground="#E4002B" FontSize="18" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                    <TextBlock FontSize="15" FontWeight="SemiBold" Foreground="#263238">
+                        <Run Text="easyrdp"/><Run Text=" connect" FontWeight="Normal" Foreground="#607D8B"/>
+                    </TextBlock>
+                </StackPanel>
+                <!-- 长地址输入框（蓝色高亮选中 IP） -->
+                <TextBox x:Name="HostBox" Grid.Column="1" Height="30" VerticalContentAlignment="Center"
+                         FontSize="13" Padding="10,0" Margin="0,0,16,0"
+                         Background="#F5F7F9" BorderBrush="#D0D7DE" BorderThickness="1"
+                         KeyDown="HostBox_KeyDown"
+                         Text="{Binding AddressText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                         ToolTip="输入 IP 或 hostname[:port]，回车连接"/>
+                <!-- Sign in...（视觉占位，与 RealVNC 一致） -->
+                <Button Grid.Column="2" Height="30" Padding="12,0" Background="Transparent"
+                        BorderBrush="#D0D7DE" BorderThickness="1" Foreground="#37474F" FontSize="13"
+                        Content="Sign in..." Click="SignIn_Click"/>
+            </Grid>
         </Border>
 
-        <!-- 副标题 -->
-        <Border Grid.Row="1" Background="#F4F6F8" BorderBrush="#DDE3E8" BorderThickness="0,0,0,1" Padding="14,8">
-            <TextBlock Text="最近连接（双击直连，右键更多操作）" FontSize="14" Foreground="#4B5563"/>
-        </Border>
-
-        <!-- 缩略图网格 -->
-        <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto" Padding="20">
-            <ItemsControl x:Name="ConnectionsList">
+        <!-- ====== 主体：白色滚动区，5 列缩略图网格 ====== -->
+        <ScrollViewer VerticalScrollBarVisibility="Auto" Background="White" Padding="8,12">
+            <ItemsControl ItemsSource="{Binding Connections}" ItemTemplate="{StaticResource ThumbCardTemplate}">
                 <ItemsControl.ItemsPanel>
                     <ItemsPanelTemplate>
-                        <WrapPanel Orientation="Horizontal"/>
+                        <UniformGrid Columns="5"/>
                     </ItemsPanelTemplate>
                 </ItemsControl.ItemsPanel>
-                <ItemsControl.ItemTemplate>
-                    <DataTemplate>
-                        <Border Width="220" Height="170" Margin="0,0,20,20" Background="White"
-                                BorderBrush="#DDE3E8" BorderThickness="1" CornerRadius="8"
-                                Cursor="Hand"
-                                MouseLeftButtonDown="Card_MouseLeftButtonDown">
-                            <Border.ContextMenu>
-                                <ContextMenu>
-                                    <MenuItem Header="连接" Click="MenuConnect_Click"/>
-                                    <MenuItem Header="删除" Click="MenuDelete_Click"/>
-                                </ContextMenu>
-                            </Border.ContextMenu>
-                            <Grid>
-                                <Image Source="{Binding ThumbnailSource}" Stretch="UniformToFill"
-                                       VerticalAlignment="Top" Height="128"/>
-                                <Border Background="#F4F6F8" Height="128" VerticalAlignment="Top"
-                                        BorderBrush="#DDE3E8" BorderThickness="0,0,0,1">
-                                    <Path Data="M0,0 L24,0 L24,16 L0,16 Z" Fill="#9CA3AF" Stretch="Uniform"
-                                          Width="48" Height="48" VerticalAlignment="Center" HorizontalAlignment="Center"/>
-                                </Border>
-                                <StackPanel VerticalAlignment="Bottom" Margin="10,0,10,8">
-                                    <TextBlock Text="{Binding Host}" FontSize="14" FontWeight="SemiBold"
-                                               Foreground="#1F2937" TextTrimming="CharacterEllipsis"/>
-                                    <TextBlock FontSize="11" Foreground="#9CA3AF">
-                                        <Run Text="最后连接: "/><Run Text="{Binding LastConnectedText}"/>
-                                    </TextBlock>
-                                </StackPanel>
-                            </Grid>
-                        </Border>
-                    </DataTemplate>
-                </ItemsControl.ItemTemplate>
             </ItemsControl>
         </ScrollViewer>
-
-        <!-- 底部状态 -->
-        <Border Grid.Row="3" Background="#F4F6F8" BorderBrush="#DDE3E8" BorderThickness="0,1,0,0" Padding="14,6">
-            <TextBlock x:Name="StatusText" FontSize="12" Foreground="#6B7280"/>
-        </Border>
-    </Grid>
+    </DockPanel>
 </Window>
