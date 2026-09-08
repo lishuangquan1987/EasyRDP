@@ -110,7 +110,11 @@ namespace EasyRDP.Server.Wpf
         private const int DownscaleStreakLimit = 10;  // 连续 10 帧编码耗时超标 → 降一档（弱机快速降档，缩短 1~2 FPS 的持续期）
         private const int UpscaleStreakLimit = 45;    // 连续 45 帧编码耗时充裕 → 升一档（升档保守，避免降/升档振荡）
         private const double DownscaleThresholdMs = 100.0;  // 编码耗时 > 100ms 视为超标
-        private const double UpscaleThresholdMs = 60.0;     // 编码耗时 < 60ms 视为充裕
+        // 升档阈值 30ms：D14 混合编码下 H264 恒定 ~35ms——若阈值 60，H264 模式
+        // 会触发升档回 2560 全分辨率 → 编码又超 100ms → 再降档，形成 1920↔2560
+        // 振荡（日志实证：21:15:33 降、21:15:55 升），每次客户端重建 bitmap+解码器。
+        // 30ms 要求"全分辨率下动态帧也很快"（ZRLE 静态快速场景）才恢复全分辨率。
+        private const double UpscaleThresholdMs = 30.0;     // 编码耗时 < 30ms 视为充裕
         // 码率档位（bps）：默认 15Mbps，发送瓶颈/高负载时逐级下调
         private static readonly int[] BitrateSteps = new int[]
         {
@@ -192,9 +196,10 @@ namespace EasyRDP.Server.Wpf
         private int _h264LowStreak;              // 连续低变化帧数（触发切回 ZRLE）
         private int _h264FramesEncoded;          // H264 模式已编码帧数（诊断）
         private bool _h264Allowed;               // 混合模式开关（协商 Zrle 且本机 H264Software 可用）
-        // 变化瓦片数阈值：2K 全屏 920 瓦片，>200 瓦片(~22%) 的帧 ZRLE 实测 >180ms，
-        // 此时 H264 有损编码更快且体积更小；<60 瓦片时 ZRLE 增量更快且无损。
-        private const int H264HighChangeTiles = 200;
+        // 变化瓦片数阈值：2K 全屏 920 瓦片。120 瓦片(~13%) 的帧 ZRLE 实测已 >100ms，
+        // 切 H264（恒定 ~35ms）明显更优；旧值 200 使 60-200 瓦片的中变化帧滞留
+        // ZRLE（100-150ms），拖低整体帧率（日志实证：80-150ms 帧占比 14%）。
+        private const int H264HighChangeTiles = 120;
         private const int H264LowChangeTiles = 60;
         // 连续 3 帧高变化才切 H264（避免瞬时大变化误切）；连续 30 帧低变化才切回
         // （保守防振荡；H264 模式下帧率 15-20FPS，30 帧 ≈ 1.5-2s 的无损恢复期）。

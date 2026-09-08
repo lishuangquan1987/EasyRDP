@@ -1021,7 +1021,13 @@ namespace EasyRDP.Client.Wpf
                         // 服务端等请求才编码发送 → 帧率 = 客户端消费能力，不积压不丢帧。
                         if (_flowControlEnabled)
                         {
-                            bool hasChanges = frame.DirtyRects != null && frame.DirtyRects.Length > 0;
+                            // D14 修复（FPS 主瓶颈）：DirtyRects==null 是 H264 全帧渲染帧
+                            // （服务端实际编码了新内容），渲染完必须立即请求下一帧。
+                            // 旧判定把 null 当"无变化"→ H264 模式只靠 250ms 心跳驱动，
+                            // 帧率被锁死在 ~4 FPS（日志实证：H264 编码仅 35ms/帧，
+                            // 帧间隔却 250-300ms，等于心跳周期）。
+                            // ZRLE 空帧（Length==0，4 字节保活帧）仍走心跳，不空转打满。
+                            bool hasChanges = frame.DirtyRects == null || frame.DirtyRects.Length > 0;
                             if (hasChanges)
                             {
                                 SendFramebufferUpdateRequest();

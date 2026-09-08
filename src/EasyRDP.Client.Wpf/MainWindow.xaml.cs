@@ -117,6 +117,23 @@ public partial class MainWindow : Window
     private int _sizeDiagCounter;
     private bool _hasLocalCursorPos;
 
+    // ── 远程光标"服务端旁操作"跟随检测 ──
+    // 本地锚定模式下服务端回显位置被忽略（零延迟优化）；但服务端旁有人物理
+    // 操作鼠标时，客户端叠加层钉在本地鼠标处不动 → "看不到远程鼠标"。
+    // 检测信号：本地鼠标停手超过 LocalIdleBeforeFollowMs 且回显位置连续
+    // EchoMoveStreakLimit 次移动 → 判定远程有人在动光标，切回"跟随服务端回显"。
+    // 本地鼠标一动立即恢复本地锚定（零延迟优先）。
+    private int _prevEchoX, _prevEchoY;            // 上次服务端回显位置（内容坐标）
+    private int _echoMoveStreak;                   // 回显连续移动计数
+    private bool _echoTrackingStarted;             // 已有上一帧回显可比较
+    private long _lastLocalMouseMoveTicks;         // 本地鼠标最近移动时刻（Stopwatch ticks）
+    /// <summary>回显单次移动判定阈值（|dx|+|dy| 合并量，内容坐标像素）。</summary>
+    private const int EchoMoveThresholdPx = 2;
+    /// <summary>连续移动多少次判定为"服务端有人在操作光标"（60Hz 回显下约 66ms）。</summary>
+    private const int EchoMoveStreakLimit = 4;
+    /// <summary>本地鼠标停手多久后才允许切换跟随（防本地操作时回显追赶造成误切/闪烁）。</summary>
+    private const int LocalIdleBeforeFollowMs = 300;
+
     /// <summary>当前是否处于全屏模式（供 ViewModel/快捷键判断）。</summary>
     public bool IsFullscreenMode
     {
@@ -276,6 +293,34 @@ public partial class MainWindow : Window
             // 旧实现把赋值放在回退分支之后，远程光标不可用时 lastEcho 恒为 (0,0)。
             _lastRemoteCursorX = cursor.X;
             _lastRemoteCursorY = cursor.Y;
+            // "服务端旁操作"跟随检测：本地锚定模式下，若本地鼠标已停手且服务端
+            // 回显位置连续多次移动，判定远程有人在物理操作光标 → 切回跟随模式。
+            // 信号可靠性：本地操作时回显是"追赶本地位置"的滞后序列（已由
+            // LocalIdleBeforeFollowMs 排除）；服务端旁操作时回显独立移动。
+            if (_hasLocalCursorPos)
+            {
+                if (_echoTrackingStarted
+                    && Math.Abs(cursor.X - _prevEchoX) + Math.Abs(cursor.Y - _prevEchoY) > EchoMoveThresholdPx
+                    && (System.Diagnostics.Stopwatch.GetTimestamp() - _lastLocalMouseMoveTicks) * 1000
+                        >= LocalIdleBeforeFollowMs * System.Diagnostics.Stopwatch.Frequency)
+                {
+                    _echoMoveStreak++;
+                    if (_echoMoveStreak >= EchoMoveStreakLimit)
+                    {
+                        _hasLocalCursorPos = false;
+                        _echoMoveStreak = 0;
+                        _echoTrackingStarted = false;
+                        Logger.Info("Remote cursor follow mode: server-side physical cursor movement detected");
+                    }
+                }
+                else
+                {
+                    _echoMoveStreak = 0;
+                }
+                _prevEchoX = cursor.X;
+                _prevEchoY = cursor.Y;
+                _echoTrackingStarted = true;
+            }
             _remoteCursorVisible = cursor.Visible;
             _cursorHotX = cursor.HotX;
             _cursorHotY = cursor.HotY;
@@ -668,6 +713,9 @@ public partial class MainWindow : Window
     {
         var pos = e.GetPosition(RenderImage);
         _hasLocalCursorPos = true;
+        // 记录本地鼠标最近移动时刻：供"服务端旁操作"跟随检测排除本地操作期间
+        // 的回显追赶序列（本地停手 LocalIdleBeforeFollowMs 后才允许切跟随）。
+        _lastLocalMouseMoveTicks = System.Diagnostics.Stopwatch.GetTimestamp();
         _localCursorX = pos.X;
         _localCursorY = pos.Y;
         // 尺寸诊断日志（每 50 次）：Border/Rectangle/bitmap/DPI 四组尺寸对照。
