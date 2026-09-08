@@ -1130,5 +1130,30 @@ namespace EasyRDP.Client.Wpf
                 Logger.Warn(ex, "RequestDecoderKeyframe send failed");
             }
         }
+
+        /// <summary>
+        /// 捕获当前帧像素的只读副本（用于缩略图）。线程安全：从 FrameBuffer 借读帧并
+        /// 立即复制到托管数组，不阻塞渲染循环。
+        /// </summary>
+        public bool TryCaptureFrame(out int width, out int height, out byte[] bgra)
+        {
+            width = 0; height = 0; bgra = null;
+            if (_frameBuffer == null) return false;
+            ReadFrameRef frame;
+            if (!_frameBuffer.TryBorrowReadFrame(out frame)) return false;
+            try
+            {
+                if (frame.Pixels == null || frame.Pixels.Length == 0) return false;
+                width = frame.Width;
+                height = frame.Height;
+                bgra = new byte[frame.Pixels.Length];
+                System.Buffer.BlockCopy(frame.Pixels, 0, bgra, 0, bgra.Length);
+                return true;
+            }
+            finally
+            {
+                _frameBuffer.ReleaseReadFrame();
+            }
+        }
     }
 }

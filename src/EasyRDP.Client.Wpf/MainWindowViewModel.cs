@@ -117,6 +117,7 @@ namespace EasyRDP.Client.Wpf
 
         // ====== 多服务器配置保存 ======
         private readonly ConnectionProfileStore _profileStore;
+        private readonly RecentConnectionStore _recentStore;
         private ServerProfile? _selectedProfile;
         private string _profileName = "";
 
@@ -146,6 +147,7 @@ namespace EasyRDP.Client.Wpf
 
             // 启动时恢复已保存的多服务器配置
             _profileStore = new ConnectionProfileStore();
+            _recentStore = new RecentConnectionStore();
             System.Collections.Generic.List<ServerProfile> saved = _profileStore.Load(out string lastProfileName);
             foreach (var p in saved)
                 Profiles.Add(p);
@@ -155,7 +157,7 @@ namespace EasyRDP.Client.Wpf
                 SelectedProfile = last ?? Profiles[0];
             }
 
-            // 初始化最近连接列表（从 Profiles 填充，后续可持久化）
+            // 初始化最近连接列表（从本地缓存加载；连接成功后更新）
             RefreshRecentConnections();
 
             // 启动 aly 自动更新后台检查（检查 → 下载 → 应用）
@@ -682,27 +684,72 @@ namespace EasyRDP.Client.Wpf
             return null;
         }
 
-        /// <summary>刷新最近连接列表：从 Profiles 取 host，并把当前连接 host 置顶。</summary>
+        /// <summary>刷新最近连接列表：从本地 JSON 缓存加载，并把当前连接 host 置顶。</summary>
         private void RefreshRecentConnections()
         {
             RecentConnections.Clear();
+            var list = _recentStore != null ? _recentStore.Load() : new System.Collections.Generic.List<RecentConnection>();
             // 当前已连接：把当前 Host 放在第一位
             if (IsConnected && !string.IsNullOrWhiteSpace(Host))
-                RecentConnections.Add(new RecentConnection { Host = Host.Trim(), DisplayName = Host.Trim() });
-            // 从已保存 Profiles 去重添加（排除当前 Host）
-            var seen = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            if (!string.IsNullOrWhiteSpace(Host))
-                seen.Add(Host.Trim());
-            foreach (var p in Profiles)
             {
-                if (p == null || string.IsNullOrWhiteSpace(p.Host)) continue;
-                string h = p.Host.Trim();
-                if (!seen.Add(h)) continue;
-                RecentConnections.Add(new RecentConnection { Host = h, DisplayName = p.Name ?? h });
+                var current = list.FirstOrDefault(r =>
+                    string.Equals(r.Host, Host.Trim(), StringComparison.OrdinalIgnoreCase));
+                if (current != null)
+                {
+                    list.Remove(current);
+                    current.ThumbnailSource = ThumbnailCache.LoadThumbnail(current.Host);
+                    RecentConnections.Add(current);
+                }
+                else
+                {
+                    RecentConnections.Add(new RecentConnection
+                    {
+                        Host = Host.Trim(),
+                        DisplayName = SelectedProfile?.Name ?? Host.Trim(),
+                        LastConnectedUtc = DateTime.UtcNow,
+                        ThumbnailSource = ThumbnailCache.LoadThumbnail(Host.Trim())
+                    });
+                }
+            }
+            foreach (var r in list.OrderByDescending(x => x.LastConnectedUtc))
+            {
+                r.ThumbnailSource = ThumbnailCache.LoadThumbnail(r.Host);
+                RecentConnections.Add(r);
             }
             // 没有任何记录时给一个示例占位（连接过 Profiles 后消失）
             if (RecentConnections.Count == 0)
                 RecentConnections.Add(new RecentConnection { Host = "172.25.2.5", DisplayName = "Example" });
+        }
+
+        /// <summary>
+        /// 捕获当前远程帧并保存为缩略图，同时更新 recent.json 中的 ThumbnailPath。
+        /// 在连接成功后延迟调用，避免捕获握手/黑屏帧。
+        /// </summary>
+        private void SaveConnectionThumbnail()
+        {
+            try
+            {
+                if (_streamSession == null || string.IsNullOrWhiteSpace(Host)) return;
+                int w, h;
+                byte[] bgra;
+                if (!_streamSession.TryCaptureFrame(out w, out h, out bgra)) return;
+                string path = ThumbnailCache.SaveThumbnail(bgra, w, h, Host.Trim());
+                if (path == null) return;
+                var list = _recentStore.Load();
+                var item = list.FirstOrDefault(r =>
+                    string.Equals(r.Host, Host.Trim(), StringComparison.OrdinalIgnoreCase));
+                if (item != null)
+                {
+                    item.ThumbnailPath = path;
+                    _recentStore.Save(list);
+                    _dispatcher.Invoke(() => RefreshRecentConnections());
+                    Logger.Info("Connection thumbnail updated for {0}: {1}", Host.Trim(), path);
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn(ex, "Save connection thumbnail failed");
+            }
         }
 
         /// <summary>持久化配置列表与最后选择的配置名。</summary>
@@ -865,7 +912,11 @@ namespace EasyRDP.Client.Wpf
                 handshakeRes.Codec, handshakeRes.ScreenWidth, handshakeRes.ScreenHeight);
             _running = true;
             IsConnected = true;
-            RefreshRecentConnections(); // 连接成功后刷新最近连接列表（把当前 host 置顶）
+            // 记录最近连接（持久化 + 主页置顶）
+            _recentStore.Touch(Host, SelectedProfile?.Name);
+            RefreshRecentConnections();
+            // 3 秒后捕获一帧保存为缩略图（等画面稳定）
+            Task.Run(async () => { await Task.Delay(3000); SaveConnectionThumbnail(); });
             // 订阅服务端诊断信息（连接详情面板数据源），并立即发送请求。
             // 服务端响应异步到达，面板刷新定时器读取 ServerDiagnosticInfo。
             _streamSession.DiagnosticInfoReceived += OnDiagnosticInfoReceived;

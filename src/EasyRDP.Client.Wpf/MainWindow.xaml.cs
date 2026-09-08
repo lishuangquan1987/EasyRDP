@@ -12,13 +12,6 @@ using NLog;
 
 namespace EasyRDP.Client.Wpf;
 
-/// <summary>最近连接项（主页缩略图网格数据）。</summary>
-public class RecentConnection
-{
-    public string Host { get; set; }
-    public string DisplayName { get; set; }
-}
-
 /// <summary>
 /// 客户端主窗口（View 层）。仅负责初始化 ViewModel 和路由鼠标事件。
 /// 所有业务逻辑在 MainWindowViewModel 中。

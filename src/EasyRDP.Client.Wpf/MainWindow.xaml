@@ -180,7 +180,11 @@
                                     BorderBrush="#DDE3E8" BorderThickness="1" CornerRadius="8"
                                     MouseLeftButtonUp="RecentConnection_Click">
                                 <Grid>
-                                    <Border Background="#F4F6F8" Height="120" VerticalAlignment="Top"
+                                    <!-- 缩略图：存在时覆盖占位区 -->
+                                    <Image Source="{Binding ThumbnailSource}" Stretch="UniformToFill"
+                                           VerticalAlignment="Top" Height="120"/>
+                                    <!-- 无缩略图时显示的占位 -->
+                                    <Border x:Name="PlaceholderBorder" Background="#F4F6F8" Height="120" VerticalAlignment="Top"
                                             BorderBrush="#DDE3E8" BorderThickness="0,0,0,1">
                                         <Path Data="M0,0 L24,0 L24,16 L0,16 Z" Fill="#9CA3AF" Stretch="Uniform"
                                               Width="48" Height="48" VerticalAlignment="Center" HorizontalAlignment="Center"/>
