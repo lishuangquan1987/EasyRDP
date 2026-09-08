@@ -587,7 +587,10 @@ namespace EasyRDP.Server.Wpf
                 // 帧率由客户端消费能力决定，避免客户端解码/渲染积压导致延迟膨胀。
                 // 首帧（_framesEncoded==0）跳过等待直接推送：客户端在收到首帧前无帧可渲染、
                 // 不会发请求，若等待将造成永久黑屏（握手成功后客户端等首帧、服务端等请求）。
-                if (_flowControlEnabled && !_clientRequestPending
+                // D14 推送模式：H264 激活期间跳过流控等待，服务端主动全速推送
+                // （请求-响应往返 ~150ms/帧 是上一版 H264 模式 5 FPS 的结构性上限，
+                // 对标 TeamViewer：动态画面服务端推送 + 客户端单槽信箱丢旧保新）。
+                if (_flowControlEnabled && !_h264Active && !_clientRequestPending
                     && Interlocked.Read(ref _framesEncoded) > 0)
                 {
                     // 高频诊断日志降频：仅首帧/每 100 帧打印（每帧落盘 IO 会拖慢编码线程导致卡顿）
@@ -641,7 +644,7 @@ namespace EasyRDP.Server.Wpf
                 {
                     if (!_stopping && _frameQueue.Count > 0)
                     {
-                        if (_flowControlEnabled)
+                        if (_flowControlEnabled && !_h264Active)
                         {
                             // 流控模式：丢弃旧帧、保留最新帧（请求不能浪费）
                             int dropped = 0;
@@ -1187,6 +1190,9 @@ namespace EasyRDP.Server.Wpf
                 _encoder = _h264Encoder;
                 _h264LowStreak = 0;
                 _h264FramesEncoded = 0;
+                // D14 推送模式配套：H264 主动推送需要 16ms 捕获间隔供帧
+                // （ZRLE 流控模式为省弱机 CPU 用 100ms，推送模式下会卡 10 FPS 上限）。
+                ApplyCaptureInterval(16);
                 Logger.Info("Session {0}: D14 codec switch ZRLE -> H264Software (high change streak), res={1}x{2} bitrate={3}",
                     _sessionId, _lastW, _lastH, TargetBitrate);
                 return true;
@@ -1218,6 +1224,8 @@ namespace EasyRDP.Server.Wpf
                 _encoder = _zrleEncoder;
                 _h264Active = false;
                 _h264LowStreak = 0;
+                // 切回 ZRLE 流控模式：恢复 100ms 捕获间隔（省弱机 CPU，客户端请求驱动）
+                ApplyCaptureInterval(100);
                 Logger.Info("Session {0}: D14 codec switch H264Software -> ZRLE ({1}), res={2}x{3}",
                     _sessionId, reason, _lastW, _lastH);
             }
@@ -1276,6 +1284,20 @@ namespace EasyRDP.Server.Wpf
             var captureImpl = _captureService as CaptureService;
             if (captureImpl != null)
                 captureImpl.SetCaptureMaxWidth(_adaptiveMaxEncodeWidth);
+        }
+
+        /// <summary>
+        /// D14 推送模式配套：按当前编码模式调整捕获间隔。
+        /// H264 推送期 16ms（供帧 60fps 上限，编码消费不掉由队列丢旧保新）；
+        /// ZRLE 流控期 100ms（客户端请求驱动，省弱机 CPU）。
+        /// 注意 CaptureService 为全局单例，多会话下此设置影响所有会话
+        /// （弱机单会话为目标场景，与 Start/Stop 的间隔管理一致）。
+        /// </summary>
+        private void ApplyCaptureInterval(int intervalMs)
+        {
+            var captureImpl = _captureService as CaptureService;
+            if (captureImpl != null)
+                captureImpl.FrameIntervalMs = intervalMs;
         }
 
         /// <summary>
