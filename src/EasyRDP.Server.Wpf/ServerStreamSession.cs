@@ -202,6 +202,12 @@ namespace EasyRDP.Server.Wpf
         // 正常 10-17ms）→ 更慢 → D11 误降档 → 模糊。
         private long _lastPageFaultCount = -1;   // 上次采样的进程硬页错误计数（-1=未初始化）
         private int _noDownscaleLogCounter;      // 混合模式禁用降档后的观测日志限频计数
+        // 本帧实际使用的编码器。切换帧标签修正：EncodeFrameHybrid 在本帧编码完成后
+        // 才执行 ZRLE↔H264 切换（_encoder 改指新编码器），若发送时取 _encoder.Codec，
+        // 切换帧的数据（旧编码器输出）会被打上新编码器标签 → 客户端选错解码器 →
+        // 解码失败/花屏（日志实证：三次 Decode failed 全部精确落在切换瞬间，
+        // ZRLE unpack 把 H264 NAL 头解析成 region count=16777216）。
+        private CodecId _lastEncodedCodec;
         private bool _h264Allowed;               // 混合模式开关（协商 Zrle 且本机 H264Software 可用）
         // 变化瓦片数阈值：2K 全屏 920 瓦片。120 瓦片(~13%) 的帧 ZRLE 实测已 >100ms，
         // 切 H264（恒定 ~35ms）明显更优；旧值 200 使 60-200 瓦片的中变化帧滞留
@@ -1081,8 +1087,9 @@ namespace EasyRDP.Server.Wpf
                     ContentWidth = _contentW,
                     ContentHeight = _contentH,
                     IsKeyframe = result.IsKeyframe,
-                    // D14：携带本帧实际编码器，客户端按帧头选择解码器
-                    Codec = _encoder != null ? _encoder.Codec : _codec,
+                    // D14：携带本帧实际编码器（切换帧标签修正——编码后才切换，
+                    // _lastEncodedCodec 在各编码分支 Encode 调用前记录，与数据严格一致）
+                    Codec = _lastEncodedCodec,
                     SequenceNumber = _sequenceNumber++,
                     Data = result.Data
                 };
@@ -1159,6 +1166,7 @@ namespace EasyRDP.Server.Wpf
             // 混合未启用（协商非 Zrle / 本机无 H264Software）：纯协商编码器路径（原行为）
             if (!_h264Allowed || _encoder == null)
             {
+                _lastEncodedCodec = _encoder.Codec;
                 EncodedFrame plain = _encoder.Encode(pixels, forceKey);
                 return plain;
             }
@@ -1166,6 +1174,8 @@ namespace EasyRDP.Server.Wpf
             if (_h264Active)
             {
                 // ── H264 模式：有损全帧编码 + 帧间变化监测 ──
+                // 先记录本帧编码器（编码后才可能切换，切换只影响下一帧的标签）
+                _lastEncodedCodec = CodecId.H264Software;
                 EncodedFrame r = _h264Encoder.Encode(pixels, forceKey || _h264ForceIdrNext);
                 _h264ForceIdrNext = false;
                 bool ok = r.Data != null && r.Data.Length > 0;
@@ -1215,6 +1225,8 @@ namespace EasyRDP.Server.Wpf
             }
 
             // ── ZRLE 模式：无损增量编码 + 高变化检测 ──
+            // 先记录本帧编码器（编码后才可能激活 H264，激活只影响下一帧的标签）
+            _lastEncodedCodec = CodecId.Zrle;
             EncodedFrame zr = _zrleEncoder.Encode(pixels, forceKey);
             if (zr.Data != null && zr.Data.Length > 0 && zr.ChangedTileCount >= H264HighChangeTiles)
             {
