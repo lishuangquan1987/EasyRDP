@@ -110,11 +110,10 @@ namespace EasyRDP.Server.Wpf
         private const int DownscaleStreakLimit = 10;  // 连续 10 帧编码耗时超标 → 降一档（弱机快速降档，缩短 1~2 FPS 的持续期）
         private const int UpscaleStreakLimit = 45;    // 连续 45 帧编码耗时充裕 → 升一档（升档保守，避免降/升档振荡）
         private const double DownscaleThresholdMs = 100.0;  // 编码耗时 > 100ms 视为超标
-        // 升档阈值 30ms：D14 混合编码下 H264 恒定 ~35ms——若阈值 60，H264 模式
-        // 会触发升档回 2560 全分辨率 → 编码又超 100ms → 再降档，形成 1920↔2560
-        // 振荡（日志实证：21:15:33 降、21:15:55 升），每次客户端重建 bitmap+解码器。
-        // 30ms 要求"全分辨率下动态帧也很快"（ZRLE 静态快速场景）才恢复全分辨率。
-        private const double UpscaleThresholdMs = 30.0;     // 编码耗时 < 30ms 视为充裕
+        // 升档阈值 60ms（配合窗口内 ≥80% 帧低于此值才升档的占比判定）：
+        // 要求 H264 在更高分辨率下"持续充裕"才恢复，防 CPU 抖动下的降/升档振荡
+        // （日志实证：22:32:40 降 1280 → 22:33:01 又升回 1920，21s 内往返）。
+        private const double UpscaleThresholdMs = 60.0;     // 编码耗时 < 60ms 视为充裕
         // 码率档位（bps）：默认 15Mbps，发送瓶颈/高负载时逐级下调
         private static readonly int[] BitrateSteps = new int[]
         {
@@ -195,6 +194,7 @@ namespace EasyRDP.Server.Wpf
         private int _h264HighStreak;             // 连续高变化帧数（触发切 H264）
         private int _h264LowStreak;              // 连续低变化帧数（触发切回 ZRLE）
         private int _h264FramesEncoded;          // H264 模式已编码帧数（诊断）
+        private int _h264MeasureCounter;         // D15：帧间变化测量计数（隔帧测量用）
         private bool _h264Allowed;               // 混合模式开关（协商 Zrle 且本机 H264Software 可用）
         // 变化瓦片数阈值：2K 全屏 920 瓦片。120 瓦片(~13%) 的帧 ZRLE 实测已 >100ms，
         // 切 H264（恒定 ~35ms）明显更优；旧值 200 使 60-200 瓦片的中变化帧滞留
@@ -923,20 +923,29 @@ namespace EasyRDP.Server.Wpf
                             FrameDelayMs = Math.Max(FrameDelayMs - 5, 16);
 
                         // D11 档位判定：只用 H264 动态帧窗口（入队处注释）。
-                        // 窗口未满 30 帧时不判定、保持当前档位——不再回退全帧均值，
-                        // 全帧均值被 ZRLE 慢帧污染正是旧降档误触发的根源。
+                        // D15 抗抖动：判定不用滑动均值——虚机 CPU 调度突发会把 conv/enc
+                        // 同步拖慢 3 倍（日志实证：静止 P 帧偶尔 160-300ms），一串抖动帧
+                        // 就能把 30 帧均值顶过 100ms 触发误降档，随后又升档形成振荡。
+                        // 改用占比判定：>降档阈值的帧占比 ≥60% 才算"持续不足"（降档）；
+                        // <升档阈值的帧占比 ≥80% 才算"持续充裕"（升档）。突发抖动被窗口吸收。
                         double h264AvgMs = -1;
                         if (_dynEncodeTimes.Count >= AdaptiveWindow)
                         {
+                            long thresholdTicks = (long)(DownscaleThresholdMs * Stopwatch.Frequency / 1000);
+                            long upTicks = (long)(UpscaleThresholdMs * Stopwatch.Frequency / 1000);
+                            int overCount = 0, underCount = 0;
+                            foreach (long t in _dynEncodeTimes)
+                            {
+                                if (t > thresholdTicks) overCount++;
+                                else if (t < upTicks) underCount++;
+                            }
                             h264AvgMs = _dynEncodeSum * 1000.0 / Stopwatch.Frequency / _dynEncodeTimes.Count;
-                            // 分辨率档位自适应：持续超标降档（弱机降像素量提速），
-                            // 持续充裕升档回全分辨率。档位变化触发编码器重建+强制关键帧。
-                            if (h264AvgMs > DownscaleThresholdMs)
+                            if (overCount * 10 >= _dynEncodeTimes.Count * 6)
                             {
                                 _downscaleStreak++;
                                 _upscaleStreak = 0;
                             }
-                            else if (h264AvgMs < UpscaleThresholdMs)
+                            else if (underCount * 10 >= _dynEncodeTimes.Count * 8)
                             {
                                 _upscaleStreak++;
                                 _downscaleStreak = 0;
@@ -1125,26 +1134,39 @@ namespace EasyRDP.Server.Wpf
                 if (ok)
                 {
                     _h264FramesEncoded++;
-                    // 帧间变化测量（同时推进 ZRLE 参考帧，为切回做准备）
-                    int changed = _zrleEncoder != null ? _zrleEncoder.MeasureChangedTiles(pixels) : -1;
-                    r.ChangedTileCount = changed;
-                    if (changed >= 0 && changed < H264LowChangeTiles)
+                    // 帧间变化测量（同时推进 ZRLE 参考帧，为切回做准备）。
+                    // D15：隔帧测量——1080p 下全帧瓦片比较 ~15-20ms，每帧测量推高
+                    // encodeMs 基线（中位 57ms 中约 1/3 是本测量）；切回判定是趋势性
+                    // 的（连续 30 帧低变化），隔帧测量延迟可忽略。未测量帧
+                    // ChangedTileCount=-1（不入 D11 动态窗口，语义"未统计"）。
+                    _h264MeasureCounter++;
+                    int changed;
+                    if (_h264MeasureCounter % 2 == 0 && _zrleEncoder != null)
                     {
-                        _h264LowStreak++;
-                        _h264HighStreak = 0;
-                        if (_h264LowStreak >= H264SwitchOutStreak)
+                        changed = _zrleEncoder.MeasureChangedTiles(pixels);
+                        if (changed >= 0 && changed < H264LowChangeTiles)
                         {
-                            SwitchToZrle("low change streak (" + changed + " tiles)");
+                            _h264LowStreak++;
+                            _h264HighStreak = 0;
+                            if (_h264LowStreak >= H264SwitchOutStreak)
+                            {
+                                SwitchToZrle("low change streak (" + changed + " tiles)");
+                            }
                         }
+                        else
+                        {
+                            _h264LowStreak = 0;
+                        }
+                        // H264 模式编码统计：每 100 帧（低频诊断，验证 H264 模式收益）
+                        if (_h264FramesEncoded % 100 == 0)
+                            Logger.Info("Session {0}: D14 H264 mode progress: frames={1} lastSeq={2} outLen={3} changedTiles={4}",
+                                _sessionId, _h264FramesEncoded, _sequenceNumber, r.Data.Length, changed);
                     }
                     else
                     {
-                        _h264LowStreak = 0;
+                        changed = -1; // 未测量帧：不更新回落 streak（保持上次趋势）
                     }
-                    // H264 模式编码统计：每 100 帧（低频诊断，验证 H264 模式收益）
-                    if (_h264FramesEncoded % 100 == 0)
-                        Logger.Info("Session {0}: D14 H264 mode progress: frames={1} lastSeq={2} outLen={3} changedTiles={4}",
-                            _sessionId, _h264FramesEncoded, _sequenceNumber, r.Data.Length, changed);
+                    r.ChangedTileCount = changed;
                 }
                 else
                 {
