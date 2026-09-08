@@ -24,5 +24,17 @@ namespace EasyRDP.Client.Wpf
 
         /// <summary>缩略图图像源（运行时加载，不序列化）。</summary>
         public BitmapImage ThumbnailSource { get; set; }
+
+        /// <summary>最后连接时间本地化文本（UI 显示）。</summary>
+        public string LastConnectedText
+        {
+            get
+            {
+                if (LastConnectedUtc == default(DateTime)) return "未知";
+                DateTime local = LastConnectedUtc.ToLocalTime();
+                if (local.Date == DateTime.Today) return local.ToString("HH:mm");
+                return local.ToString("MM-dd HH:mm");
+            }
+        }
     }
 }

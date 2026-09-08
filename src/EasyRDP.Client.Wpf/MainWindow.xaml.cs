@@ -757,7 +757,9 @@ public partial class MainWindow : Window
         // Esc 退出全屏（仅在已全屏时生效；非全屏时 Esc 不拦截，正常转发输入）
         if (e.Key == Key.Escape)
         {
-            var window = Application.Current?.MainWindow as MainWindow;
+            // 注意：双窗口架构下 Application.Current.MainWindow 是浏览窗口，
+            // 必须用 Window.GetWindow(this) 取当前控制窗口自身。
+            var window = Window.GetWindow(this) as MainWindow;
             if (window != null && window.IsFullscreenMode)
             {
                 _vm.ToggleFullscreen();
@@ -800,6 +802,18 @@ public partial class MainWindow : Window
         TopBar.Visibility = fullscreen ? Visibility.Collapsed : Visibility.Visible;
         ActionBar.Visibility = fullscreen ? Visibility.Collapsed : Visibility.Visible;
         BottomBar.Visibility = fullscreen ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    /// <summary>由浏览窗口调用：设置连接目标并立即发起连接（双窗口架构入口）。</summary>
+    public void ConnectTo(string host, string port)
+    {
+        if (_vm == null) return;
+        if (!string.IsNullOrWhiteSpace(host))
+            _vm.Host = host.Trim();
+        if (!string.IsNullOrWhiteSpace(port))
+            _vm.Port = port.Trim();
+        if (_vm.ConnectCommand.CanExecute(null))
+            _vm.ConnectCommand.Execute(null);
     }
 
     /// <summary>主页最近连接卡片双击/点击：把 host 填入输入框并触发连接。</summary>

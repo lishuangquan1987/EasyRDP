@@ -104,5 +104,21 @@ namespace EasyRDP.Client.Wpf
                 return null;
             }
         }
+
+        /// <summary>删除指定 host 的缩略图缓存文件（用于移除最近连接）。</summary>
+        public static void DeleteThumbnail(string host)
+        {
+            string path = GetThumbnailPath(host);
+            if (path == null) return;
+            try
+            {
+                if (File.Exists(path))
+                    File.Delete(path);
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn(ex, "Delete thumbnail failed: {0}", path);
+            }
+        }
     }
 }

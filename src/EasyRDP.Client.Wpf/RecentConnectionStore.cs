@@ -134,5 +134,19 @@ namespace EasyRDP.Client.Wpf
             }
             Save(list);
         }
+
+        /// <summary>
+        /// 按 Host 移除一条最近连接记录（用于右键删除）。
+        /// </summary>
+        public void Remove(string host)
+        {
+            if (string.IsNullOrWhiteSpace(host)) return;
+            var list = Load();
+            string h = host.Trim();
+            var filtered = list.Where(r =>
+                !string.Equals(r.Host, h, StringComparison.OrdinalIgnoreCase)).ToList();
+            if (filtered.Count != list.Count)
+                Save(filtered);
+        }
     }
 }
