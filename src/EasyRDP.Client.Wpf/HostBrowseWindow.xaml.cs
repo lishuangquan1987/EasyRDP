@@ -31,6 +31,23 @@ namespace EasyRDP.Client.Wpf
             InitializeComponent();
             DataContext = this;
             ReloadConnections();
+            // 定时静默刷新缩略图：控制窗口连接后保存了新缩略图，回到浏览窗口时
+            // 卡片能自动显示最新画面（仅更新 ThumbnailSource，保留列表与选中态）。
+            var refreshTimer = new System.Windows.Threading.DispatcherTimer();
+            refreshTimer.Interval = TimeSpan.FromSeconds(5);
+            refreshTimer.Tick += (s, e) => RefreshThumbnails();
+            refreshTimer.Start();
+        }
+
+        /// <summary>静默刷新所有卡片的缩略图图像源（不重建列表，不打断选中）。</summary>
+        private void RefreshThumbnails()
+        {
+            foreach (var r in Connections)
+            {
+                var img = ThumbnailCache.LoadThumbnail(r.Host);
+                if (img != null)
+                    r.ThumbnailSource = img;
+            }
         }
 
         /// <summary>从本地缓存重载最近连接列表。</summary>
