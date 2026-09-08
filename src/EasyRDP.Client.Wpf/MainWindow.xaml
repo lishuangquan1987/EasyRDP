@@ -37,58 +37,17 @@
                     <TextBlock Text="EasyRDP Client" Style="{StaticResource BrandTextStyle}"/>
                 </StackPanel>
 
-                <!-- 服务器配置管理 -->
-                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,10,0">
-                    <TextBlock Text="PROFILE" Style="{StaticResource ToolbarLabelStyle}" Margin="0,0,6,0"/>
-                    <ComboBox Width="132"
-                              Style="{StaticResource ToolbarComboBoxStyle}"
-                              ItemsSource="{Binding Profiles}"
-                              DisplayMemberPath="Name"
-                              SelectedItem="{Binding SelectedProfile}"
-                              Text="{Binding ProfileName, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                              ToolTip="选择已保存的服务器配置，或输入新名称后点 Save"/>
-                    <Button Content="Save" Style="{StaticResource ToolbarButtonStyle}" Height="28" Padding="8,0"
-                            Command="{Binding SaveProfileCommand}" Margin="4,0,0,0"
-                            ToolTip="把当前连接字段保存为配置（同名覆盖）"/>
-                    <Button Content="Del" Style="{StaticResource ToolbarButtonStyle}" Height="28" Padding="8,0"
-                            Command="{Binding DeleteProfileCommand}" Margin="2,0,0,0"
-                            ToolTip="删除当前选中的配置"/>
-                </StackPanel>
+                <!-- 服务器配置管理：已迁移到浏览窗口（控制窗口保持极简，让画面最大化） -->
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Visibility="Collapsed"/>
 
-                <Separator Grid.Column="2" Style="{StaticResource ToolbarSeparatorStyle}"/>
-
-                <!-- Host -->
-                <StackPanel Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,12,0">
-                    <TextBlock Text="HOST" Style="{StaticResource ToolbarLabelStyle}" Margin="0,0,6,0"/>
-                    <TextBox x:Name="HostBox" Text="{Binding Host, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                             Style="{StaticResource ToolbarTextBoxStyle}" Width="132"/>
-                </StackPanel>
-
-                <!-- Port -->
-                <StackPanel Grid.Column="4" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,12,0">
-                    <TextBlock Text="PORT" Style="{StaticResource ToolbarLabelStyle}" Margin="0,0,6,0"/>
-                    <TextBox Text="{Binding Port, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                             Style="{StaticResource ToolbarTextBoxStyle}" Width="64"/>
-                </StackPanel>
-
-                <!-- Username -->
-                <StackPanel Grid.Column="5" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,12,0">
-                    <TextBlock Text="USER" Style="{StaticResource ToolbarLabelStyle}" Margin="0,0,6,0"/>
-                    <TextBox Text="{Binding Username, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                             Style="{StaticResource ToolbarTextBoxStyle}" Width="92"/>
-                </StackPanel>
-
-                <!-- Password -->
-                <StackPanel Grid.Column="6" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,12,0">
-                    <TextBlock Text="PASS" Style="{StaticResource ToolbarLabelStyle}" Margin="0,0,6,0"/>
+                <!-- 兼容保留：PasswordBox 供 ViewModel 密码同步代码引用，视觉隐藏 -->
+                <StackPanel Grid.Column="6" Orientation="Horizontal" VerticalAlignment="Center" Visibility="Collapsed">
                     <PasswordBox x:Name="PasswordBox" PasswordChanged="PasswordBox_PasswordChanged"
                                  Style="{StaticResource ToolbarPasswordBoxStyle}" Width="100"/>
                 </StackPanel>
 
-                <!-- 主操作按钮 -->
+                <!-- 主操作按钮：仅断开（连接由浏览窗口发起） -->
                 <StackPanel Grid.Column="8" Orientation="Horizontal" VerticalAlignment="Center">
-                    <Button Content="Connect" Style="{StaticResource PrimaryButtonStyle}"
-                            Command="{Binding ConnectCommand}" Margin="0,0,6,0"/>
                     <Button Content="Disconnect" Style="{StaticResource DangerButtonStyle}"
                             Command="{Binding StopCommand}"/>
                 </StackPanel>
@@ -145,57 +104,6 @@
                             Command="{Binding ToggleDetailsCommand}" Margin="0,0,6,0"
                             ToolTip="显示/隐藏连接详情面板（网络诊断 / 连接详情 / 系统性能）"/>
                 </StackPanel>
-            </Grid>
-        </Border>
-
-        <!-- ====== 中间：连接主页（未连接时） ====== -->
-        <Border x:Name="HomePanel" Grid.Row="2" Background="{StaticResource WindowBackgroundBrush}">
-            <Border.Style>
-                <Style TargetType="Border">
-                    <Setter Property="Visibility" Value="Visible"/>
-                    <Style.Triggers>
-                        <DataTrigger Binding="{Binding IsConnected}" Value="True">
-                            <Setter Property="Visibility" Value="Collapsed"/>
-                        </DataTrigger>
-                    </Style.Triggers>
-                </Style>
-            </Border.Style>
-            <Grid Margin="24,16">
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="*"/>
-                </Grid.RowDefinitions>
-                <TextBlock Grid.Row="0" Text="最近连接" FontSize="22" FontWeight="SemiBold"
-                           Foreground="#1F2937" Margin="0,0,0,16"/>
-                <ItemsControl Grid.Row="2" ItemsSource="{Binding RecentConnections}">
-                    <ItemsControl.ItemsPanel>
-                        <ItemsPanelTemplate>
-                            <WrapPanel Orientation="Horizontal" HorizontalAlignment="Left"/>
-                        </ItemsPanelTemplate>
-                    </ItemsControl.ItemsPanel>
-                    <ItemsControl.ItemTemplate>
-                        <DataTemplate>
-                            <Border Width="200" Height="160" Margin="0,0,20,20" Background="White"
-                                    BorderBrush="#DDE3E8" BorderThickness="1" CornerRadius="8"
-                                    MouseLeftButtonUp="RecentConnection_Click">
-                                <Grid>
-                                    <!-- 缩略图：存在时覆盖占位区 -->
-                                    <Image Source="{Binding ThumbnailSource}" Stretch="UniformToFill"
-                                           VerticalAlignment="Top" Height="120"/>
-                                    <!-- 无缩略图时显示的占位 -->
-                                    <Border x:Name="PlaceholderBorder" Background="#F4F6F8" Height="120" VerticalAlignment="Top"
-                                            BorderBrush="#DDE3E8" BorderThickness="0,0,0,1">
-                                        <Path Data="M0,0 L24,0 L24,16 L0,16 Z" Fill="#9CA3AF" Stretch="Uniform"
-                                              Width="48" Height="48" VerticalAlignment="Center" HorizontalAlignment="Center"/>
-                                    </Border>
-                                    <TextBlock Text="{Binding Host}" FontSize="14" Foreground="#1F2937"
-                                               VerticalAlignment="Bottom" HorizontalAlignment="Center" Margin="0,0,0,10"/>
-                                </Grid>
-                            </Border>
-                        </DataTemplate>
-                    </ItemsControl.ItemTemplate>
-                </ItemsControl>
             </Grid>
         </Border>
 

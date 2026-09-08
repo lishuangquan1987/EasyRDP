@@ -815,16 +815,4 @@ public partial class MainWindow : Window
         if (_vm.ConnectCommand.CanExecute(null))
             _vm.ConnectCommand.Execute(null);
     }
-
-    /// <summary>主页最近连接卡片双击/点击：把 host 填入输入框并触发连接。</summary>
-    private void RecentConnection_Click(object sender, MouseButtonEventArgs e)
-    {
-        if (_vm == null) return;
-        var border = sender as System.Windows.Controls.Border;
-        var rc = border?.DataContext as RecentConnection;
-        if (rc == null) return;
-        _vm.Host = rc.Host;
-        if (_vm.ConnectCommand.CanExecute(null))
-            _vm.ConnectCommand.Execute(null);
-    }
 }
