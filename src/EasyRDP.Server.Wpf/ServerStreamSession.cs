@@ -195,6 +195,13 @@ namespace EasyRDP.Server.Wpf
         private int _h264LowStreak;              // 连续低变化帧数（触发切回 ZRLE）
         private int _h264FramesEncoded;          // H264 模式已编码帧数（诊断）
         private int _h264MeasureCounter;         // D15：帧间变化测量计数（隔帧测量用）
+        // ── D15 冷页防护 ──
+        // 硬页面错误是降档振荡的病根：编码慢 → 6 个捕获缓冲轮转变慢 → 多数缓冲
+        // 长期不被触碰 → Windows 回收其物理页（虚机 5GB 内存压力下更甚）→ 轮转到
+        // 冷缓冲时硬页错误风暴（日志实证：BgraToI420 纯内存搬运 convMs=341ms，
+        // 正常 10-17ms）→ 更慢 → D11 误降档 → 模糊。
+        private long _lastPageFaultCount = -1;   // 上次采样的进程硬页错误计数（-1=未初始化）
+        private int _noDownscaleLogCounter;      // 混合模式禁用降档后的观测日志限频计数
         private bool _h264Allowed;               // 混合模式开关（协商 Zrle 且本机 H264Software 可用）
         // 变化瓦片数阈值：2K 全屏 920 瓦片。120 瓦片(~13%) 的帧 ZRLE 实测已 >100ms，
         // 切 H264（恒定 ~35ms）明显更优；旧值 200 使 60-200 瓦片的中变化帧滞留
@@ -749,6 +756,10 @@ namespace EasyRDP.Server.Wpf
                     }
                 }
 
+                // D15 冷页防护：每 600 帧触碰全部捕获缓冲（防 OS 回收冷页导致硬页错误风暴）
+                if (Interlocked.Read(ref _framesEncoded) % 600 == 0)
+                    WarmupCaptureBuffers();
+
                 long encodeStart = Stopwatch.GetTimestamp();
                 EncodedFrame result;
                 byte[] pixelsToEncode = null;
@@ -942,8 +953,23 @@ namespace EasyRDP.Server.Wpf
                             h264AvgMs = _dynEncodeSum * 1000.0 / Stopwatch.Frequency / _dynEncodeTimes.Count;
                             if (overCount * 10 >= _dynEncodeTimes.Count * 6)
                             {
-                                _downscaleStreak++;
-                                _upscaleStreak = 0;
+                                // 混合模式禁用自动降档：持续慢的病根是冷页回收/CPU，
+                                // 降档只是止痛药且代价是模糊（用户明确：清晰度优先）。
+                                // 限频记录观测值供排障；ZRLE-only 会话（H264 不可用）保留降档。
+                                if (_h264Allowed)
+                                {
+                                    _downscaleStreak = 0;
+                                    _upscaleStreak = 0;
+                                    _noDownscaleLogCounter++;
+                                    if (_noDownscaleLogCounter == 1 || _noDownscaleLogCounter % 10 == 0)
+                                        Logger.Warn("Session {0}: D11 downscale suppressed (hybrid mode, clarity first): over-threshold frames {1}/{2}, avg={3:F1}ms — check VM memory/dynamic memory if persistent",
+                                            _sessionId, overCount, _dynEncodeTimes.Count, h264AvgMs);
+                                }
+                                else
+                                {
+                                    _downscaleStreak++;
+                                    _upscaleStreak = 0;
+                                }
                             }
                             else if (underCount * 10 >= _dynEncodeTimes.Count * 8)
                             {
@@ -1023,6 +1049,18 @@ namespace EasyRDP.Server.Wpf
                     {
                         Logger.Warn(ex, "Session {0}: Encode input pixel check threw", _sessionId);
                     }
+                }
+
+                // D15 内存压力诊断：页面错误增量（每 100 帧）。增量高且编码慢 =
+                // 硬页错误风暴（捕获缓冲被 OS 回收），冷页防护未生效或虚机内存不足。
+                if (_framesEncoded % 100 == 0)
+                {
+                    long pfNow = QueryPageFaultCount();
+                    if (_lastPageFaultCount >= 0 && pfNow >= 0)
+                        Logger.Info("Session {0}: page faults delta={1} (last 100 frames), workingSet={2}MB",
+                            _sessionId, pfNow - _lastPageFaultCount, QueryWorkingSetMB());
+                    if (pfNow >= 0)
+                        _lastPageFaultCount = pfNow;
                 }
 
                 if (_framesEncoded == 1)
@@ -1268,6 +1306,77 @@ namespace EasyRDP.Server.Wpf
             {
                 Logger.Warn(ex, "Session {0}: D14 switch back to ZRLE failed", _sessionId);
             }
+        }
+
+        /// <summary>
+        /// D15 冷页防护：周期性触碰全部捕获缓冲的每一页，防止操作系统把轮转慢的
+        /// 缓冲从进程工作集回收——回收后下次使用触发硬页错误风暴（日志实证：
+        /// BgraToI420 纯内存搬运单帧 convMs=341ms，正常 10-17ms）。编码越慢缓冲
+        /// 轮转越慢、冷页越多、越慢——正反馈。逐页触碰断开该循环。
+        /// 50MB 缓冲逐 4KB 触碰约 5-10ms，每 600 帧（约 30-60s）一次，开销可忽略。
+        /// </summary>
+        private void WarmupCaptureBuffers()
+        {
+            long touch = 0;
+            for (int i = 0; i < _captureBufs.Length; i++)
+            {
+                byte[] buf = _captureBufs[i];
+                if (buf == null) continue;
+                // 逐 4KB 页读取并累加：确保 JIT 不会把纯读取优化为空操作
+                for (int off = 0; off < buf.Length; off += 4096)
+                    touch += buf[off];
+            }
+            if (touch == long.MinValue)
+                Logger.Debug("WarmupCaptureBuffers: impossible touch value (anti-opt guard)");
+        }
+
+        [System.Runtime.InteropServices.DllImport("psapi.dll", SetLastError = true)]
+        private static extern bool GetProcessMemoryInfo(IntPtr process, ref PROCESS_MEMORY_COUNTERS counters, uint size);
+
+        [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+        private static extern IntPtr GetCurrentProcess();
+
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        private struct PROCESS_MEMORY_COUNTERS
+        {
+            public uint cb;
+            public uint PageFaultCount;
+            public System.UIntPtr PeakWorkingSetSize;
+            public System.UIntPtr WorkingSetSize;
+            public System.UIntPtr QuotaPeakPagedPoolUsage;
+            public System.UIntPtr QuotaPagedPoolUsage;
+            public System.UIntPtr QuotaPeakNonPagedPoolUsage;
+            public System.UIntPtr QuotaNonPagedPoolUsage;
+            public System.UIntPtr PagefileUsage;
+            public System.UIntPtr PeakPagefileUsage;
+        }
+
+        /// <summary>查询本进程累计页面错误次数（含硬页错误，诊断内存压力用）。</summary>
+        private long QueryPageFaultCount()
+        {
+            try
+            {
+                var pmc = new PROCESS_MEMORY_COUNTERS();
+                pmc.cb = (uint)System.Runtime.InteropServices.Marshal.SizeOf(typeof(PROCESS_MEMORY_COUNTERS));
+                if (GetProcessMemoryInfo(GetCurrentProcess(), ref pmc, pmc.cb))
+                    return pmc.PageFaultCount;
+            }
+            catch { }
+            return -1;
+        }
+
+        /// <summary>查询本进程当前工作集大小（MB），配合页面错误增量判读内存压力。</summary>
+        private long QueryWorkingSetMB()
+        {
+            try
+            {
+                var pmc = new PROCESS_MEMORY_COUNTERS();
+                pmc.cb = (uint)System.Runtime.InteropServices.Marshal.SizeOf(typeof(PROCESS_MEMORY_COUNTERS));
+                if (GetProcessMemoryInfo(GetCurrentProcess(), ref pmc, pmc.cb))
+                    return (long)pmc.WorkingSetSize / (1024 * 1024);
+            }
+            catch { }
+            return -1;
         }
 
         private void SendLoop()
