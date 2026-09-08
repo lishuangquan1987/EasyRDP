@@ -892,10 +892,15 @@ namespace EasyRDP.Server.Wpf
                         _encodeSum -= _encodeTimes.Dequeue();
                     }
 
-                    // D11 修复：动态帧（变化瓦片数>0）独立统计窗口。静止帧 8-18ms 会把
-                    // 全帧均值稀释到降档阈值以下，导致降档永不触发（日志实证：全会话
-                    // 均值 51.5ms、大变化帧均值 183.9ms、峰值 366ms、降档 0 次）。
-                    if (result.ChangedTileCount > 0)
+                    // D11 修复：动态帧窗口只收 H264 模式的帧。混合模式下 ZRLE 动态帧慢
+                    // 是"该切 H264"的信号（D14 职责，切换阈值 streak=3 帧），不是"分辨率
+                    // 太高"——旧逻辑被 ZRLE 动态帧（100-170ms）把均值拖过 100ms 阈值，
+                    // 触发降档到 1280x720，是画面模糊的主因（720p 拉伸显示文字必然糊）。
+                    // H264 编码 ~25-35ms 远低于阈值：混合模式下 D11 只在"H264 也撑不住"
+                    // 时才降档，与 D14 职责分离。
+                    bool usedH264 = _h264Active && _encoder != null
+                        && _encoder.Codec == CodecId.H264Software;
+                    if (result.ChangedTileCount > 0 && usedH264)
                     {
                         _dynEncodeTimes.Enqueue(encodeEnd - encodeStart);
                         _dynEncodeSum += (encodeEnd - encodeStart);
@@ -908,34 +913,39 @@ namespace EasyRDP.Server.Wpf
                     if (_encodeTimes.Count >= AdaptiveWindow)
                     {
                         double allAvgMs = _encodeSum * 1000.0 / Stopwatch.Frequency / _encodeTimes.Count;
-                        // 降档判定用动态帧均值（动态窗口未满时退回全帧均值）
-                        double avgMs = (_dynEncodeTimes.Count >= AdaptiveWindow)
-                            ? _dynEncodeSum * 1000.0 / Stopwatch.Frequency / _dynEncodeTimes.Count
-                            : allAvgMs;
                         _avgEncodeMs = allAvgMs;
 
                         // 帧率自适应（原有）：编码跟不上 → 降帧率；充裕 → 逐步回升
-                        if (avgMs > 33)
+                        // （流控/推送模式下 effectiveDelay=0，此分支实际不生效，保留原语义）
+                        if (allAvgMs > 33)
                             FrameDelayMs = Math.Min(FrameDelayMs + 5, 120);
-                        else if (avgMs < 20)
+                        else if (allAvgMs < 20)
                             FrameDelayMs = Math.Max(FrameDelayMs - 5, 16);
 
-                        // 分辨率档位自适应：持续超标降档（弱机降像素量提速），
-                        // 持续充裕升档回全分辨率。档位变化触发编码器重建+强制关键帧。
-                        if (avgMs > DownscaleThresholdMs)
+                        // D11 档位判定：只用 H264 动态帧窗口（入队处注释）。
+                        // 窗口未满 30 帧时不判定、保持当前档位——不再回退全帧均值，
+                        // 全帧均值被 ZRLE 慢帧污染正是旧降档误触发的根源。
+                        double h264AvgMs = -1;
+                        if (_dynEncodeTimes.Count >= AdaptiveWindow)
                         {
-                            _downscaleStreak++;
-                            _upscaleStreak = 0;
-                        }
-                        else if (avgMs < UpscaleThresholdMs)
-                        {
-                            _upscaleStreak++;
-                            _downscaleStreak = 0;
-                        }
-                        else
-                        {
-                            _downscaleStreak = 0;
-                            _upscaleStreak = 0;
+                            h264AvgMs = _dynEncodeSum * 1000.0 / Stopwatch.Frequency / _dynEncodeTimes.Count;
+                            // 分辨率档位自适应：持续超标降档（弱机降像素量提速），
+                            // 持续充裕升档回全分辨率。档位变化触发编码器重建+强制关键帧。
+                            if (h264AvgMs > DownscaleThresholdMs)
+                            {
+                                _downscaleStreak++;
+                                _upscaleStreak = 0;
+                            }
+                            else if (h264AvgMs < UpscaleThresholdMs)
+                            {
+                                _upscaleStreak++;
+                                _downscaleStreak = 0;
+                            }
+                            else
+                            {
+                                _downscaleStreak = 0;
+                                _upscaleStreak = 0;
+                            }
                         }
 
                         if (_downscaleStreak >= DownscaleStreakLimit)
@@ -952,8 +962,8 @@ namespace EasyRDP.Server.Wpf
                                 // 同步到捕获服务：StretchBlt 一步截屏+降采样，
                                 // 编码线程不再做昂贵的托管逐像素缩放。
                                 ApplyCaptureMaxWidth();
-                                Logger.Info("D11: encode slow ({0:F1}ms) — downscale maxEncodeWidth={1}",
-                                    avgMs, next);
+                                Logger.Info("D11: encode slow ({0:F1}ms, H264 dynamic avg) — downscale maxEncodeWidth={1}",
+                                    h264AvgMs, next);
                             }
                         }
                         else if (_upscaleStreak >= UpscaleStreakLimit && _adaptiveMaxEncodeWidth > 0)
@@ -965,8 +975,8 @@ namespace EasyRDP.Server.Wpf
                                 _adaptiveMaxEncodeWidth = next;
                                 // 恢复全分辨率/升档时同样同步捕获尺寸。
                                 ApplyCaptureMaxWidth();
-                                Logger.Info("D11: encode fast ({0:F1}ms) — upscale maxEncodeWidth={1}",
-                                    avgMs, next);
+                                Logger.Info("D11: encode fast ({0:F1}ms, H264 dynamic avg) — upscale maxEncodeWidth={1}",
+                                    h264AvgMs, next);
                             }
                         }
                     }

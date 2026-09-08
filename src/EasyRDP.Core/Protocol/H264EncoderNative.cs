@@ -141,8 +141,12 @@ namespace EasyRDP.Core.Protocol
                 Marshal.WriteInt32(pParam, layer0 + H264Native.SSpatialLayerConfigOffsets.UiLevelIdc, 0);
 
                 // ── 码控/量化上限：限制最大 QP，避免屏幕文字区域被过度压缩变糊 ──
+                // QP 36→30（D15 画质修复）：用户反馈"比 VNC 模糊很多"，主因是 D11 误降档
+                // （已在 ServerStreamSession 修复），次因是 QP36 下 1080p 文字边缘软化。
+                // 1080p 下 H264 编码 ~25ms，距 100ms 降档阈值有 4 倍余量，QP30 的
+                // 编码耗时增加（~10-20%）完全可承受，文字锐度明显提升。
                 Marshal.WriteInt32(pParam, H264Native.SEncParamExtOffsets.IMaxBitrate, maxBitrate);
-                Marshal.WriteInt32(pParam, H264Native.SEncParamExtOffsets.IMaxQp, 36);
+                Marshal.WriteInt32(pParam, H264Native.SEncParamExtOffsets.IMaxQp, 30);
                 Marshal.WriteInt32(pParam, H264Native.SEncParamExtOffsets.IMinQp, 0);
                 Marshal.WriteInt32(pParam, H264Native.SEncParamExtOffsets.IEntropyCodingModeFlag, 0);
                 // 关闭环内去块滤波：屏幕内容（文字/代码边缘）的锐利度优先于块效应平滑，
