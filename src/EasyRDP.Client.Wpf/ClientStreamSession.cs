@@ -93,8 +93,11 @@ namespace EasyRDP.Client.Wpf
         // 服务端首帧无条件推送兜底，实际无害。
         private long _lastFrameRequestTicks;
         /// <summary>静态场景帧请求心跳间隔（毫秒）：画面无变化（0 区域空帧）时降频请求，
-        /// 避免服务端满速编码空帧空转占单核 CPU；画面变化时仍每帧立即请求保持流畅。</summary>
-        private const int FrameRequestHeartbeatMs = 250;
+        /// 避免服务端满速编码空帧空转占单核 CPU；画面变化时仍每帧立即请求保持流畅。
+        /// D15 延迟优化：250→40ms。心跳周期是"静止→变化第一帧"的感知延迟上限
+        /// （操作跟手度的决定因素）；空帧编码仅 ~8ms，40ms 心跳占弱机单核 ~20%，
+        /// 换取画面变化最长 40ms 内被感知（原 250ms 是操作迟钝的主要来源）。</summary>
+        private const int FrameRequestHeartbeatMs = 40;
         /// <summary>Gets the current frame width in pixels.</summary>
         public int FrameWidth { get { return _frameBuffer != null ? _frameBuffer.Width : 0; } }
         /// <summary>Gets the current frame height in pixels.</summary>

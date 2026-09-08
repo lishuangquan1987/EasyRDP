@@ -305,15 +305,18 @@ namespace EasyRDP.Server.Wpf
 
             // 弱机优化：ZRLE 流控模式下客户端请求驱动（间隔 ≥250ms），服务端 60fps 捕获
             // 纯属浪费——实测捕获 863 帧 vs 编码 452 帧，半数捕获帧被 flow-drop 丢弃，
-            // 捕获线程还和编码线程争抢弱机 CPU。流控模式下把捕获间隔降到 100ms
-            // （10fps 上限，仍远超 2-4fps 编码需求），释放 CPU 给编码；H264 推送模式保持 16ms。
+            // 捕获线程还和编码线程争抢弱机 CPU。流控模式降低捕获间隔释放 CPU 给编码；
+            // D15 延迟优化：100→50ms——捕获间隔决定"变化→入队"的平均延迟
+            // （客户端请求到达时队列可能空，须等下一轮捕获；50ms 把平均等待 50→25ms）。
+            // 缩略图探测稳态 ~10ms/次，50ms 间隔下单核占用 ~20%，可接受。
+            // H264 推送模式保持 16ms。
             // 注意：CaptureService 为全局单例，多会话时此设置影响所有会话
             // （弱机单会话为目标场景，见注释）。
             if (_flowControlEnabled)
             {
                 var captureImpl = _captureService as CaptureService;
                 if (captureImpl != null)
-                    captureImpl.FrameIntervalMs = 100;
+                    captureImpl.FrameIntervalMs = 50;
             }
 
             // 初始化阶段抛异常时先释放编码器，再向上抛出（此时 _running=false，
@@ -1224,8 +1227,8 @@ namespace EasyRDP.Server.Wpf
                 _encoder = _zrleEncoder;
                 _h264Active = false;
                 _h264LowStreak = 0;
-                // 切回 ZRLE 流控模式：恢复 100ms 捕获间隔（省弱机 CPU，客户端请求驱动）
-                ApplyCaptureInterval(100);
+                // 切回 ZRLE 流控模式：恢复 50ms 捕获间隔（D15 延迟优化，见 Start 注释）
+                ApplyCaptureInterval(50);
                 Logger.Info("Session {0}: D14 codec switch H264Software -> ZRLE ({1}), res={2}x{3}",
                     _sessionId, reason, _lastW, _lastH);
             }
