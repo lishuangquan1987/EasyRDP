@@ -148,9 +148,57 @@
             </Grid>
         </Border>
 
+        <!-- ====== 中间：连接主页（未连接时） ====== -->
+        <Border x:Name="HomePanel" Grid.Row="2" Background="{StaticResource WindowBackgroundBrush}">
+            <Border.Style>
+                <Style TargetType="Border">
+                    <Setter Property="Visibility" Value="Visible"/>
+                    <Style.Triggers>
+                        <DataTrigger Binding="{Binding IsConnected}" Value="True">
+                            <Setter Property="Visibility" Value="Collapsed"/>
+                        </DataTrigger>
+                    </Style.Triggers>
+                </Style>
+            </Border.Style>
+            <Grid Margin="24,16">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+                <TextBlock Grid.Row="0" Text="最近连接" FontSize="22" FontWeight="SemiBold"
+                           Foreground="#1F2937" Margin="0,0,0,16"/>
+                <ItemsControl Grid.Row="2" ItemsSource="{Binding RecentConnections}">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <WrapPanel Orientation="Horizontal" HorizontalAlignment="Left"/>
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Border Width="200" Height="160" Margin="0,0,20,20" Background="White"
+                                    BorderBrush="#DDE3E8" BorderThickness="1" CornerRadius="8"
+                                    MouseLeftButtonUp="RecentConnection_Click">
+                                <Grid>
+                                    <Border Background="#F4F6F8" Height="120" VerticalAlignment="Top"
+                                            BorderBrush="#DDE3E8" BorderThickness="0,0,0,1">
+                                        <Path Data="M0,0 L24,0 L24,16 L0,16 Z" Fill="#9CA3AF" Stretch="Uniform"
+                                              Width="48" Height="48" VerticalAlignment="Center" HorizontalAlignment="Center"/>
+                                    </Border>
+                                    <TextBlock Text="{Binding Host}" FontSize="14" Foreground="#1F2937"
+                                               VerticalAlignment="Bottom" HorizontalAlignment="Center" Margin="0,0,0,10"/>
+                                </Grid>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </Grid>
+        </Border>
+
         <!-- ====== 中间：桌面显示区 ====== -->
         <Border x:Name="RenderBorder" Grid.Row="2" Background="Black"
-                Focusable="True">
+                Focusable="True"
+                Visibility="{Binding IsConnected, Converter={StaticResource BoolToVis}}">
             <Grid>
                 <!-- Fant 高质量缩放：远程分辨率与窗口尺寸不一致时，线性插值会糊化文字/
                      代码高亮边缘，Fant（双三次变体）在放大/缩小时保留更多细节。

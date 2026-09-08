@@ -12,6 +12,13 @@ using NLog;
 
 namespace EasyRDP.Client.Wpf;
 
+/// <summary>最近连接项（主页缩略图网格数据）。</summary>
+public class RecentConnection
+{
+    public string Host { get; set; }
+    public string DisplayName { get; set; }
+}
+
 /// <summary>
 /// 客户端主窗口（View 层）。仅负责初始化 ViewModel 和路由鼠标事件。
 /// 所有业务逻辑在 MainWindowViewModel 中。
@@ -800,5 +807,17 @@ public partial class MainWindow : Window
         TopBar.Visibility = fullscreen ? Visibility.Collapsed : Visibility.Visible;
         ActionBar.Visibility = fullscreen ? Visibility.Collapsed : Visibility.Visible;
         BottomBar.Visibility = fullscreen ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    /// <summary>主页最近连接卡片双击/点击：把 host 填入输入框并触发连接。</summary>
+    private void RecentConnection_Click(object sender, MouseButtonEventArgs e)
+    {
+        if (_vm == null) return;
+        var border = sender as System.Windows.Controls.Border;
+        var rc = border?.DataContext as RecentConnection;
+        if (rc == null) return;
+        _vm.Host = rc.Host;
+        if (_vm.ConnectCommand.CanExecute(null))
+            _vm.ConnectCommand.Execute(null);
     }
 }

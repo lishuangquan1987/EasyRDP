@@ -155,6 +155,9 @@ namespace EasyRDP.Client.Wpf
                 SelectedProfile = last ?? Profiles[0];
             }
 
+            // 初始化最近连接列表（从 Profiles 填充，后续可持久化）
+            RefreshRecentConnections();
+
             // 启动 aly 自动更新后台检查（检查 → 下载 → 应用）
             InitializeUpdateClient();
         }
@@ -370,6 +373,10 @@ namespace EasyRDP.Client.Wpf
 
         /// <summary>已保存的服务器配置列表。</summary>
         public ObservableCollection<ServerProfile> Profiles { get; } = new ObservableCollection<ServerProfile>();
+
+        /// <summary>最近连接列表（主页缩略图网格）。初始从 Profiles 填充；
+        /// 连接成功后把当前 Host 置顶/加入。</summary>
+        public ObservableCollection<RecentConnection> RecentConnections { get; } = new ObservableCollection<RecentConnection>();
 
         /// <summary>当前选中的服务器配置（选择后自动填充连接字段）。</summary>
         public ServerProfile? SelectedProfile
@@ -675,6 +682,29 @@ namespace EasyRDP.Client.Wpf
             return null;
         }
 
+        /// <summary>刷新最近连接列表：从 Profiles 取 host，并把当前连接 host 置顶。</summary>
+        private void RefreshRecentConnections()
+        {
+            RecentConnections.Clear();
+            // 当前已连接：把当前 Host 放在第一位
+            if (IsConnected && !string.IsNullOrWhiteSpace(Host))
+                RecentConnections.Add(new RecentConnection { Host = Host.Trim(), DisplayName = Host.Trim() });
+            // 从已保存 Profiles 去重添加（排除当前 Host）
+            var seen = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (!string.IsNullOrWhiteSpace(Host))
+                seen.Add(Host.Trim());
+            foreach (var p in Profiles)
+            {
+                if (p == null || string.IsNullOrWhiteSpace(p.Host)) continue;
+                string h = p.Host.Trim();
+                if (!seen.Add(h)) continue;
+                RecentConnections.Add(new RecentConnection { Host = h, DisplayName = p.Name ?? h });
+            }
+            // 没有任何记录时给一个示例占位（连接过 Profiles 后消失）
+            if (RecentConnections.Count == 0)
+                RecentConnections.Add(new RecentConnection { Host = "172.25.2.5", DisplayName = "Example" });
+        }
+
         /// <summary>持久化配置列表与最后选择的配置名。</summary>
         private bool PersistProfiles(bool notify)
         {
@@ -835,6 +865,7 @@ namespace EasyRDP.Client.Wpf
                 handshakeRes.Codec, handshakeRes.ScreenWidth, handshakeRes.ScreenHeight);
             _running = true;
             IsConnected = true;
+            RefreshRecentConnections(); // 连接成功后刷新最近连接列表（把当前 host 置顶）
             // 订阅服务端诊断信息（连接详情面板数据源），并立即发送请求。
             // 服务端响应异步到达，面板刷新定时器读取 ServerDiagnosticInfo。
             _streamSession.DiagnosticInfoReceived += OnDiagnosticInfoReceived;
