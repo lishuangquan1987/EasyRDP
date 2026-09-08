@@ -42,8 +42,8 @@
                                   Width="40" Height="40" HorizontalAlignment="Center" VerticalAlignment="Center"/>
                         </Border>
                     </Grid>
-                    <!-- IP 地址（居中，卡片底部） -->
-                    <TextBlock Grid.Row="1" Text="{Binding Host}" FontSize="13" Foreground="#263238"
+                    <!-- IP 地址（居中，卡片底部；重命名后显示 DisplayName） -->
+                    <TextBlock Grid.Row="1" Text="{Binding DisplayText}" FontSize="13" Foreground="#263238"
                                HorizontalAlignment="Center" Margin="0,6,0,8"/>
                     <!-- 左上角活动状态红点 -->
                     <Ellipse Width="10" Height="10" Fill="#E4002B"

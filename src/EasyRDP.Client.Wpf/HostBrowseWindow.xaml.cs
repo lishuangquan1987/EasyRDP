@@ -109,11 +109,55 @@ namespace EasyRDP.Client.Wpf
                 ConnectToHost(host);
         }
 
-        /// <summary>右键菜单：重命名（占位——当前用 DisplayName，提示即可）。</summary>
+        /// <summary>右键菜单：重命名（弹输入框改 DisplayName 并持久化）。</summary>
         private void MenuRename_Click(object sender, RoutedEventArgs e)
         {
-            MessageBox.Show(this, "重命名功能暂未实现（当前版本使用 IP 作为标识）。", "Rename",
-                MessageBoxButton.OK, MessageBoxImage.Information);
+            if (!GetContextHost(sender as MenuItem, out string host)) return;
+            var rc = Connections.FirstOrDefault(r =>
+                string.Equals(r.Host, host, StringComparison.OrdinalIgnoreCase));
+            if (rc == null) return;
+
+            // 轻量输入对话框（纯代码构建，避免为一次输入新建 xaml 窗口）
+            var dlg = new Window
+            {
+                Title = "Rename - " + host,
+                Width = 360,
+                Height = 150,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                Owner = this,
+                ResizeMode = ResizeMode.NoResize,
+                WindowStyle = WindowStyle.ToolWindow,
+                ShowInTaskbar = false
+            };
+            var panel = new StackPanel { Margin = new Thickness(14) };
+            var label = new TextBlock { Text = "显示名称（留空则恢复为 IP）：", Margin = new Thickness(0, 0, 0, 6) };
+            var input = new TextBox { Text = rc.DisplayName ?? "", Height = 26, VerticalContentAlignment = VerticalAlignment.Center };
+            var btns = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 12, 0, 0) };
+            var ok = new Button { Content = "OK", Width = 72, Margin = new Thickness(0, 0, 8, 0), IsDefault = true };
+            var cancel = new Button { Content = "Cancel", Width = 72, IsCancel = true };
+            ok.Click += (s2, e2) => { dlg.DialogResult = true; };
+            btns.Children.Add(ok);
+            btns.Children.Add(cancel);
+            panel.Children.Add(label);
+            panel.Children.Add(input);
+            panel.Children.Add(btns);
+            dlg.Content = panel;
+            dlg.Loaded += (s2, e2) => { input.Focus(); input.SelectAll(); };
+
+            if (dlg.ShowDialog() == true)
+            {
+                rc.DisplayName = string.IsNullOrWhiteSpace(input.Text) ? null : input.Text.Trim();
+                var list = _store.Load();
+                var item = list.FirstOrDefault(x =>
+                    string.Equals(x.Host, host, StringComparison.OrdinalIgnoreCase));
+                if (item != null)
+                {
+                    item.DisplayName = rc.DisplayName;
+                    _store.Save(list);
+                }
+                // 重载列表让卡片显示最新名字（DisplayText 依赖 DisplayName）
+                ReloadConnections();
+            }
         }
 
         /// <summary>右键菜单：删除最近连接（含缩略图缓存）。</summary>

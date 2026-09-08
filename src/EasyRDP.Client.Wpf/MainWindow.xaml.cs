@@ -254,6 +254,8 @@ public partial class MainWindow : Window
         if (propertyName == nameof(MainWindowViewModel.IsConnected) && !_vm.IsConnected)
         {
             HideRemoteCursor();
+            if (FloatingToolbar != null)
+                FloatingToolbar.Visibility = Visibility.Collapsed;
             // 断连后清除本地位置标记：重连时先以服务端回显位置兜底，
             // 直到用户下一次移动鼠标重新锚定本地位置
             _hasLocalCursorPos = false;
@@ -641,10 +643,37 @@ public partial class MainWindow : Window
         base.OnClosing(e);
     }
 
-    /// <summary>将鼠标事件路由到 ViewModel。</summary>
+    /// <summary>将鼠标事件路由到 ViewModel；同时触发悬浮工具条显示（2 秒后自动隐藏）。</summary>
     private void RenderImage_MouseMove(object sender, MouseEventArgs e)
     {
         RefreshLocalCursorPosition(e);
+        ShowFloatingToolbar();
+    }
+
+    // ====== 悬浮工具条（RealVNC 风格叠加层） ======
+    private DispatcherTimer _toolbarHideTimer;
+
+    /// <summary>显示悬浮工具条并重启 2 秒自动隐藏计时。</summary>
+    private void ShowFloatingToolbar()
+    {
+        if (FloatingToolbar.Visibility != Visibility.Visible)
+            FloatingToolbar.Visibility = Visibility.Visible;
+        if (_toolbarHideTimer == null)
+        {
+            _toolbarHideTimer = new DispatcherTimer();
+            _toolbarHideTimer.Interval = TimeSpan.FromSeconds(2);
+            _toolbarHideTimer.Tick += (s, ev) =>
+            {
+                // 鼠标悬停在工具条上时不隐藏
+                var pos = Mouse.GetPosition(FloatingToolbar);
+                if (pos.X >= 0 && pos.Y >= 0
+                    && pos.X <= FloatingToolbar.ActualWidth && pos.Y <= FloatingToolbar.ActualHeight)
+                    return;
+                FloatingToolbar.Visibility = Visibility.Collapsed;
+            };
+        }
+        _toolbarHideTimer.Stop();
+        _toolbarHideTimer.Start();
     }
 
     /// <summary>

@@ -48,6 +48,18 @@ namespace EasyRDP.Client.Wpf
             set { _isActive = value; OnPropertyChanged(nameof(IsActive)); }
         }
 
+        /// <summary>卡片显示文本：重命名后显示 DisplayName，否则显示 Host。</summary>
+        public string DisplayText
+        {
+            get
+            {
+                if (!string.IsNullOrWhiteSpace(DisplayName)
+                    && !string.Equals(DisplayName.Trim(), Host, StringComparison.OrdinalIgnoreCase))
+                    return DisplayName.Trim();
+                return Host;
+            }
+        }
+
         /// <summary>最后连接时间本地化文本（UI 显示）。</summary>
         public string LastConnectedText
         {

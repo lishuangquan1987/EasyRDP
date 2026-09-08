@@ -15,6 +15,13 @@ using NLog;
 
 namespace EasyRDP.Client.Wpf
 {
+    /// <summary>控制窗口画面缩放模式（RealVNC 风格三态循环）。</summary>
+    public enum ZoomMode
+    {
+        Fit = 0,     // 自适应：等比缩放到窗口（保持宽高比，可能有黑边）
+        Actual = 1,  // 原始大小：不缩放，超出部分裁切
+        Stretch = 2  // 拉伸：填满窗口（不保持宽高比）
+    }
     /// <summary>
     /// 客户端主窗口 ViewModel。管理连接、渲染测试、输入转发的全部业务逻辑。
     /// 遵循 MVVM：ViewModel 可引用 View，但 View 只通过绑定和命令与 ViewModel 交互。
@@ -137,6 +144,7 @@ namespace EasyRDP.Client.Wpf
                 () => AlyClientStatus == AlyClientStatus.DiscoveredUpdate
                     || AlyClientStatus == AlyClientStatus.DownloadedUpdate);
             ToggleDetailsCommand = new RelayCommand(ToggleDetailsPanel);
+            CycleZoomCommand = new RelayCommand(CycleZoom);
 
             // 本地系统信息（连接详情面板"系统性能"本地列，一次性获取）
             _localCpuText = GetLocalCpuText();
@@ -594,6 +602,61 @@ namespace EasyRDP.Client.Wpf
         public RelayCommand ResetKeysCommand { get; }
         /// <summary>切换连接详情面板可见性。</summary>
         public RelayCommand ToggleDetailsCommand { get; }
+
+        // ====== 缩放模式（RealVNC 风格：Fit/Actual/Stretch 三态循环） ======
+
+        /// <summary>循环切换缩放模式的命令。</summary>
+        public RelayCommand CycleZoomCommand { get; }
+
+        private ZoomMode _zoomMode = ZoomMode.Fit;
+
+        /// <summary>当前缩放模式。</summary>
+        public ZoomMode ZoomMode
+        {
+            get { return _zoomMode; }
+            private set
+            {
+                if (_zoomMode == value) return;
+                _zoomMode = value;
+                OnPropertyChanged(nameof(ZoomMode));
+                OnPropertyChanged(nameof(BrushStretch));
+                OnPropertyChanged(nameof(ZoomModeText));
+            }
+        }
+
+        /// <summary>映射到 ImageBrush.Stretch 的枚举值（xaml 绑定）。</summary>
+        public System.Windows.Media.Stretch BrushStretch
+        {
+            get
+            {
+                switch (_zoomMode)
+                {
+                    case ZoomMode.Actual: return System.Windows.Media.Stretch.None;
+                    case ZoomMode.Stretch: return System.Windows.Media.Stretch.Fill;
+                    default: return System.Windows.Media.Stretch.Uniform;
+                }
+            }
+        }
+
+        /// <summary>缩放模式显示文本（悬浮条按钮）。</summary>
+        public string ZoomModeText
+        {
+            get
+            {
+                switch (_zoomMode)
+                {
+                    case ZoomMode.Actual: return "缩放:原始";
+                    case ZoomMode.Stretch: return "缩放:拉伸";
+                    default: return "缩放:适应";
+                }
+            }
+        }
+
+        /// <summary>三态循环切换缩放模式。</summary>
+        private void CycleZoom()
+        {
+            ZoomMode = (ZoomMode)(((int)_zoomMode + 1) % 3);
+        }
 
         // ====== 多服务器配置管理 ======
 

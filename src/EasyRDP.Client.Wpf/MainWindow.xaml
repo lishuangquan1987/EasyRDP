@@ -129,10 +129,43 @@
                            PreviewMouseUp="RenderImage_PreviewMouseUp"
                            MouseWheel="RenderImage_MouseWheel">
                     <Rectangle.Fill>
-                        <ImageBrush ImageSource="{Binding RenderBitmap}" Stretch="Uniform"
+                        <ImageBrush ImageSource="{Binding RenderBitmap}" Stretch="{Binding BrushStretch}"
                                     RenderOptions.BitmapScalingMode="Fant"/>
                     </Rectangle.Fill>
                 </Rectangle>
+
+                <!-- 悬浮工具条（RealVNC 风格）：鼠标在画面移动时出现，静止 2 秒自动隐藏。
+                     叠加在远程画面上层，提供断开/全屏/远程按键/详情等快捷操作，
+                     不占窗口布局空间。 -->
+                <Border x:Name="FloatingToolbar"
+                        HorizontalAlignment="Center" VerticalAlignment="Top"
+                        Margin="0,10,0,0" Padding="8,5"
+                        Background="#CC101014" CornerRadius="6"
+                        Visibility="Collapsed" IsHitTestVisible="True">
+                    <StackPanel Orientation="Horizontal">
+                        <Button Content="断开" Style="{StaticResource ToolbarButtonStyle}"
+                                Command="{Binding StopCommand}" Margin="2,0" Padding="10,4"
+                                ToolTip="断开连接并关闭此窗口"/>
+                        <Button Content="全屏" Style="{StaticResource ToolbarButtonStyle}"
+                                Command="{Binding FullscreenCommand}" Margin="2,0" Padding="10,4"
+                                ToolTip="切换全屏/窗口（F11）"/>
+                        <Button Content="Lock" Style="{StaticResource ToolbarButtonStyle}"
+                                Command="{Binding LockCommand}" Margin="2,0" Padding="10,4"
+                                ToolTip="远程锁定（Win+L）"/>
+                        <Button Content="Alt+Tab" Style="{StaticResource ToolbarButtonStyle}"
+                                Command="{Binding AltTabCommand}" Margin="2,0" Padding="10,4"
+                                ToolTip="远端发送 Alt+Tab"/>
+                        <Button Content="Reset" Style="{StaticResource ToolbarButtonStyle}"
+                                Command="{Binding ResetKeysCommand}" Margin="2,0" Padding="10,4"
+                                ToolTip="释放卡住的修饰键"/>
+                        <Button Content="Details" Style="{StaticResource ToolbarButtonStyle}"
+                                Command="{Binding ToggleDetailsCommand}" Margin="2,0" Padding="10,4"
+                                ToolTip="连接详情面板"/>
+                        <Button Content="{Binding ZoomModeText}" Style="{StaticResource ToolbarButtonStyle}"
+                                Command="{Binding CycleZoomCommand}" Margin="2,0" Padding="10,4"
+                                ToolTip="循环切换缩放模式：适应/原始/拉伸"/>
+                    </StackPanel>
+                </Border>
 
                 <!-- 远程光标叠加层：显示服务端光标形状/位置，盖住本地箭头光标。
                      不参与命中测试，鼠标事件仍由 RenderImage 处理。 -->
