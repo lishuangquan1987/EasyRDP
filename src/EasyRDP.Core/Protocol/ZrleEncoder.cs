@@ -295,8 +295,46 @@ namespace EasyRDP.Core.Protocol
                 // 会保护此帧不被覆盖（ClientStreamSession），导致周期性延迟尖峰。
                 IsKeyframe = false,
                 Width = _width,
-                Height = _height
+                Height = _height,
+                // regionCount 即本帧变化瓦片数（每个变化瓦片产生一个 region）。
+                // 供 D14 混合编码切换判定与 D11 动态帧统计使用。
+                ChangedTileCount = regionCount
             };
+        }
+
+        /// <summary>
+        /// 帧间变化测量（D14 混合编码专用）：与内部参考帧逐瓦片比较统计变化瓦片数，
+        /// 并把参考帧推进到当前帧。只比较不压缩，开销 ≈ 静态帧 ZRLE 编码的比较部分
+        /// （2K 全帧 ~10-20ms）。用途：H264 激活期间持续监测帧间变化量，同时维持
+        /// ZRLE 参考帧新鲜——变化回落后可直接切回 ZRLE 增量编码（参考帧无缺口）。
+        /// 返回 -1 表示未初始化/参数无效（调用方视为"变化量未知"）。
+        /// </summary>
+        public int MeasureChangedTiles(byte[] pixels)
+        {
+            if (!_initialized || _disposed || pixels == null || _referenceFrame == null)
+                return -1;
+
+            int tilesX = (_width + TileSize - 1) / TileSize;
+            int tilesY = (_height + TileSize - 1) / TileSize;
+            int changed = 0;
+            for (int ty = 0; ty < tilesY; ty++)
+            {
+                for (int tx = 0; tx < tilesX; tx++)
+                {
+                    int x0 = tx * TileSize;
+                    int y0 = ty * TileSize;
+                    int tileW = Math.Min(TileSize, _width - x0);
+                    int tileH = Math.Min(TileSize, _height - y0);
+                    if (!TileEquals(pixels, _referenceFrame, x0, y0, tileW, tileH))
+                        changed++;
+                }
+            }
+            // 推进参考帧：H264 模式下 ZRLE 的 Encode 不再被调用（不更新参考帧），
+            // 由本方法负责推进，保证切回 ZRLE 时增量编码基准是最新画面。
+            int copyLen = Math.Min(pixels.Length, _referenceFrame.Length);
+            if (copyLen > 0)
+                Buffer.BlockCopy(pixels, 0, _referenceFrame, 0, copyLen);
+            return changed;
         }
 
         /// <summary>

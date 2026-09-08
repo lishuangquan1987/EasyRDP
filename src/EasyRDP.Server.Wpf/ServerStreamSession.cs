@@ -129,6 +129,10 @@ namespace EasyRDP.Server.Wpf
         // double 非原子读写的撕裂对诊断统计无害（近似值足够）。
         private double _avgEncodeMs;
 
+        // D11 修复：动态帧（变化瓦片数>0）独立编码耗时窗口（静态帧稀释全帧均值导致降档失效）
+        private Queue<long> _dynEncodeTimes = new Queue<long>();
+        private long _dynEncodeSum;
+
         // D12 global load
         private volatile int _globalLoadLevel;
 
@@ -171,6 +175,31 @@ namespace EasyRDP.Server.Wpf
         // 客户端解码失败（dsRefLost/dsNoParamSets）后 P 帧持续失败，只能等周期性 IDR
         // （低帧率下 10~15s）；收到本请求后立即给出一帧 IDR，1~2 帧内恢复画面。
         private volatile bool _keyframeRequested;
+
+        // ── D14：动态混合编码（ZRLE 基线 + H264 高动态分流）──
+        // 日志实证：ZRLE 无损 Deflate 在大变化场景（视频/滚动/全屏切换）单帧 100-366ms，
+        // 帧率被锁死在 3-5 FPS；而静止/局部变化时 ZRLE 仅 8-40ms 且无损。
+        // 借鉴 TeamViewer/RealVNC 内容自适应：变化瓦片持续超阈值时切换软件 H264
+        // （SCREEN_CONTENT_REAL_TIME + 多线程 + 有损），变化回落后切回 ZRLE 无损增量。
+        // 切换协议：每帧 VideoFrameMessage.Codec 携带实际编码器，客户端按帧头选解码器。
+        private IVideoEncoder _h264Encoder;      // H264 备用编码器（首次切换时懒创建）
+        private ZrleEncoder _zrleEncoder;        // ZRLE 主编码器引用（协商 Zrle 时 = _encoder）
+        private int _zrleEncW = -1, _zrleEncH = -1; // ZRLE 编码器已初始化尺寸（-1=未初始化）
+        private int _h264EncW = -1, _h264EncH = -1; // H264 编码器已初始化尺寸（-1=未初始化）
+        private volatile bool _h264Active;       // 当前帧是否走 H264 编码
+        private bool _h264ForceIdrNext;          // 激活后首帧强制 IDR（客户端解码器无参考帧）
+        private int _h264HighStreak;             // 连续高变化帧数（触发切 H264）
+        private int _h264LowStreak;              // 连续低变化帧数（触发切回 ZRLE）
+        private int _h264FramesEncoded;          // H264 模式已编码帧数（诊断）
+        private bool _h264Allowed;               // 混合模式开关（协商 Zrle 且本机 H264Software 可用）
+        // 变化瓦片数阈值：2K 全屏 920 瓦片，>200 瓦片(~22%) 的帧 ZRLE 实测 >180ms，
+        // 此时 H264 有损编码更快且体积更小；<60 瓦片时 ZRLE 增量更快且无损。
+        private const int H264HighChangeTiles = 200;
+        private const int H264LowChangeTiles = 60;
+        // 连续 3 帧高变化才切 H264（避免瞬时大变化误切）；连续 30 帧低变化才切回
+        // （保守防振荡；H264 模式下帧率 15-20FPS，30 帧 ≈ 1.5-2s 的无损恢复期）。
+        private const int H264SwitchInStreak = 3;
+        private const int H264SwitchOutStreak = 30;
 
         // Threads
         private Thread _encodeThread;
@@ -252,6 +281,23 @@ namespace EasyRDP.Server.Wpf
             }
             Logger.Info("Session {0}: encoder created for codec {1}", sessionId, codec);
 
+            // D14 混合模式探测：协商 Zrle 且本机 H264Software 可用时，启用"ZRLE 基线 +
+            // H264 高动态分流"。H264 编码器首次切换时才懒创建（避免未用到也占内存）。
+            // 探测失败不影响主流程（纯 ZRLE 路径保持原行为）。
+            _h264Allowed = false;
+            if (codec == CodecId.Zrle)
+            {
+                IVideoEncoder probe = null;
+                try { probe = EncoderFactory.Create(CodecId.H264Software); } catch { }
+                if (probe != null)
+                {
+                    probe.Dispose();
+                    _h264Allowed = true;
+                }
+                Logger.Info("Session {0}: D14 hybrid encoding {1} (ZRLE baseline + H264Software dynamic)",
+                    sessionId, _h264Allowed ? "ENABLED" : "disabled (H264Software unavailable)");
+            }
+
             // 弱机优化：ZRLE 流控模式下客户端请求驱动（间隔 ≥250ms），服务端 60fps 捕获
             // 纯属浪费——实测捕获 863 帧 vs 编码 452 帧，半数捕获帧被 flow-drop 丢弃，
             // 捕获线程还和编码线程争抢弱机 CPU。流控模式下把捕获间隔降到 100ms
@@ -295,6 +341,16 @@ namespace EasyRDP.Server.Wpf
                 _encodeBuf = new byte[_lastW * _lastH * 4];
 
                 _encoder.Initialize(_lastW, _lastH, TargetBitrate);
+
+                // D14：记录 ZRLE 主编码器引用与已初始化尺寸（切换 H264 后 _encoder 改指
+                // H264，此引用保持不变供切回）；重置混合状态机（会话对象可能被复用）。
+                _zrleEncoder = _encoder as ZrleEncoder;
+                _zrleEncW = _lastW; _zrleEncH = _lastH;
+                _h264Active = false;
+                _h264ForceIdrNext = false;
+                _h264HighStreak = 0;
+                _h264LowStreak = 0;
+                _h264FramesEncoded = 0;
 
                 // Pre-allocate capture buffers（按主屏全分辨率分配，降采样后帧更小也能容纳）
                 int size = bounds.Width * bounds.Height * 4;
@@ -408,12 +464,22 @@ namespace EasyRDP.Server.Wpf
                 _cursorSession = null;
             }
 
-            if (_encoder != null && encodeJoined)
+            if (encodeJoined)
             {
                 // Only dispose if thread joined cleanly
-                _encoder.Dispose();
+                // D14：dispose 当前激活编码器 + 备用编码器（Dispose 均幂等，
+                // ReferenceEquals 防同一实例双重释放）
+                if (_encoder != null)
+                    _encoder.Dispose();
+                if (_zrleEncoder != null && !ReferenceEquals(_zrleEncoder, _encoder))
+                    _zrleEncoder.Dispose();
+                if (_h264Encoder != null && !ReferenceEquals(_h264Encoder, _encoder))
+                    _h264Encoder.Dispose();
             }
             _encoder = null;
+            _zrleEncoder = null;
+            _h264Encoder = null;
+            _h264Active = false;
             // 释放检测器内部缓存（参考帧/哈希），便于会话对象被复用时状态干净
             if (_changeDetector != null) _changeDetector.Reset();
 
@@ -658,8 +724,18 @@ namespace EasyRDP.Server.Wpf
                     _lastW = newEncodeW;
                     _lastH = newEncodeH;
                     _encodeBuf = new byte[_lastW * _lastH * 4];
+                    // D14：当前激活编码器立即重建；备用编码器（ZRLE/H264 中的非激活方）
+                    // 尺寸标记失效（-1），下次激活切换时由尺寸检查懒重建。
                     _encoder.Reset();
                     _encoder.Initialize(_lastW, _lastH, TargetBitrate);
+                    if (_zrleEncoder != null && !ReferenceEquals(_zrleEncoder, _encoder))
+                    {
+                        _zrleEncW = -1; _zrleEncH = -1;
+                    }
+                    if (_h264Encoder != null && !ReferenceEquals(_h264Encoder, _encoder))
+                    {
+                        _h264EncW = -1; _h264EncH = -1;
+                    }
                 }
 
                 long encodeStart = Stopwatch.GetTimestamp();
@@ -689,7 +765,10 @@ namespace EasyRDP.Server.Wpf
                     //   避免双重变化检测（节省 3-5ms/帧），始终返回 ShouldEncode=true，
                     //   由 ZrleEncoder 内部决定实际编码哪些瓦片。
                     // Detect 内部缓存计算结果，编码成功后由 Commit() 提升为参考帧。
-                    isZrle = _encoder != null && _encoder.Codec == CodecId.Zrle;
+                    // D14：混合模式下无论当前激活 ZRLE 还是 H264，变化检测均由编码路径
+                    // 内部处理（ZRLE 瓦片比较 / H264 MeasureChangedTiles），外部检测器
+                    // 不参与（否则 H264 模式下多一次全帧块哈希开销）。故按协商 codec 判断。
+                    isZrle = _codec == CodecId.Zrle;
                     var changeResult = isZrle
                         ? new FrameChangeResult { ShouldEncode = true }
                         : _changeDetector.Detect(pixelsToEncode, _lastW, _lastH);
@@ -730,7 +809,8 @@ namespace EasyRDP.Server.Wpf
                     Logger.Debug("Session {0}: calling Encode seq={1} forceKey={2} res={3}x{4} bgraLen={5}",
                         _sessionId, _sequenceNumber, forceKey, frame.Width, frame.Height, frame.Pixels.Length);
 
-                    result = _encoder.Encode(pixelsToEncode, forceKey);
+                    // D14 混合编码入口：内部按变化瓦片数在 ZRLE/H264Software 间自动切换
+                    result = EncodeFrameHybrid(pixelsToEncode, forceKey);
                 }
                 catch (Exception ex)
                 {
@@ -784,17 +864,14 @@ namespace EasyRDP.Server.Wpf
                 // D11: track encode time and adapt frame rate / resolution / bitrate
                 lock (_lock)
                 {
-                    // ZRLE 路径变化率：编码器内部做 64×64 瓦片对比，统计变化瓦片比例
-                    if (isZrle && _encoder is ZrleEncoder)
+                    // D14/D11：变化瓦片数已由编码路径算好（ZRLE Encode / H264 模式下
+                    // MeasureChangedTiles），直接换算比例，省掉 EstimateChangeRatio
+                    // 的二次全帧遍历（每帧 ~10-20ms）。-1 表示未统计（理论不发生）。
+                    if (result.ChangedTileCount >= 0)
                     {
-                        try
-                        {
-                            _contentChangeRatio = ((ZrleEncoder)_encoder).EstimateChangeRatio(pixelsToEncode);
-                        }
-                        catch
-                        {
-                            // 统计失败不影响主流程
-                        }
+                        long totalTiles = (long)((_lastW + 63) / 64) * ((_lastH + 63) / 64);
+                        if (totalTiles > 0)
+                            _contentChangeRatio = Math.Min(1f, (float)result.ChangedTileCount / totalTiles);
                     }
 
                     _encodeTimes.Enqueue(encodeEnd - encodeStart);
@@ -803,10 +880,28 @@ namespace EasyRDP.Server.Wpf
                     {
                         _encodeSum -= _encodeTimes.Dequeue();
                     }
+
+                    // D11 修复：动态帧（变化瓦片数>0）独立统计窗口。静止帧 8-18ms 会把
+                    // 全帧均值稀释到降档阈值以下，导致降档永不触发（日志实证：全会话
+                    // 均值 51.5ms、大变化帧均值 183.9ms、峰值 366ms、降档 0 次）。
+                    if (result.ChangedTileCount > 0)
+                    {
+                        _dynEncodeTimes.Enqueue(encodeEnd - encodeStart);
+                        _dynEncodeSum += (encodeEnd - encodeStart);
+                        if (_dynEncodeTimes.Count > AdaptiveWindow)
+                        {
+                            _dynEncodeSum -= _dynEncodeTimes.Dequeue();
+                        }
+                    }
+
                     if (_encodeTimes.Count >= AdaptiveWindow)
                     {
-                        double avgMs = _encodeSum * 1000.0 / Stopwatch.Frequency / _encodeTimes.Count;
-                        _avgEncodeMs = avgMs;
+                        double allAvgMs = _encodeSum * 1000.0 / Stopwatch.Frequency / _encodeTimes.Count;
+                        // 降档判定用动态帧均值（动态窗口未满时退回全帧均值）
+                        double avgMs = (_dynEncodeTimes.Count >= AdaptiveWindow)
+                            ? _dynEncodeSum * 1000.0 / Stopwatch.Frequency / _dynEncodeTimes.Count
+                            : allAvgMs;
+                        _avgEncodeMs = allAvgMs;
 
                         // 帧率自适应（原有）：编码跟不上 → 降帧率；充裕 → 逐步回升
                         if (avgMs > 33)
@@ -918,6 +1013,8 @@ namespace EasyRDP.Server.Wpf
                     ContentWidth = _contentW,
                     ContentHeight = _contentH,
                     IsKeyframe = result.IsKeyframe,
+                    // D14：携带本帧实际编码器，客户端按帧头选择解码器
+                    Codec = _encoder != null ? _encoder.Codec : _codec,
                     SequenceNumber = _sequenceNumber++,
                     Data = result.Data
                 };
@@ -975,6 +1072,153 @@ namespace EasyRDP.Server.Wpf
                         }
                     }
                 }
+            }
+        }
+
+        /// <summary>
+        /// D14 混合编码入口：按内容变化量在 ZRLE（无损增量）与 H264Software（有损全帧）间自动切换。
+        /// 状态机：
+        ///   ZRLE 模式：Encode 内部返回变化瓦片数，连续 H264SwitchInStreak 帧 ≥ H264HighChangeTiles
+        ///     → 激活 H264（下帧生效，首帧强制 IDR——客户端 H264 解码器无参考帧）。
+        ///   H264 模式：每帧编码后用 ZrleEncoder.MeasureChangedTiles 测帧间变化（同时推进
+        ///     ZRLE 参考帧），连续 H264SwitchOutStreak 帧 &lt; H264LowChangeTiles → 切回 ZRLE
+        ///     （参考帧已推进到最新画面，切回后增量编码无缝）。
+        /// 返回的 EncodedFrame.ChangedTileCount 统一携带变化瓦片数（供 D11 动态帧统计）。
+        /// 编码失败时立即切回 ZRLE（无损、无参考依赖，保证画面连续性）。
+        /// </summary>
+        private EncodedFrame EncodeFrameHybrid(byte[] pixels, bool forceKey)
+        {
+            // 混合未启用（协商非 Zrle / 本机无 H264Software）：纯协商编码器路径（原行为）
+            if (!_h264Allowed || _encoder == null)
+            {
+                EncodedFrame plain = _encoder.Encode(pixels, forceKey);
+                return plain;
+            }
+
+            if (_h264Active)
+            {
+                // ── H264 模式：有损全帧编码 + 帧间变化监测 ──
+                EncodedFrame r = _h264Encoder.Encode(pixels, forceKey || _h264ForceIdrNext);
+                _h264ForceIdrNext = false;
+                bool ok = r.Data != null && r.Data.Length > 0;
+                if (ok)
+                {
+                    _h264FramesEncoded++;
+                    // 帧间变化测量（同时推进 ZRLE 参考帧，为切回做准备）
+                    int changed = _zrleEncoder != null ? _zrleEncoder.MeasureChangedTiles(pixels) : -1;
+                    r.ChangedTileCount = changed;
+                    if (changed >= 0 && changed < H264LowChangeTiles)
+                    {
+                        _h264LowStreak++;
+                        _h264HighStreak = 0;
+                        if (_h264LowStreak >= H264SwitchOutStreak)
+                        {
+                            SwitchToZrle("low change streak (" + changed + " tiles)");
+                        }
+                    }
+                    else
+                    {
+                        _h264LowStreak = 0;
+                    }
+                    // H264 模式编码统计：每 100 帧（低频诊断，验证 H264 模式收益）
+                    if (_h264FramesEncoded % 100 == 0)
+                        Logger.Info("Session {0}: D14 H264 mode progress: frames={1} lastSeq={2} outLen={3} changedTiles={4}",
+                            _sessionId, _h264FramesEncoded, _sequenceNumber, r.Data.Length, changed);
+                }
+                else
+                {
+                    // H264 编码失败：立即切回 ZRLE 保证画面连续
+                    SwitchToZrle("h264 encode failed");
+                }
+                return r;
+            }
+
+            // ── ZRLE 模式：无损增量编码 + 高变化检测 ──
+            EncodedFrame zr = _zrleEncoder.Encode(pixels, forceKey);
+            if (zr.Data != null && zr.Data.Length > 0 && zr.ChangedTileCount >= H264HighChangeTiles)
+            {
+                _h264HighStreak++;
+                _h264LowStreak = 0;
+                if (_h264HighStreak >= H264SwitchInStreak)
+                {
+                    _h264HighStreak = 0;
+                    if (TryActivateH264())
+                    {
+                        _h264Active = true;
+                        _h264ForceIdrNext = true; // 客户端 H264 解码器无参考帧，首帧必须 IDR
+                    }
+                }
+            }
+            else
+            {
+                _h264HighStreak = 0;
+            }
+            return zr;
+        }
+
+        /// <summary>
+        /// 激活 H264 编码器：懒创建（首次）+ 尺寸匹配检查（D11 降档后懒重建），
+        /// 成功后 _encoder 改指 H264。失败（创建异常/DLL 不可用）时禁用混合模式并保持 ZRLE。
+        /// </summary>
+        private bool TryActivateH264()
+        {
+            try
+            {
+                if (_h264Encoder == null)
+                    _h264Encoder = EncoderFactory.Create(CodecId.H264Software);
+                if (_h264Encoder == null)
+                {
+                    Logger.Warn("Session {0}: D14 H264Software unavailable — hybrid disabled", _sessionId);
+                    _h264Allowed = false;
+                    return false;
+                }
+                if (_h264EncW != _lastW || _h264EncH != _lastH)
+                {
+                    _h264Encoder.Reset();
+                    _h264Encoder.Initialize(_lastW, _lastH, TargetBitrate);
+                    _h264EncW = _lastW;
+                    _h264EncH = _lastH;
+                }
+                _encoder = _h264Encoder;
+                _h264LowStreak = 0;
+                _h264FramesEncoded = 0;
+                Logger.Info("Session {0}: D14 codec switch ZRLE -> H264Software (high change streak), res={1}x{2} bitrate={3}",
+                    _sessionId, _lastW, _lastH, TargetBitrate);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn(ex, "Session {0}: D14 activate H264 failed — stay on ZRLE", _sessionId);
+                _h264Allowed = false;
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// 切回 ZRLE 编码器：先做尺寸匹配检查（H264 模式期间 D11 降档时 ZRLE 需重建），
+        /// ZRLE 参考帧已由 MeasureChangedTiles 持续推进，切回后增量编码无缝衔接。
+        /// </summary>
+        private void SwitchToZrle(string reason)
+        {
+            if (_zrleEncoder == null) return;
+            try
+            {
+                if (_zrleEncW != _lastW || _zrleEncH != _lastH)
+                {
+                    _zrleEncoder.Reset();
+                    _zrleEncoder.Initialize(_lastW, _lastH, TargetBitrate);
+                    _zrleEncW = _lastW;
+                    _zrleEncH = _lastH;
+                }
+                _encoder = _zrleEncoder;
+                _h264Active = false;
+                _h264LowStreak = 0;
+                Logger.Info("Session {0}: D14 codec switch H264Software -> ZRLE ({1}), res={2}x{3}",
+                    _sessionId, reason, _lastW, _lastH);
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn(ex, "Session {0}: D14 switch back to ZRLE failed", _sessionId);
             }
         }
 

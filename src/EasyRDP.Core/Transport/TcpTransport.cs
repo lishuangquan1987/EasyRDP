@@ -63,41 +63,80 @@ namespace EasyRDP.Core.Transport
             _receiveThread.Start();
         }
 
+        /// <summary>
+        /// 大消息分块阈值（字节）。>此值的消息分块写、块间释放发送锁让小消息插队。
+        /// 64KB：覆盖绝大多数单条控制消息（<1KB）与中小视频帧；1MB 级大帧分 ~16 块，
+        /// 每块间隙都可插入 35B 光标更新 / 剪贴板 / 输入反馈。
+        /// </summary>
+        internal const int LargeMessageChunkSize = 64 * 1024;
+
         public void Send(byte[] message)
         {
             if (message == null)
                 return;
-            lock (_sendLock)
+            // 手动 Monitor.Enter/Exit（不能用 lock 语法糖）：大消息分块写需要在中途
+            // Exit/Enter 让小消息插队；lock 块内手动 Exit 会导致块尾隐式 Exit 抛
+            // SynchronizationLockException（lock 展开为 try/finally+Exit，重复释放）。
+            Monitor.Enter(_sendLock);
+            try
             {
                 if (_client == null || !_client.Connected)
                     return;
-                try
+                NetworkStream stream = _client.GetStream();
+                if (message.Length <= LargeMessageChunkSize)
                 {
-                    NetworkStream stream = _client.GetStream();
                     stream.Write(message, 0, message.Length);
-                    // 调试日志：记录发送的完整消息（type + 总长度），供排障追踪。
-                    // InputEvent（~120Hz 鼠标流）降频为每 20 条记录一次。
-                    bool isInputEvent = message.Length > 1
-                        && message[1] == (byte)MessageType.InputEvent;
-                    if (!isInputEvent || Interlocked.Increment(ref _inputSendLogCounter) % 20 == 0)
-                    {
-                        Logger.Debug("TcpTransport.Send: type=0x{0:X2} bytes={1}",
-                            message.Length > 1 ? message[1] : 0, message.Length);
-                    }
                 }
-                catch (Exception ex)
+                else
                 {
-                    if (_client == null || !_client.Connected)
+                    // 队头阻塞消除：1MB 视频帧一次 Write 会长时间持有 _sendLock，
+                    // 期间 35B 光标更新/输入事件/剪贴板只能排队（表现为鼠标回显卡顿）。
+                    // 分块写 + 块间释放锁重取，等待中的小消息发送可在块间隙插队；
+                    // 无等待者时 Exit+Enter 仅为两次原子操作（纳秒级），无额外开销。
+                    // TCP 是字节流，接收端 MessageFramingBuffer 按完整消息解析，
+                    // 分块写不影响协议正确性。
+                    for (int offset = 0; offset < message.Length; offset += LargeMessageChunkSize)
                     {
-                        // 对端断开导致的写入失败是正常断连竞态，限频记录并触发清理
-                        Logger.Warn("Send failed: client disconnected ({0})", ex.Message);
-                        try { _client.Close(); } catch { }
-                        ThreadPool.QueueUserWorkItem(s => Disconnect());
-                        return;
+                        int len = Math.Min(LargeMessageChunkSize, message.Length - offset);
+                        stream.Write(message, offset, len);
+                        if (offset + len < message.Length)
+                        {
+                            Monitor.Exit(_sendLock);
+                            Thread.Sleep(0); // 让出时间片给等待中的发送线程（若有）
+                            Monitor.Enter(_sendLock);
+                            // 重取锁期间连接可能已被其他线程关闭（Disconnected 清理置 null）
+                            if (_client == null || !_client.Connected)
+                                return;
+                            stream = _client.GetStream();
+                        }
                     }
-                    Logger.Error(ex, "Send failed: {0}", ex.Message);
-                    Log("Send failed: " + ex.Message);
                 }
+                // 调试日志：记录发送的完整消息（type + 总长度），供排障追踪。
+                // InputEvent（~120Hz 鼠标流）降频为每 20 条记录一次。
+                bool isInputEvent = message.Length > 1
+                    && message[1] == (byte)MessageType.InputEvent;
+                if (!isInputEvent || Interlocked.Increment(ref _inputSendLogCounter) % 20 == 0)
+                {
+                    Logger.Debug("TcpTransport.Send: type=0x{0:X2} bytes={1}",
+                        message.Length > 1 ? message[1] : 0, message.Length);
+                }
+            }
+            catch (Exception ex)
+            {
+                if (_client == null || !_client.Connected)
+                {
+                    // 对端断开导致的写入失败是正常断连竞态，限频记录并触发清理
+                    Logger.Warn("Send failed: client disconnected ({0})", ex.Message);
+                    try { _client.Close(); } catch { }
+                    ThreadPool.QueueUserWorkItem(s => Disconnect());
+                    return;
+                }
+                Logger.Error(ex, "Send failed: {0}", ex.Message);
+                Log("Send failed: " + ex.Message);
+            }
+            finally
+            {
+                Monitor.Exit(_sendLock);
             }
         }
 

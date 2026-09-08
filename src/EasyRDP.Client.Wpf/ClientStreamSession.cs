@@ -18,6 +18,11 @@ namespace EasyRDP.Client.Wpf
 
         private ITransport _transport;
         private IVideoDecoder _decoder;
+        // D14 混合解码：服务端会话内按内容在 ZRLE/H264 间动态切换（帧头 Codec 字段），
+        // 客户端收到首个 H264 帧时懒创建 H264 解码器；-1 表示未初始化/需重建。
+        private IVideoDecoder _h264Decoder;
+        private int _h264DecW = -1, _h264DecH = -1;
+        private bool _h264DecoderUnavailable;   // H264 解码器创建失败（DLL 缺失），防每帧重试刷日志
         private FrameBuffer _frameBuffer;
         private IRenderTarget _renderTarget;
         private volatile bool _running;
@@ -230,6 +235,10 @@ namespace EasyRDP.Client.Wpf
 
             _decoder?.Dispose();
             _decoder = null;
+            _h264Decoder?.Dispose();
+            _h264Decoder = null;
+            _h264DecW = -1;
+            _h264DecH = -1;
             _frameBuffer?.Reset();
             _frameBuffer = null;
             Logger.Info("ClientStreamSession stopped");
@@ -748,12 +757,18 @@ namespace EasyRDP.Client.Wpf
 
             // 编码/显示分辨率变化：重建解码器与渲染目标（D11 降采样后帧尺寸变化）。
             // 只影响显示尺寸，不影响鼠标映射（映射用内容坐标空间）。
-            if (_decoder != null && (msg.Width != FrameWidth || msg.Height != FrameHeight))
+            // D14：协商解码器立即重建；H264 懒解码器由下方尺寸检查标记重建（_h264DecW=-1）。
+            if (msg.Width != FrameWidth || msg.Height != FrameHeight)
             {
                 Logger.Info("Resolution changed: {0}x{1} -> {2}x{3}",
                     FrameWidth, FrameHeight, msg.Width, msg.Height);
-                _decoder.Reset();
-                _decoder.Initialize(msg.Width, msg.Height);
+                if (_decoder != null)
+                {
+                    _decoder.Reset();
+                    _decoder.Initialize(msg.Width, msg.Height);
+                }
+                _h264DecW = -1;
+                _h264DecH = -1;
                 _renderTarget?.Resize(msg.Width, msg.Height);
             }
 
@@ -777,18 +792,62 @@ namespace EasyRDP.Client.Wpf
             byte[] writeSlot = _frameBuffer.BorrowWriteBuffer(frameSize);
             if (writeSlot == null) return;
 
-            if (_decoder == null)
+            // D14：按帧头 Codec 选择解码器（会话内 ZRLE/H264 动态切换）。
+            // H264 解码器懒创建：首次收到 H264 帧时创建并 Initialize。
+            IVideoDecoder decoder;
+            if (msg.Codec == CodecId.H264Software || msg.Codec == CodecId.H264Hardware)
             {
-                // 解码器不可用 — 无法处理 H264 数据，丢弃此帧
+                if (_decoder != null && _decoder.Codec == msg.Codec)
+                {
+                    // 协商即 H264 的旧路径：复用 InitPipeline 创建的解码器（尺寸重建已在上方完成）
+                    decoder = _decoder;
+                }
+                else
+                {
+                    if (_h264Decoder == null)
+                    {
+                        if (_h264DecoderUnavailable)
+                            return; // 已确认不可用，静默丢帧（错误只记录一次）
+                        _h264Decoder = DecoderFactory.Create(CodecId.H264Software);
+                        if (_h264Decoder == null)
+                        {
+                            _h264DecoderUnavailable = true;
+                            Logger.Error("D14: H264Software decoder unavailable — H264 frames will be dropped " +
+                                "(server switched to lossy codec for high-change content)");
+                            return;
+                        }
+                        Logger.Info("D14: first H264Software frame received — lazy decoder created (seq={0})",
+                            msg.SequenceNumber);
+                        _h264DecW = -1; // 新建解码器必须 Initialize
+                    }
+                    if (_h264DecW != msg.Width || _h264DecH != msg.Height)
+                    {
+                        _h264Decoder.Reset();
+                        _h264Decoder.Initialize(msg.Width, msg.Height);
+                        _h264DecW = msg.Width;
+                        _h264DecH = msg.Height;
+                    }
+                    decoder = _h264Decoder;
+                }
+            }
+            else
+            {
+                decoder = _decoder;
+            }
+
+            if (decoder == null)
+            {
+                // 解码器不可用 — 无法处理数据，丢弃此帧
                 if (_frameCount == 0)
                 {
-                    Logger.Error("No decoder available, cannot decode H264 frame seq={0}", msg.SequenceNumber);
+                    Logger.Error("No decoder available, cannot decode frame seq={0} codec={1}",
+                        msg.SequenceNumber, msg.Codec);
                     RaiseFatal("No video decoder available (codec: " + Codec + ")");
                 }
                 return;
             }
 
-            var result = _decoder.Decode(msg.Data, writeSlot);
+            var result = decoder.Decode(msg.Data, writeSlot);
             if (result.Status != DecodeStatus.Ok)
             {
                 if (result.Status == DecodeStatus.Failed)
@@ -800,7 +859,8 @@ namespace EasyRDP.Client.Wpf
                     // 解码脱同步恢复：P 帧丢失参考帧（dsRefLost/dsNoParamSets）后后续 P 帧持续失败，
                     // 只能等周期性 IDR 恢复（低帧率下 10~15s，长时间黑屏）。立即请求 IDR，
                     // 服务端收到后强制生成关键帧，1~2 帧内恢复画面。
-                    if (Codec == CodecId.H264Software || Codec == CodecId.H264Hardware)
+                    // D14：按帧头 codec 判断（H264 帧才有参考帧依赖，ZRLE 帧失败无需 IDR）。
+                    if (msg.Codec == CodecId.H264Software || msg.Codec == CodecId.H264Hardware)
                         RequestDecoderKeyframe();
                     if (_decodeFailures == 100)
                         RaiseFatal("Video decode failed repeatedly (" + _decodeFailures + " frames) - connection unusable");
@@ -815,9 +875,9 @@ namespace EasyRDP.Client.Wpf
 
             // 阶段二：ZRLE 帧提取脏矩形列表随帧提交（渲染层据此局部更新）。
             // ExtractRects 只解析区域头部（不解压数据），开销可忽略。
-            // H264 帧（Codec != Zrle）保持 dirtyRects=null → 渲染层回退全帧渲染。
+            // D14：按帧头 codec 判断——H264 帧（或非 Zrle 帧）保持 dirtyRects=null → 全帧渲染。
             ScreenRect[] dirtyRects = null;
-            if (Codec == CodecId.Zrle && msg.Data != null)
+            if (msg.Codec == CodecId.Zrle && msg.Data != null)
             {
                 dirtyRects = ZrleRegionCodec.ExtractRects(msg.Data);
                 if (_frameCount <= 10 || _frameCount % 100 == 0)
@@ -847,8 +907,9 @@ namespace EasyRDP.Client.Wpf
             if (_frameCount <= 3 || _frameCount % 100 == 0)
             {
                 long nonBlack = CountNonBlackPixels(writeSlot, msg.Width, msg.Height);
+                // D14：codec 打印帧头实际编码器（混合模式下 ZRLE/H264 交替可见）
                 Logger.Info("Decode pixel check: frameCount={0} seq={1} codec={2} nonBlackRatio={3:P1} (sample={4}/{5})",
-                    _frameCount, msg.SequenceNumber, Codec,
+                    _frameCount, msg.SequenceNumber, msg.Codec,
                     (double)nonBlack / Math.Max(1, ((long)msg.Width * msg.Height) / 64),
                     nonBlack, ((long)msg.Width * msg.Height) / 64);
             }
