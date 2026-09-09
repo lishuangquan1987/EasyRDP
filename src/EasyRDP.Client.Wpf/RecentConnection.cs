@@ -18,6 +18,15 @@ namespace EasyRDP.Client.Wpf
         /// <summary>目标主机地址（IP 或主机名）。</summary>
         public string Host { get; set; }
 
+        /// <summary>连接端口（默认 2000）。</summary>
+        public string Port { get; set; }
+
+        /// <summary>登录用户名（可选）。</summary>
+        public string Username { get; set; }
+
+        /// <summary>登录密码（可选；本地明文存储，同 ServerProfile 策略）。</summary>
+        public string Password { get; set; }
+
         /// <summary>显示名称（可选，为空时 UI 回退到 Host）。</summary>
         public string DisplayName { get; set; }
 

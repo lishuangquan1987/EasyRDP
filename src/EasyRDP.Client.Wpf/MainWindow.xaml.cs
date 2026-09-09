@@ -326,7 +326,8 @@ public partial class MainWindow : Window
     /// <summary>
     /// 按缩放模式设置滚动容器与画面元素尺寸：
     /// Actual（原始大小）→ RenderImage 尺寸 = 远程分辨率，画面大于视口时出现滚动条；
-    /// Fit/Stretch → RenderImage 尺寸 = 视口（内容不溢出，无滚动）。
+    /// Fit/Stretch → RenderImage 尺寸 = Auto（靠 ScrollViewer 的 Horizontal/VerticalContentAlignment
+    /// = Stretch 自动撑满视口），避免显式绑定 ViewportWidth 在布局时序未就绪时为 0 导致黑屏。
     /// 滚动后 RenderImage 的 GetPosition 仍是内容坐标，鼠标映射不受滚动影响。
     /// </summary>
     private void UpdateRenderScroll()
@@ -344,8 +345,9 @@ public partial class MainWindow : Window
         }
         else
         {
-            RenderImage.Width = RenderScroller.ViewportWidth;
-            RenderImage.Height = RenderScroller.ViewportHeight;
+            // double.NaN = WPF Auto 尺寸：由 ScrollViewer 内容 Stretch 撑满视口
+            RenderImage.Width = double.NaN;
+            RenderImage.Height = double.NaN;
         }
     }
 
@@ -927,14 +929,18 @@ public partial class MainWindow : Window
         BottomBar.Visibility = fullscreen ? Visibility.Collapsed : Visibility.Visible;
     }
 
-    /// <summary>由浏览窗口调用：设置连接目标并立即发起连接（双窗口架构入口）。</summary>
-    public void ConnectTo(string host, string port)
+    /// <summary>由浏览窗口调用：设置连接目标（含可选的用户名/密码）并立即发起连接（双窗口架构入口）。</summary>
+    public void ConnectTo(string host, string port, string username = null, string password = null)
     {
         if (_vm == null) return;
         if (!string.IsNullOrWhiteSpace(host))
             _vm.Host = host.Trim();
         if (!string.IsNullOrWhiteSpace(port))
             _vm.Port = port.Trim();
+        if (!string.IsNullOrWhiteSpace(username))
+            _vm.Username = username.Trim();
+        if (!string.IsNullOrWhiteSpace(password))
+            _vm.Password = password;
         if (_vm.ConnectCommand.CanExecute(null))
             _vm.ConnectCommand.Execute(null);
     }

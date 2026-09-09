@@ -63,7 +63,7 @@ namespace EasyRDP.Client.Wpf
             }
         }
 
-        /// <summary>解析 "host[:port]" 输入，打开控制窗口并连接。</summary>
+        /// <summary>解析 "host[:port]" 输入，打开控制窗口并连接（地址栏无用户名/密码）。</summary>
         private void ConnectToHost(string hostPort)
         {
             if (string.IsNullOrWhiteSpace(hostPort)) return;
@@ -76,9 +76,23 @@ namespace EasyRDP.Client.Wpf
                 host = host.Substring(0, idx).Trim();
             }
             if (string.IsNullOrWhiteSpace(host)) return;
+            OpenControlWindow(host, port, null, null);
+        }
 
+        /// <summary>按最近连接项打开控制窗口并连接（携带保存的端口/用户名/密码）。</summary>
+        private void OpenControlWindow(RecentConnection rc)
+        {
+            if (rc == null || string.IsNullOrWhiteSpace(rc.Host)) return;
+            OpenControlWindow(rc.Host.Trim(),
+                string.IsNullOrWhiteSpace(rc.Port) ? "2000" : rc.Port.Trim(),
+                rc.Username, rc.Password);
+        }
+
+        /// <summary>打开新控制窗口（MainWindow）并立即连接。</summary>
+        private void OpenControlWindow(string host, string port, string username, string password)
+        {
             var control = new MainWindow();
-            control.ConnectTo(host, port);
+            control.ConnectTo(host, port, username, password);
             control.Show();
             Logger.Info("HostBrowse: opened control window for {0}:{1}", host, port);
         }
@@ -107,22 +121,27 @@ namespace EasyRDP.Client.Wpf
             }
         }
 
-        /// <summary>卡片：单击选中、双击直连。</summary>
+        /// <summary>卡片：单击选中、双击直连（携带保存的端口/用户名/密码）。</summary>
         private void Card_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
         {
             if (!(sender is Border border) || !(border.DataContext is RecentConnection rc)) return;
             SelectCard(rc);
             if (e.ClickCount == 2)
             {
-                ConnectToHost(rc.Host);
+                OpenControlWindow(rc);
                 e.Handled = true;
             }
         }
 
-        /// <summary>右键菜单：连接。</summary>
+        /// <summary>右键菜单：连接（携带保存的端口/用户名/密码）。</summary>
         private void MenuConnect_Click(object sender, RoutedEventArgs e)
         {
-            if (GetContextHost(sender as MenuItem, out string host))
+            if (!GetContextHost(sender as MenuItem, out string host)) return;
+            var rc = Connections.FirstOrDefault(r =>
+                string.Equals(r.Host, host, StringComparison.OrdinalIgnoreCase));
+            if (rc != null)
+                OpenControlWindow(rc);
+            else
                 ConnectToHost(host);
         }
 
@@ -138,8 +157,8 @@ namespace EasyRDP.Client.Wpf
             var dlg = new Window
             {
                 Title = "Edit - " + host,
-                Width = 380,
-                Height = 190,
+                Width = 400,
+                Height = 330,
                 WindowStartupLocation = WindowStartupLocation.CenterOwner,
                 Owner = this,
                 ResizeMode = ResizeMode.NoResize,
@@ -148,11 +167,21 @@ namespace EasyRDP.Client.Wpf
             };
             var panel = new StackPanel { Margin = new Thickness(14) };
             panel.Children.Add(new TextBlock { Text = "显示名称：", Margin = new Thickness(0, 0, 0, 4) });
-            var nameBox = new TextBox { Text = rc.DisplayName ?? "", Height = 26, VerticalContentAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 0, 10) };
+            var nameBox = new TextBox { Text = rc.DisplayName ?? "", Height = 26, VerticalContentAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 0, 8) };
             panel.Children.Add(nameBox);
-            panel.Children.Add(new TextBlock { Text = "连接地址（IP:port 或 hostname）：", Margin = new Thickness(0, 0, 0, 4) });
-            var hostBox = new TextBox { Text = rc.Host ?? "", Height = 26, VerticalContentAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 0, 10) };
+            panel.Children.Add(new TextBlock { Text = "连接地址（IP 或 hostname）：", Margin = new Thickness(0, 0, 0, 4) });
+            var hostBox = new TextBox { Text = rc.Host ?? "", Height = 26, VerticalContentAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 0, 8) };
             panel.Children.Add(hostBox);
+            panel.Children.Add(new TextBlock { Text = "端口：", Margin = new Thickness(0, 0, 0, 4) });
+            var portBox = new TextBox { Text = string.IsNullOrWhiteSpace(rc.Port) ? "2000" : rc.Port, Height = 26, VerticalContentAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 0, 8) };
+            panel.Children.Add(portBox);
+            panel.Children.Add(new TextBlock { Text = "用户名（可选）：", Margin = new Thickness(0, 0, 0, 4) });
+            var userBox = new TextBox { Text = rc.Username ?? "", Height = 26, VerticalContentAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 0, 8) };
+            panel.Children.Add(userBox);
+            panel.Children.Add(new TextBlock { Text = "密码（可选）：", Margin = new Thickness(0, 0, 0, 4) });
+            var passBox = new PasswordBox { Height = 26, Margin = new Thickness(0, 0, 0, 8) };
+            passBox.Password = rc.Password ?? "";
+            panel.Children.Add(passBox);
             var btns = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
             var ok = new Button { Content = "OK", Width = 72, Margin = new Thickness(0, 0, 8, 0), IsDefault = true };
             var cancel = new Button { Content = "Cancel", Width = 72, IsCancel = true };
@@ -175,6 +204,9 @@ namespace EasyRDP.Client.Wpf
                     bool hostChanged = !string.Equals(item.Host, newHost, StringComparison.OrdinalIgnoreCase);
                     item.Host = newHost;
                     item.DisplayName = newName;
+                    item.Port = string.IsNullOrWhiteSpace(portBox.Text) ? "2000" : portBox.Text.Trim();
+                    item.Username = string.IsNullOrWhiteSpace(userBox.Text) ? null : userBox.Text.Trim();
+                    item.Password = passBox.Password.Length > 0 ? passBox.Password : null;
                     if (hostChanged)
                     {
                         // 地址变更：旧缩略图缓存失效，删除避免张冠李戴
