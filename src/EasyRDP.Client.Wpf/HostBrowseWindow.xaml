@@ -14,10 +14,17 @@
                 <Border.Style>
                     <Style TargetType="Border">
                         <Setter Property="Background" Value="White"/>
+                        <Setter Property="BorderBrush" Value="Transparent"/>
+                        <Setter Property="BorderThickness" Value="1"/>
                         <Style.Triggers>
-                            <!-- 选中态：灰色高亮 -->
+                            <!-- ListBox Item 风格交互：鼠标移入高亮背景，选中态更明显 -->
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Background" Value="#E8F1FC"/>
+                                <Setter Property="BorderBrush" Value="#9DC3E6"/>
+                            </Trigger>
                             <DataTrigger Binding="{Binding IsSelected}" Value="True">
-                                <Setter Property="Background" Value="#E8F0FE"/>
+                                <Setter Property="Background" Value="#D6E7F7"/>
+                                <Setter Property="BorderBrush" Value="#5B9BD5"/>
                             </DataTrigger>
                         </Style.Triggers>
                     </Style>
@@ -25,6 +32,8 @@
                 <Border.ContextMenu>
                     <ContextMenu>
                         <MenuItem Header="Connect" Click="MenuConnect_Click"/>
+                        <MenuItem Header="Edit..." Click="MenuEdit_Click"/>
+                        <Separator/>
                         <MenuItem Header="Rename" Click="MenuRename_Click"/>
                         <MenuItem Header="Delete" Click="MenuDelete_Click"/>
                     </ContextMenu>
@@ -34,12 +43,16 @@
                         <RowDefinition Height="*"/>
                         <RowDefinition Height="Auto"/>
                     </Grid.RowDefinitions>
-                    <!-- 缩略图（正方形，未加载时占位灰块） -->
+                    <!-- 缩略图（正方形，未加载时显示占位图标） -->
                     <Grid Grid.Row="0" Margin="4">
                         <Image Source="{Binding ThumbnailSource}" Stretch="UniformToFill"/>
-                        <Border x:Name="ThumbPlaceholder" Background="#EEF1F4">
-                            <Path Data="M0,0 L24,0 L24,16 L0,16 Z" Fill="#B8C2CC" Stretch="Uniform"
-                                  Width="40" Height="40" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        <Border x:Name="ThumbPlaceholder" Background="#F2F4F6">
+                            <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+                                <TextBlock Text="&#xE770;" FontFamily="Segoe MDL2 Assets" FontSize="40"
+                                           Foreground="#9CA3AF" HorizontalAlignment="Center"/>
+                                <TextBlock Text="无预览" FontSize="12" Foreground="#9CA3AF"
+                                           HorizontalAlignment="Center" Margin="0,4,0,0"/>
+                            </StackPanel>
                         </Border>
                     </Grid>
                     <!-- IP 地址（居中，卡片底部；重命名后显示 DisplayName） -->

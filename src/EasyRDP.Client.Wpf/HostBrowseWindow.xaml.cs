@@ -126,6 +126,67 @@ namespace EasyRDP.Client.Wpf
                 ConnectToHost(host);
         }
 
+        /// <summary>右键菜单：Edit（修改显示名与连接地址，持久化到 recent.json）。
+        /// 地址变更时旧缩略图缓存失效（缩略图以 Host 为 key），新地址首次连接后重新抓图。</summary>
+        private void MenuEdit_Click(object sender, RoutedEventArgs e)
+        {
+            if (!GetContextHost(sender as MenuItem, out string host)) return;
+            var rc = Connections.FirstOrDefault(r =>
+                string.Equals(r.Host, host, StringComparison.OrdinalIgnoreCase));
+            if (rc == null) return;
+
+            var dlg = new Window
+            {
+                Title = "Edit - " + host,
+                Width = 380,
+                Height = 190,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                Owner = this,
+                ResizeMode = ResizeMode.NoResize,
+                WindowStyle = WindowStyle.ToolWindow,
+                ShowInTaskbar = false
+            };
+            var panel = new StackPanel { Margin = new Thickness(14) };
+            panel.Children.Add(new TextBlock { Text = "显示名称：", Margin = new Thickness(0, 0, 0, 4) });
+            var nameBox = new TextBox { Text = rc.DisplayName ?? "", Height = 26, VerticalContentAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 0, 10) };
+            panel.Children.Add(nameBox);
+            panel.Children.Add(new TextBlock { Text = "连接地址（IP:port 或 hostname）：", Margin = new Thickness(0, 0, 0, 4) });
+            var hostBox = new TextBox { Text = rc.Host ?? "", Height = 26, VerticalContentAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 0, 10) };
+            panel.Children.Add(hostBox);
+            var btns = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
+            var ok = new Button { Content = "OK", Width = 72, Margin = new Thickness(0, 0, 8, 0), IsDefault = true };
+            var cancel = new Button { Content = "Cancel", Width = 72, IsCancel = true };
+            ok.Click += (s2, e2) => { dlg.DialogResult = true; };
+            btns.Children.Add(ok);
+            btns.Children.Add(cancel);
+            panel.Children.Add(btns);
+            dlg.Content = panel;
+            dlg.Loaded += (s2, e2) => { nameBox.Focus(); };
+
+            if (dlg.ShowDialog() == true && !string.IsNullOrWhiteSpace(hostBox.Text))
+            {
+                string newHost = hostBox.Text.Trim();
+                string newName = string.IsNullOrWhiteSpace(nameBox.Text) ? null : nameBox.Text.Trim();
+                var list = _store.Load();
+                var item = list.FirstOrDefault(x =>
+                    string.Equals(x.Host, host, StringComparison.OrdinalIgnoreCase));
+                if (item != null)
+                {
+                    bool hostChanged = !string.Equals(item.Host, newHost, StringComparison.OrdinalIgnoreCase);
+                    item.Host = newHost;
+                    item.DisplayName = newName;
+                    if (hostChanged)
+                    {
+                        // 地址变更：旧缩略图缓存失效，删除避免张冠李戴
+                        ThumbnailCache.DeleteThumbnail(host);
+                        item.ThumbnailPath = null;
+                    }
+                    _store.Save(list);
+                }
+                ReloadConnections();
+            }
+        }
+
         /// <summary>右键菜单：重命名（弹输入框改 DisplayName 并持久化）。</summary>
         private void MenuRename_Click(object sender, RoutedEventArgs e)
         {

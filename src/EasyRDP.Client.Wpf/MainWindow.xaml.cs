@@ -2,6 +2,7 @@
 using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
@@ -24,6 +25,9 @@ public partial class MainWindow : Window
     // 全屏 = WindowStyle.None + Maximized + 最大化尺寸覆盖整个监视器（含任务栏区域），
     // 且绝不使用 Topmost（置顶窗口会锁死用户切换前台窗口，断连后尤其危险）。
     private bool _fullscreen;
+    // 全屏退出时恢复的窗口边界/状态（SetWindowPos 硬全屏方案保存）
+    private double _restoreLeft, _restoreTop, _restoreWidth, _restoreHeight;
+    private bool _restoreWasMaximized;
 
     private const int WM_GETMINMAXINFO = 0x0024;
     private const uint MONITOR_DEFAULTTONEAREST = 0x00000002;
@@ -55,6 +59,16 @@ public partial class MainWindow : Window
     [DllImport("user32.dll", CharSet = CharSet.Auto)]
     private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO lpmi);
 
+    // 硬全屏（SetWindowPos 直铺显示器）：绕开 MINMAXINFO 在 DPI 混合/多显示器下的留缝问题
+    private static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
+    private static readonly IntPtr HWND_NOTOPMOST = new IntPtr(-2);
+    private const uint SWP_FRAMECHANGED = 0x0020;
+    private const uint SWP_NOACTIVATE = 0x0010;
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter,
+        int X, int Y, int cx, int cy, uint uFlags);
+
     /// <summary>Win32 MONITORINFO（40 字节）。RECT 平铺为 4 个 int。</summary>
     [StructLayout(LayoutKind.Sequential)]
     private struct MONITORINFO
@@ -76,6 +90,8 @@ public partial class MainWindow : Window
         InitializeComponent();
         // 窗口句柄创建后挂接原生消息钩子（处理 WM_GETMINMAXINFO 实现真正的全屏）
         SourceInitialized += OnSourceInitialized;
+        // 视口尺寸变化（窗口缩放）→ 重算画面元素尺寸（Actual 滚动 / Fit 填充）
+        RenderBorder.SizeChanged += (s, e) => UpdateRenderScroll();
         _vm = new MainWindowViewModel();
         DataContext = _vm;
         // PasswordBox 不支持绑定 Password（安全设计），初始值在 XAML 构造后同步一次，
@@ -151,24 +167,54 @@ public partial class MainWindow : Window
         if (_fullscreen == fullscreen) return;
         _fullscreen = fullscreen;
 
+        IntPtr hwnd = new System.Windows.Interop.WindowInteropHelper(this).Handle;
         if (fullscreen)
         {
-            // 先无边框再最大化：无边框窗口最大化默认只铺工作区（任务栏仍可见），
-            // WndProc 拦截 WM_GETMINMAXINFO 返回 rcMonitor 后才会盖住任务栏。
+            // 保存窗口边界（退出全屏时恢复）
+            _restoreLeft = Left;
+            _restoreTop = Top;
+            _restoreWidth = Width;
+            _restoreHeight = Height;
+            _restoreWasMaximized = WindowState == WindowState.Maximized;
+
+            // 无边框 + SetWindowPos 直铺 rcMonitor 全尺寸 + Topmost：
+            // 这是最可靠的真全屏（盖住任务栏与其它窗口）。相比 MINMAXINFO 方案，
+            // 不受 DPI 缩放/多显示器混合 DPI 影响导致四周留缝。
             WindowStyle = WindowStyle.None;
-            // 若窗口此前已是 Maximized（工作区尺寸），改样式不会触发重新查询 MINMAXINFO，
-            // 必须先复位 Normal 再 Maximized，保证每次进全屏都重新走最大化流程 → 稳定盖住任务栏。
             if (WindowState == WindowState.Maximized)
                 WindowState = WindowState.Normal;
-            WindowState = WindowState.Maximized;
-            Topmost = false;
+
+            IntPtr hMonitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+            var mi = new MONITORINFO();
+            mi.cbSize = (uint)Marshal.SizeOf(typeof(MONITORINFO));
+            if (GetMonitorInfo(hMonitor, ref mi))
+            {
+                SetWindowPos(hwnd, HWND_TOPMOST,
+                    mi.rcMonitorLeft, mi.rcMonitorTop,
+                    mi.rcMonitorRight - mi.rcMonitorLeft, mi.rcMonitorBottom - mi.rcMonitorTop,
+                    SWP_FRAMECHANGED | SWP_NOACTIVATE);
+            }
+            Topmost = true;
             SetFullscreenUI(true);
         }
         else
         {
             WindowStyle = WindowStyle.SingleBorderWindow;
-            WindowState = WindowState.Normal;
             Topmost = false;
+            SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOACTIVATE);
+            WindowState = WindowState.Normal;
+            // 恢复全屏前窗口边界（Maximized 则还原为最大化）
+            if (_restoreWasMaximized)
+            {
+                WindowState = WindowState.Maximized;
+            }
+            else
+            {
+                Left = _restoreLeft;
+                Top = _restoreTop;
+                Width = _restoreWidth;
+                Height = _restoreHeight;
+            }
             SetFullscreenUI(false);
         }
     }
@@ -268,6 +314,39 @@ public partial class MainWindow : Window
                     ? (okBrush ?? idleBrush ?? StatusDot.Foreground)
                     : (idleBrush ?? okBrush ?? StatusDot.Foreground);
             }
+        // 缩放模式切换 / 远程分辨率变化 → 更新滚动容器与画面元素尺寸
+        if (propertyName == nameof(MainWindowViewModel.BrushStretch)
+            || propertyName == nameof(MainWindowViewModel.RemoteScreenWidth)
+            || propertyName == nameof(MainWindowViewModel.RemoteScreenHeight))
+        {
+            UpdateRenderScroll();
+        }
+    }
+
+    /// <summary>
+    /// 按缩放模式设置滚动容器与画面元素尺寸：
+    /// Actual（原始大小）→ RenderImage 尺寸 = 远程分辨率，画面大于视口时出现滚动条；
+    /// Fit/Stretch → RenderImage 尺寸 = 视口（内容不溢出，无滚动）。
+    /// 滚动后 RenderImage 的 GetPosition 仍是内容坐标，鼠标映射不受滚动影响。
+    /// </summary>
+    private void UpdateRenderScroll()
+    {
+        if (RenderScroller == null || RenderImage == null || _vm == null) return;
+        bool actual = _vm.ZoomMode == ZoomMode.Actual;
+        RenderScroller.HorizontalScrollBarVisibility = actual ? ScrollBarVisibility.Auto : ScrollBarVisibility.Disabled;
+        RenderScroller.VerticalScrollBarVisibility = actual ? ScrollBarVisibility.Auto : ScrollBarVisibility.Disabled;
+        if (actual)
+        {
+            double w = _vm.RemoteScreenWidth;
+            double h = _vm.RemoteScreenHeight;
+            RenderImage.Width = w > 0 ? w : 1;
+            RenderImage.Height = h > 0 ? h : 1;
+        }
+        else
+        {
+            RenderImage.Width = RenderScroller.ViewportWidth;
+            RenderImage.Height = RenderScroller.ViewportHeight;
+        }
     }
 
     /// <summary>

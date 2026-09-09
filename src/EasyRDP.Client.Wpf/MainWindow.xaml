@@ -124,7 +124,14 @@
                      改用 Rectangle + ImageBrush（Rectangle 是纯几何控件必然撑满父容器），
                      ImageBrush.Stretch=Uniform 在 Rectangle 内居中留边，
                      MapCoordinates 用 Rectangle 尺寸按服务端宽高比正确扣除内部黑边。 -->
-                <Rectangle x:Name="RenderImage"
+                <!-- 滚动容器：Actual（原始大小）模式画面大于视口时显示滚动条，
+                     Fit/Stretch 模式内容=视口无滚动（RenderImage 尺寸由 UpdateRenderScroll 控制） -->
+                <ScrollViewer x:Name="RenderScroller"
+                              HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Disabled"
+                              HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch"
+                              CanContentScroll="False" Focusable="False">
+                    <Grid>
+                        <Rectangle x:Name="RenderImage"
                            HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
                            MouseMove="RenderImage_MouseMove"
                            PreviewMouseDown="RenderImage_PreviewMouseDown"
@@ -136,9 +143,27 @@
                     </Rectangle.Fill>
                 </Rectangle>
 
+                <!-- 远程光标叠加层：显示服务端光标形状/位置，盖住本地箭头光标。
+                     不参与命中测试，鼠标事件仍由 RenderImage 处理。 -->
+                <Image x:Name="RemoteCursorImage"
+                       HorizontalAlignment="Left" VerticalAlignment="Top"
+                       Stretch="None" IsHitTestVisible="False"
+                       RenderOptions.BitmapScalingMode="NearestNeighbor"
+                       Visibility="Collapsed"/>
+
+                <!-- 点击位置标记（诊断）：点击后红点在按下位置显示 1.5 秒，
+                     便于肉眼核对"可见光标"与"实际落点"是否一致 -->
+                <Ellipse x:Name="ClickMarker"
+                         Width="10" Height="10"
+                         Fill="#E6FFFFFF" Stroke="#FFFF3B30" StrokeThickness="1.5"
+                         HorizontalAlignment="Left" VerticalAlignment="Top"
+                         IsHitTestVisible="False" Visibility="Collapsed"/>
+                    </Grid>
+                </ScrollViewer>
+
                 <!-- 悬浮工具条（RealVNC 风格）：鼠标在画面移动时出现，静止 2 秒自动隐藏。
-                     叠加在远程画面上层，提供断开/全屏/远程按键/详情等快捷操作，
-                     不占窗口布局空间。 -->
+                     叠加在远程画面上层（视口级，不随画面滚动），提供断开/全屏/远程按键/详情
+                     等快捷操作，不占窗口布局空间。 -->
                 <Border x:Name="FloatingToolbar"
                         HorizontalAlignment="Center" VerticalAlignment="Top"
                         Margin="0,10,0,0" Padding="8,5"
@@ -168,22 +193,6 @@
                                 ToolTip="循环切换缩放模式：适应/原始/拉伸"/>
                     </StackPanel>
                 </Border>
-
-                <!-- 远程光标叠加层：显示服务端光标形状/位置，盖住本地箭头光标。
-                     不参与命中测试，鼠标事件仍由 RenderImage 处理。 -->
-                <Image x:Name="RemoteCursorImage"
-                       HorizontalAlignment="Left" VerticalAlignment="Top"
-                       Stretch="None" IsHitTestVisible="False"
-                       RenderOptions.BitmapScalingMode="NearestNeighbor"
-                       Visibility="Collapsed"/>
-
-                <!-- 点击位置标记（诊断）：点击后红点在按下位置显示 1.5 秒，
-                     便于肉眼核对"可见光标"与"实际落点"是否一致 -->
-                <Ellipse x:Name="ClickMarker"
-                         Width="10" Height="10"
-                         Fill="#E6FFFFFF" Stroke="#FFFF3B30" StrokeThickness="1.5"
-                         HorizontalAlignment="Left" VerticalAlignment="Top"
-                         IsHitTestVisible="False" Visibility="Collapsed"/>
 
                 <!-- 连接详情面板（ToDesk 风格）：网络诊断 / 连接详情 / 系统性能。
                      悬浮于桌面显示区右上角，工具栏 Details 按钮切换。
