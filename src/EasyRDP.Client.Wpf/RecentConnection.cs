@@ -13,31 +13,31 @@ namespace EasyRDP.Client.Wpf
     {
         private bool _isSelected;
         private bool _isActive;
-        private BitmapImage _thumbnailSource;
+        private BitmapImage? _thumbnailSource;
 
         /// <summary>目标主机地址（IP 或主机名）。</summary>
-        public string Host { get; set; }
+        public string Host { get; set; } = string.Empty;
 
         /// <summary>连接端口（默认 2000）。</summary>
-        public string Port { get; set; }
+        public string Port { get; set; } = "2000";
 
-        /// <summary>登录用户名（可选）。</summary>
-        public string Username { get; set; }
+        /// <summary>登录用户名（可空，表示无凭据）。</summary>
+        public string? Username { get; set; }
 
-        /// <summary>登录密码（可选；本地明文存储，同 ServerProfile 策略）。</summary>
-        public string Password { get; set; }
+        /// <summary>登录密码（可空，表示无凭据；本地明文存储，同 ServerProfile 策略）。</summary>
+        public string? Password { get; set; }
 
-        /// <summary>显示名称（可选，为空时 UI 回退到 Host）。</summary>
-        public string DisplayName { get; set; }
+        /// <summary>显示名称（可空，为空时 UI 回退到 Host）。</summary>
+        public string? DisplayName { get; set; }
 
         /// <summary>最近一次成功连接的 UTC 时间。</summary>
         public DateTime LastConnectedUtc { get; set; }
 
-        /// <summary>本地缩略图缓存文件路径（相对或绝对）。</summary>
-        public string ThumbnailPath { get; set; }
+        /// <summary>本地缩略图缓存文件路径（可空，无缩略图时为 null）。</summary>
+        public string? ThumbnailPath { get; set; }
 
-        /// <summary>缩略图图像源（运行时加载，不序列化）。</summary>
-        public BitmapImage ThumbnailSource
+        /// <summary>缩略图图像源（可空；运行时加载，不序列化）。</summary>
+        public BitmapImage? ThumbnailSource
         {
             get { return _thumbnailSource; }
             set { _thumbnailSource = value; OnPropertyChanged(nameof(ThumbnailSource)); }
@@ -81,7 +81,7 @@ namespace EasyRDP.Client.Wpf
             }
         }
 
-        public event PropertyChangedEventHandler PropertyChanged;
+        public event PropertyChangedEventHandler? PropertyChanged;
 
         private void OnPropertyChanged(string name)
         {

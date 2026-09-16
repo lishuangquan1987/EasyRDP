@@ -6,11 +6,23 @@
         WindowStartupLocation="CenterScreen"
         Background="#FFFFFF">
     <Window.Resources>
-        <!-- 卡片缩略图与 IP 模板（1:1 复刻 RealVNC Viewer 缩略图网格） -->
+        <!-- 卡片缩略图与 IP 模板（1:1 复刻 RealVNC Viewer 缩略图网格）。
+             Tag 承载 Window 的 DataContext（ViewModel），供 ContextMenu 通过
+             PlacementTarget.Tag 解析 ViewModel 命令（ContextMenu 不在视觉树内，
+             无法直接用 RelativeSource AncestorType）。 -->
         <DataTemplate x:Key="ThumbCardTemplate">
             <Border x:Name="CardBorder" Width="200" Height="180" Margin="12,10"
                     Background="White" Cursor="Hand"
-                    MouseLeftButtonDown="Card_MouseLeftButtonDown">
+                    Tag="{Binding DataContext, RelativeSource={RelativeSource AncestorType={x:Type Window}}}">
+                <Border.InputBindings>
+                    <!-- 单击选中、双击直连（严格 MVVM：命令而非事件处理） -->
+                    <MouseBinding MouseAction="LeftClick"
+                                  Command="{Binding DataContext.SelectItemCommand, RelativeSource={RelativeSource AncestorType={x:Type Window}}}"
+                                  CommandParameter="{Binding}"/>
+                    <MouseBinding MouseAction="LeftDoubleClick"
+                                  Command="{Binding DataContext.ConnectItemCommand, RelativeSource={RelativeSource AncestorType={x:Type Window}}}"
+                                  CommandParameter="{Binding}"/>
+                </Border.InputBindings>
                 <Border.Style>
                     <Style TargetType="Border">
                         <Setter Property="Background" Value="White"/>
@@ -31,11 +43,19 @@
                 </Border.Style>
                 <Border.ContextMenu>
                     <ContextMenu>
-                        <MenuItem Header="Connect" Click="MenuConnect_Click"/>
-                        <MenuItem Header="Edit..." Click="MenuEdit_Click"/>
+                        <MenuItem Header="Connect"
+                                  Command="{Binding PlacementTarget.Tag.ConnectItemCommand, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}"
+                                  CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}"/>
+                        <MenuItem Header="Edit..."
+                                  Command="{Binding PlacementTarget.Tag.EditItemCommand, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}"
+                                  CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}"/>
                         <Separator/>
-                        <MenuItem Header="Rename" Click="MenuRename_Click"/>
-                        <MenuItem Header="Delete" Click="MenuDelete_Click"/>
+                        <MenuItem Header="Rename"
+                                  Command="{Binding PlacementTarget.Tag.RenameItemCommand, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}"
+                                  CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}"/>
+                        <MenuItem Header="Delete"
+                                  Command="{Binding PlacementTarget.Tag.DeleteItemCommand, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}"
+                                  CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}"/>
                     </ContextMenu>
                 </Border.ContextMenu>
                 <Grid>
@@ -68,19 +88,19 @@
     </Window.Resources>
 
     <DockPanel>
-        <!-- ====== 菜单栏：File / View / Help ====== -->
+        <!-- ====== 菜单栏：File / View / Help（严格 MVVM：全部走命令） ====== -->
         <Menu DockPanel.Dock="Top" Background="#F7F8FA" BorderBrush="#E2E6EA" BorderThickness="0,0,0,1" Height="26">
             <MenuItem Header="File">
-                <MenuItem Header="New Connection..." Click="MenuNewConnection_Click"/>
-                <MenuItem Header="Refresh Thumbnails" Click="MenuRefresh_Click"/>
+                <MenuItem Header="New Connection..." Command="{Binding NewConnectionCommand}"/>
+                <MenuItem Header="Refresh Thumbnails" Command="{Binding RefreshCommand}"/>
                 <Separator/>
-                <MenuItem Header="Exit" Click="MenuExit_Click"/>
+                <MenuItem Header="Exit" Command="{Binding ExitCommand}"/>
             </MenuItem>
             <MenuItem Header="View">
-                <MenuItem Header="Refresh" Click="MenuRefresh_Click"/>
+                <MenuItem Header="Refresh" Command="{Binding RefreshCommand}"/>
             </MenuItem>
             <MenuItem Header="Help">
-                <MenuItem Header="About" Click="MenuAbout_Click"/>
+                <MenuItem Header="About" Command="{Binding AboutCommand}"/>
             </MenuItem>
         </Menu>
 
@@ -99,17 +119,20 @@
                         <Run Text="easyrdp"/><Run Text=" connect" FontWeight="Normal" Foreground="#607D8B"/>
                     </TextBlock>
                 </StackPanel>
-                <!-- 长地址输入框（蓝色高亮选中 IP） -->
+                <!-- 长地址输入框（蓝色高亮选中 IP），回车连接 -->
                 <TextBox x:Name="HostBox" Grid.Column="1" Height="30" VerticalContentAlignment="Center"
                          FontSize="13" Padding="10,0" Margin="0,0,16,0"
                          Background="#F5F7F9" BorderBrush="#D0D7DE" BorderThickness="1"
-                         KeyDown="HostBox_KeyDown"
                          Text="{Binding AddressText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                         ToolTip="输入 IP 或 hostname[:port]，回车连接"/>
+                         ToolTip="输入 IP 或 hostname[:port]，回车连接">
+                    <TextBox.InputBindings>
+                        <KeyBinding Key="Enter" Command="{Binding ConnectAddressCommand}"/>
+                    </TextBox.InputBindings>
+                </TextBox>
                 <!-- Sign in...（视觉占位，与 RealVNC 一致） -->
                 <Button Grid.Column="2" Height="30" Padding="12,0" Background="Transparent"
                         BorderBrush="#D0D7DE" BorderThickness="1" Foreground="#37474F" FontSize="13"
-                        Content="Sign in..." Click="SignIn_Click"/>
+                        Content="Sign in..." Command="{Binding SignInCommand}"/>
             </Grid>
         </Border>
 

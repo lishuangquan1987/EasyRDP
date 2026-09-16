@@ -140,7 +140,9 @@
                     <DataGridTemplateColumn Header="Action" Width="80">
                         <DataGridTemplateColumn.CellTemplate>
                             <DataTemplate>
-                                <Button Content="Kick" Tag="{Binding IdValue}" Click="KickButton_Click"
+                                <Button Content="Kick"
+                                        Command="{Binding DataContext.KickCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                        CommandParameter="{Binding IdValue}"
                                         Style="{StaticResource LightButtonStyle}" Height="24" Padding="10,0"
                                         HorizontalAlignment="Left" Margin="6,0"/>
                             </DataTemplate>

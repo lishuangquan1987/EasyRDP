@@ -2043,44 +2043,38 @@ namespace EasyRDP.Client.Wpf
             StopCommand.RaiseCanExecuteChanged();
         }
 
+        /// <summary>当前是否处于全屏模式（ViewModel 持有的逻辑状态，View 据此执行视觉切换）。</summary>
+        private bool _isFullscreen;
+        public bool IsFullscreen
+        {
+            get { return _isFullscreen; }
+            private set { _isFullscreen = value; OnPropertyChanged(nameof(IsFullscreen)); }
+        }
+
+        /// <summary>请求 View 切换全屏（参数为是否进入全屏）。由 View 订阅并执行实际窗口操作，
+        /// ViewModel 不直接引用 MainWindow（严格 MVVM）。</summary>
+        public event Action<bool>? FullscreenRequested;
+
+        /// <summary>切换全屏：通知 View 执行切换（真实窗口操作由 View 层 SetFullscreenMode 完成）。</summary>
         public void ToggleFullscreen()
         {
-            var window = FindMainWindow();
-            if (window == null) return;
-            window.SetFullscreenMode(!window.IsFullscreenMode);
-            Logger.Info(window.IsFullscreenMode ? "Entered fullscreen" : "Exited fullscreen");
+            RequestFullscreen(!IsFullscreen);
         }
 
-        /// <summary>双窗口架构下 Application.MainWindow 是浏览窗口，必须从窗口集合找控制窗口。
-        /// 优先当前活动窗口（多控制窗口时切换触发者）。</summary>
-        private static MainWindow FindMainWindow()
-        {
-            if (Application.Current == null) return null;
-            foreach (System.Windows.Window w in Application.Current.Windows)
-            {
-                if (w is MainWindow mw && mw.IsActive)
-                    return mw;
-            }
-            foreach (System.Windows.Window w in Application.Current.Windows)
-            {
-                if (w is MainWindow mw)
-                    return mw;
-            }
-            return null;
-        }
-
-        /// <summary>
-        /// 退出全屏并恢复普通窗口（断开连接时也会调用，保证用户始终能切走）。
-        /// 全屏窗口的尺寸/位置由 View 层 WM_GETMINMAXINFO 钩子管理，
-        /// ViewModel 只负责请求状态切换。
-        /// </summary>
+        /// <summary>退出全屏并恢复普通窗口（断开连接时也会调用，保证用户始终能切走）。</summary>
         public void ExitFullscreen()
         {
-            var window = FindMainWindow();
-            if (window == null || !window.IsFullscreenMode)
-                return;
-            window.SetFullscreenMode(false);
-            Logger.Info("Exited fullscreen");
+            if (!IsFullscreen) return;
+            RequestFullscreen(false);
+        }
+
+        /// <summary>请求切换全屏状态：先更新逻辑状态，再通知 View 执行视觉切换。</summary>
+        private void RequestFullscreen(bool fullscreen)
+        {
+            IsFullscreen = fullscreen;
+            var handler = FullscreenRequested;
+            if (handler != null) handler(fullscreen);
+            Logger.Info(fullscreen ? "Entered fullscreen" : "Exited fullscreen");
         }
 
         // ====== INotifyPropertyChanged ======

@@ -48,6 +48,9 @@ namespace EasyRDP.Server.Wpf
         // 设置持久化：%AppData%\EasyRDP\server\settings.json
         private readonly ServerSettingsStore _settingsStore = new ServerSettingsStore();
 
+        // 用户提示抽象（默认 MessageBox，由 View 注入），避免 ViewModel 直接依赖 System.Windows.MessageBox
+        private readonly IUserNotifier _notifier;
+
         /// <summary>日志条目集合（最新在前）。</summary>
         public ObservableCollection<string> LogEntries { get; } = new ObservableCollection<string>();
 
@@ -145,12 +148,17 @@ namespace EasyRDP.Server.Wpf
         public RelayCommand StopCommand { get; }
         public RelayCommand SaveSettingsCommand { get; }
 
-        public MainWindowViewModel(Dispatcher dispatcher)
+        /// <summary>踢出指定会话（参数为 SessionItem.IdValue）。</summary>
+        public RelayCommand<uint> KickCommand { get; }
+
+        public MainWindowViewModel(Dispatcher dispatcher, IUserNotifier notifier = null)
         {
             _dispatcher = dispatcher;
+            _notifier = notifier ?? new WpfUserNotifier();
             StartCommand = new RelayCommand(StartServer, () => !IsRunning);
             StopCommand = new RelayCommand(StopServer, () => IsRunning);
             SaveSettingsCommand = new RelayCommand(SaveSettings);
+            KickCommand = new RelayCommand<uint>(KickSession);
             CheckUpdateCommand = new RelayCommand(CheckUpdate,
                 () => AlyClientStatus == AlyClientStatus.DiscoveredUpdate
                     || AlyClientStatus == AlyClientStatus.DownloadedUpdate);
@@ -393,8 +401,7 @@ namespace EasyRDP.Server.Wpf
             string password = Password ?? "";
             if (string.IsNullOrEmpty(username) || string.IsNullOrEmpty(password))
             {
-                MessageBox.Show("Username and password must not be empty.", "Invalid credentials",
-                    MessageBoxButton.OK, MessageBoxImage.Warning);
+                _notifier.ShowWarning("Username and password must not be empty.", "Invalid credentials");
                 return;
             }
 
@@ -441,8 +448,7 @@ namespace EasyRDP.Server.Wpf
             }
             catch (Exception ex)
             {
-                MessageBox.Show("Failed to start: " + ex.Message, "Error",
-                    MessageBoxButton.OK, MessageBoxImage.Error);
+                _notifier.ShowError("Failed to start: " + ex.Message, "Error");
             }
         }
 

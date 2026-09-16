@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
     <ProjectReference Include="..\EasyRDP.Core\EasyRDP.Core.csproj" />
@@ -7,6 +7,8 @@
 
   <ItemGroup>
     <Compile Include="..\Shared\RelayCommand.cs" Link="RelayCommand.cs" />
+    <Compile Include="..\Shared\IUserNotifier.cs" Link="IUserNotifier.cs" />
+    <Compile Include="..\Shared\WpfUserNotifier.cs" Link="WpfUserNotifier.cs" />
     <Compile Include="..\Shared\SecretProtector.cs" Link="SecretProtector.cs" />
     <Page Include="..\Shared\UiStyles.xaml" Link="UiStyles.xaml" />
   </ItemGroup>

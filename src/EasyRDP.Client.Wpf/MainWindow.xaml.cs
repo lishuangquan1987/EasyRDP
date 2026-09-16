@@ -94,6 +94,8 @@ public partial class MainWindow : Window
         RenderBorder.SizeChanged += (s, e) => UpdateRenderScroll();
         _vm = new MainWindowViewModel();
         DataContext = _vm;
+        // 全屏由 ViewModel 通过 FullscreenRequested 事件请求，View 仅执行窗口操作（严格 MVVM）
+        _vm.FullscreenRequested += SetFullscreenMode;
         // PasswordBox 不支持绑定 Password（安全设计），初始值在 XAML 构造后同步一次，
         // 后续变化由 PasswordChanged 事件同步到 ViewModel。
         PasswordBox.Password = _vm.Password ?? string.Empty;
@@ -149,12 +151,6 @@ public partial class MainWindow : Window
     private const int EchoMoveStreakLimit = 4;
     /// <summary>本地鼠标停手多久后才允许切换跟随（防本地操作时回显追赶造成误切/闪烁）。</summary>
     private const int LocalIdleBeforeFollowMs = 300;
-
-    /// <summary>当前是否处于全屏模式（供 ViewModel/快捷键判断）。</summary>
-    public bool IsFullscreenMode
-    {
-        get { return _fullscreen; }
-    }
 
     /// <summary>
     /// 切换全屏模式：进入全屏时用 WindowStyle.None + Maximized，
@@ -880,10 +876,8 @@ public partial class MainWindow : Window
         // Esc 退出全屏（仅在已全屏时生效；非全屏时 Esc 不拦截，正常转发输入）
         if (e.Key == Key.Escape)
         {
-            // 注意：双窗口架构下 Application.Current.MainWindow 是浏览窗口，
-            // 必须用 Window.GetWindow(this) 取当前控制窗口自身。
-            var window = Window.GetWindow(this) as MainWindow;
-            if (window != null && window.IsFullscreenMode)
+            // 仅在已全屏时 Esc 才退出全屏；非全屏时 Esc 不拦截，正常转发输入
+            if (_vm.IsFullscreen)
             {
                 _vm.ToggleFullscreen();
                 e.Handled = true;
