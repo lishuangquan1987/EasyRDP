@@ -10,6 +10,7 @@
   <ItemGroup>
     <Compile Include="..\Shared\RelayCommand.cs" Link="RelayCommand.cs" />
     <Compile Include="..\Shared\IUserNotifier.cs" Link="IUserNotifier.cs" />
+    <Compile Include="..\Shared\PasswordBoxBehavior.cs" Link="PasswordBoxBehavior.cs" />
     <Compile Include="..\Shared\WpfUserNotifier.cs" Link="WpfUserNotifier.cs" />
     <Compile Include="..\Shared\SecretProtector.cs" Link="SecretProtector.cs" />
     <Page Include="..\Shared\UiStyles.xaml" Link="UiStyles.xaml" />

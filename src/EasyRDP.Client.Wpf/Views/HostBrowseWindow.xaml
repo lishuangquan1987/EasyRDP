@@ -1,0 +1,144 @@
+<Window x:Class="EasyRDP.Client.Wpf.Views.HostBrowseWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:behaviors="clr-namespace:EasyRDP.Client.Wpf.Behaviors"
+        Title="VNC Viewer" Height="720" Width="1200"
+        MinHeight="480" MinWidth="900"
+        WindowStartupLocation="CenterScreen"
+        Background="#FFFFFF">
+    <Window.Resources>
+        <!-- 卡片缩略图与 IP 模板（1:1 复刻 RealVNC Viewer 缩略图网格）。
+             Tag 承载 Window 的 DataContext（ViewModel），供 ContextMenu 通过
+             PlacementTarget.Tag 解析 ViewModel 命令（ContextMenu 不在视觉树内，
+             无法直接用 RelativeSource AncestorType）。 -->
+        <DataTemplate x:Key="ThumbCardTemplate">
+            <Border x:Name="CardBorder" Width="200" Height="180" Margin="12,10"
+                    Background="White" Cursor="Hand"
+                    Tag="{Binding DataContext, RelativeSource={RelativeSource AncestorType={x:Type Window}}}"
+                    behaviors:ClickCommand.Command="{Binding DataContext.SelectItemCommand, RelativeSource={RelativeSource AncestorType={x:Type Window}}}"
+                    behaviors:DoubleClickCommand.Command="{Binding DataContext.ConnectItemCommand, RelativeSource={RelativeSource AncestorType={x:Type Window}}}">
+                <Border.Style>
+                    <Style TargetType="Border">
+                        <Setter Property="Background" Value="White"/>
+                        <Setter Property="BorderBrush" Value="Transparent"/>
+                        <Setter Property="BorderThickness" Value="1"/>
+                        <Style.Triggers>
+                            <!-- ListBox Item 风格交互：鼠标移入高亮背景，选中态更明显 -->
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Background" Value="#E8F1FC"/>
+                                <Setter Property="BorderBrush" Value="#9DC3E6"/>
+                            </Trigger>
+                            <DataTrigger Binding="{Binding IsSelected}" Value="True">
+                                <Setter Property="Background" Value="#D6E7F7"/>
+                                <Setter Property="BorderBrush" Value="#5B9BD5"/>
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </Border.Style>
+                <Border.ContextMenu>
+                    <ContextMenu>
+                        <MenuItem Header="Connect"
+                                  Command="{Binding PlacementTarget.Tag.ConnectItemCommand, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}"
+                                  CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}"/>
+                        <MenuItem Header="Edit..."
+                                  Command="{Binding PlacementTarget.Tag.EditItemCommand, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}"
+                                  CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}"/>
+                        <Separator/>
+                        <MenuItem Header="Rename"
+                                  Command="{Binding PlacementTarget.Tag.RenameItemCommand, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}"
+                                  CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}"/>
+                        <MenuItem Header="Delete"
+                                  Command="{Binding PlacementTarget.Tag.DeleteItemCommand, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}"
+                                  CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}"/>
+                    </ContextMenu>
+                </Border.ContextMenu>
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+                    <!-- 缩略图（正方形，未加载时显示占位图标） -->
+                    <Grid Grid.Row="0" Margin="4">
+                        <Image Source="{Binding ThumbnailSource}" Stretch="UniformToFill"/>
+                        <Border x:Name="ThumbPlaceholder" Background="#F2F4F6">
+                            <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+                                <TextBlock Text="&#xE770;" FontFamily="Segoe MDL2 Assets" FontSize="40"
+                                           Foreground="#9CA3AF" HorizontalAlignment="Center"/>
+                                <TextBlock Text="无预览" FontSize="12" Foreground="#9CA3AF"
+                                           HorizontalAlignment="Center" Margin="0,4,0,0"/>
+                            </StackPanel>
+                        </Border>
+                    </Grid>
+                    <!-- IP 地址（居中，卡片底部；重命名后显示 DisplayName） -->
+                    <TextBlock Grid.Row="1" Text="{Binding DisplayText}" FontSize="13" Foreground="#263238"
+                               HorizontalAlignment="Center" Margin="0,6,0,8"/>
+                    <!-- 左上角活动状态红点 -->
+                    <Ellipse Width="10" Height="10" Fill="#E4002B"
+                             HorizontalAlignment="Left" VerticalAlignment="Top" Margin="9"
+                             Visibility="{Binding IsActive, Converter={StaticResource BoolToVis}}"/>
+                </Grid>
+            </Border>
+        </DataTemplate>
+    </Window.Resources>
+
+    <DockPanel>
+        <!-- ====== 菜单栏：File / View / Help（严格 MVVM：全部走命令） ====== -->
+        <Menu DockPanel.Dock="Top" Background="#F7F8FA" BorderBrush="#E2E6EA" BorderThickness="0,0,0,1" Height="26">
+            <MenuItem Header="File">
+                <MenuItem Header="New Connection..." Command="{Binding NewConnectionCommand}"/>
+                <MenuItem Header="Refresh Thumbnails" Command="{Binding RefreshCommand}"/>
+                <Separator/>
+                <MenuItem Header="Exit" Command="{Binding ExitCommand}"/>
+            </MenuItem>
+            <MenuItem Header="View">
+                <MenuItem Header="Refresh" Command="{Binding RefreshCommand}"/>
+            </MenuItem>
+            <MenuItem Header="Help">
+                <MenuItem Header="About" Command="{Binding AboutCommand}"/>
+            </MenuItem>
+        </Menu>
+
+        <!-- ====== 品牌行：logo + 地址输入框 + Sign in ====== -->
+        <Border DockPanel.Dock="Top" Background="White" BorderBrush="#E2E6EA" BorderThickness="0,0,0,1" Padding="16,10">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <!-- vnc connect 品牌 -->
+                <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,20,0">
+                    <TextBlock Text="&#x25CF;" Foreground="#E4002B" FontSize="18" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                    <TextBlock FontSize="15" FontWeight="SemiBold" Foreground="#263238">
+                        <Run Text="easyrdp"/><Run Text=" connect" FontWeight="Normal" Foreground="#607D8B"/>
+                    </TextBlock>
+                </StackPanel>
+                <!-- 长地址输入框（蓝色高亮选中 IP），回车连接 -->
+                <TextBox x:Name="HostBox" Grid.Column="1" Height="30" VerticalContentAlignment="Center"
+                         FontSize="13" Padding="10,0" Margin="0,0,16,0"
+                         Background="#F5F7F9" BorderBrush="#D0D7DE" BorderThickness="1"
+                         Text="{Binding AddressText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                         ToolTip="输入 IP 或 hostname[:port]，回车连接">
+                    <TextBox.InputBindings>
+                        <KeyBinding Key="Enter" Command="{Binding ConnectAddressCommand}"/>
+                    </TextBox.InputBindings>
+                </TextBox>
+                <!-- Sign in...（视觉占位，与 RealVNC 一致） -->
+                <Button Grid.Column="2" Height="30" Padding="12,0" Background="Transparent"
+                        BorderBrush="#D0D7DE" BorderThickness="1" Foreground="#37474F" FontSize="13"
+                        Content="Sign in..." Command="{Binding SignInCommand}"/>
+            </Grid>
+        </Border>
+
+        <!-- ====== 主体：白色滚动区，5 列缩略图网格 ====== -->
+        <ScrollViewer VerticalScrollBarVisibility="Auto" Background="White" Padding="8,12">
+            <ItemsControl ItemsSource="{Binding Connections}" ItemTemplate="{StaticResource ThumbCardTemplate}">
+                <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <UniformGrid Columns="5"/>
+                    </ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+            </ItemsControl>
+        </ScrollViewer>
+    </DockPanel>
+</Window>
