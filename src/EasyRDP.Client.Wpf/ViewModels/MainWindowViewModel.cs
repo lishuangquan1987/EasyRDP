@@ -124,9 +124,14 @@ namespace EasyRDP.Client.Wpf.ViewModels
         private ServerProfile? _selectedProfile;
         private string _profileName = "";
 
+        // 用户提示抽象（默认 MessageBox，由 View 注入），避免 ViewModel 直接依赖 System.Windows.MessageBox
+        private readonly IUserNotifier _notifier;
+
         public MainWindowViewModel()
         {
             _dispatcher = Application.Current?.Dispatcher ?? Dispatcher.CurrentDispatcher;
+            // 连接失败/握手失败/流错误等用弹框提示（连接不成功不能只靠状态栏文字，用户看不到）
+            _notifier = new WpfUserNotifier();
             ConnectCommand = new RelayCommand(async () => await ConnectAsync(), () => !_running);
             StartTestCommand = new RelayCommand(StartRenderTest, () => !_running);
             StopCommand = new RelayCommand(Stop, () => _running);
@@ -853,6 +858,10 @@ namespace EasyRDP.Client.Wpf.ViewModels
             {
                 Logger.Warn("Connection to {0}:{1} failed", host, port);
                 SetBusy(false, "Connection failed");
+                // 连接不成功必须有明确弹框反馈（只改状态栏文字用户看不到）
+                _notifier.ShowError(
+                    string.Format("无法连接服务器 {0}:{1}。\n请检查：\n· 服务端是否已启动（点击 Start）\n· IP / 端口是否正确\n· 网络是否可达", host, port),
+                    "连接失败");
                 return;
             }
             _transport = connectedTransport;
@@ -888,6 +897,8 @@ namespace EasyRDP.Client.Wpf.ViewModels
                 {
                     if (_disconnecting) return;
                     SetBusy(false, "Stream error: " + message);
+                    // 连接中/已连接后流错误也要弹框告知，不能静默断开
+                    _notifier.ShowError("连接中断：" + message, "连接错误");
                     Stop();
                 });
             };
@@ -912,6 +923,10 @@ namespace EasyRDP.Client.Wpf.ViewModels
             {
                 Logger.Warn("Handshake timeout after {0}ms", HandshakeTimeoutMs);
                 SetBusy(false, "Handshake timeout");
+                _notifier.ShowError(
+                    string.Format("连接 {0}:{1} 后握手超时（{2} 秒内未收到服务端响应）。\n请确认服务端版本兼容、用户名/密码正确。",
+                        host, port, HandshakeTimeoutMs / 1000),
+                    "握手超时");
                 _streamSession?.Stop();
                 _transport.Disconnect();
                 return;
@@ -924,6 +939,13 @@ namespace EasyRDP.Client.Wpf.ViewModels
             {
                 Logger.Warn("Handshake rejected: {0}", handshakeRes.Result);
                 SetBusy(false, "Handshake failed: " + handshakeRes.Result);
+                // 认证失败给出可操作的提示（服务端要求非空凭据，地址栏直连最易踩坑）
+                string reason = handshakeRes.Result == HandshakeResult.AuthFailed
+                    ? "用户名或密码错误（须与服务端启动时配置的 USER / PASS 一致）"
+                    : handshakeRes.Result.ToString();
+                _notifier.ShowError(
+                    string.Format("服务器 {0}:{1} 拒绝了连接：{2}", host, port, reason),
+                    "连接失败");
                 _streamSession?.Stop();
                 _transport.Disconnect();
                 return;

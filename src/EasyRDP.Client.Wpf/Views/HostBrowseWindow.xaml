@@ -118,15 +118,23 @@
                          FontSize="13" Padding="10,0" Margin="0,0,16,0"
                          Background="#F5F7F9" BorderBrush="#D0D7DE" BorderThickness="1"
                          Text="{Binding AddressText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                         ToolTip="输入 IP 或 hostname[:port]，回车连接">
+                         ToolTip="输入 IP、host[:port] 或 user@host[:port]，回车或点 Connect 连接">
                     <TextBox.InputBindings>
                         <KeyBinding Key="Enter" Command="{Binding ConnectAddressCommand}"/>
                     </TextBox.InputBindings>
                 </TextBox>
-                <!-- Sign in...（视觉占位，与 RealVNC 一致） -->
-                <Button Grid.Column="2" Height="30" Padding="12,0" Background="Transparent"
-                        BorderBrush="#D0D7DE" BorderThickness="1" Foreground="#37474F" FontSize="13"
-                        Content="Sign in..." Command="{Binding SignInCommand}"/>
+                <!-- 连接按钮（显式可点击，避免只靠回车不直观） -->
+                <StackPanel Grid.Column="2" Orientation="Horizontal">
+                    <Button Height="30" Padding="14,0" Margin="0,0,8,0"
+                            Style="{StaticResource PrimaryButtonStyle}"
+                            Command="{Binding ConnectAddressCommand}"
+                            Content="Connect"
+                            ToolTip="连接地址栏输入的主机（输入 IP 后会自动弹出表单填写端口/用户名/密码）"/>
+                    <!-- Sign in...（视觉占位，与 RealVNC 一致） -->
+                    <Button Height="30" Padding="12,0" Background="Transparent"
+                            BorderBrush="#D0D7DE" BorderThickness="1" Foreground="#37474F" FontSize="13"
+                            Content="Sign in..." Command="{Binding SignInCommand}"/>
+                </StackPanel>
             </Grid>
         </Border>
 

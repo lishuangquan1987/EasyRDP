@@ -896,16 +896,14 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// 切换全屏 UI：全屏时隐藏顶部配置区和底部状态栏，让桌面显示区填满整个窗口。
-    /// 由 MainWindowViewModel.ToggleFullscreen 调用。
+    /// 切换全屏 UI：全屏时隐藏顶部配置区、信息条和底部状态栏，让桌面显示区填满整个窗口；
+    /// 退出全屏恢复。由 MainWindowViewModel.ToggleFullscreen 调用。
     /// </summary>
     /// <param name="fullscreen">true=进入全屏，false=退出全屏。</param>
     public void SetFullscreenUI(bool fullscreen)
     {
-        // 精简模式：TopBar/ActionBar 常驻隐藏（功能已全部收进悬浮工具条），
-        // 只按全屏状态切换底部状态栏，最大化远程画面区。
-        TopBar.Visibility = Visibility.Collapsed;
-        ActionBar.Visibility = Visibility.Collapsed;
+        TopBar.Visibility = fullscreen ? Visibility.Collapsed : Visibility.Visible;
+        ActionBar.Visibility = fullscreen ? Visibility.Collapsed : Visibility.Visible;
         BottomBar.Visibility = fullscreen ? Visibility.Collapsed : Visibility.Visible;
     }
 

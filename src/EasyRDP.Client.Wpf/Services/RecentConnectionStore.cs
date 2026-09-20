@@ -112,8 +112,8 @@ namespace EasyRDP.Client.Wpf.Services
         /// 记录一次成功连接：置顶或新建条目，更新时间戳，并持久化本次连接使用的
         /// 端口/用户名/密码（新建条目完整落盘；已存在条目补齐空字段并刷新时间戳）。
         /// </summary>
-        public void Touch(string host, string displayName, string port = null,
-            string username = null, string password = null)
+        public void Touch(string host, string? displayName, string? port = null,
+            string? username = null, string? password = null)
         {
             if (string.IsNullOrWhiteSpace(host)) return;
             var list = Load();

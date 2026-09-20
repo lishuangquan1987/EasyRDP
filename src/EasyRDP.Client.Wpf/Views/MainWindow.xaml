@@ -1,6 +1,7 @@
 <Window x:Class="EasyRDP.Client.Wpf.Views.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:behaviors="clr-namespace:EasyRDP.Shared"
         Title="EasyRDP Client" Height="820" Width="1420"
         MinHeight="560" MinWidth="1260"
         WindowStartupLocation="CenterScreen"
@@ -14,9 +15,8 @@
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <!-- ====== 顶部工具栏（深色）：品牌 + 连接配置 ====== -->
-        <Border x:Name="TopBar" Grid.Row="0" Background="{StaticResource ToolbarDarkBrush}" Padding="14,10"
-                Visibility="Collapsed">
+        <!-- ====== 顶部工具栏（深色）：品牌 + 完整连接配置 ====== -->
+        <Border x:Name="TopBar" Grid.Row="0" Background="{StaticResource ToolbarDarkBrush}" Padding="14,10">
             <Grid>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto"/>
@@ -28,7 +28,6 @@
                     <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="*"/>
                     <ColumnDefinition Width="Auto"/>
-                    <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
 
                 <!-- 品牌 -->
@@ -38,11 +37,64 @@
                     <TextBlock Text="EasyRDP Client" Style="{StaticResource BrandTextStyle}"/>
                 </StackPanel>
 
-                <!-- 服务器配置管理：已迁移到浏览窗口（控制窗口保持极简，让画面最大化） -->
-                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Visibility="Collapsed"/>
+                <!-- 服务器配置管理：保存/加载多台服务器配置（同名覆盖） -->
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,10,0">
+                    <TextBlock Text="PROFILE" Style="{StaticResource ToolbarLabelStyle}" Margin="0,0,6,0"/>
+                    <ComboBox Width="132"
+                              Style="{StaticResource ToolbarComboBoxStyle}"
+                              ItemsSource="{Binding Profiles}"
+                              DisplayMemberPath="Name"
+                              SelectedItem="{Binding SelectedProfile}"
+                              Text="{Binding ProfileName, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                              ToolTip="选择已保存的服务器配置，或输入新名称后点 Save"/>
+                    <Button Content="Save" Style="{StaticResource ToolbarButtonStyle}" Height="28" Padding="8,0"
+                            Command="{Binding SaveProfileCommand}" Margin="4,0,0,0"
+                            ToolTip="把当前连接字段保存为配置（同名覆盖）"/>
+                    <Button Content="Del" Style="{StaticResource ToolbarButtonStyle}" Height="28" Padding="8,0"
+                            Command="{Binding DeleteProfileCommand}" Margin="2,0,0,0"
+                            ToolTip="删除当前选中的配置"/>
+                </StackPanel>
 
-                <!-- 主操作按钮：仅断开（连接由浏览窗口发起） -->
+                <Separator Grid.Column="2" Style="{StaticResource ToolbarSeparatorStyle}"/>
+
+                <!-- Host -->
+                <StackPanel Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,12,0">
+                    <TextBlock Text="HOST" Style="{StaticResource ToolbarLabelStyle}" Margin="0,0,6,0"/>
+                    <TextBox Text="{Binding Host, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                             Style="{StaticResource ToolbarTextBoxStyle}" Width="132"
+                             ToolTip="服务器地址（IP 或主机名）"/>
+                </StackPanel>
+
+                <!-- Port -->
+                <StackPanel Grid.Column="4" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,12,0">
+                    <TextBlock Text="PORT" Style="{StaticResource ToolbarLabelStyle}" Margin="0,0,6,0"/>
+                    <TextBox Text="{Binding Port, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                             Style="{StaticResource ToolbarTextBoxStyle}" Width="64"
+                             ToolTip="服务端监听端口（默认 2000）"/>
+                </StackPanel>
+
+                <!-- Username -->
+                <StackPanel Grid.Column="5" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,12,0">
+                    <TextBlock Text="USER" Style="{StaticResource ToolbarLabelStyle}" Margin="0,0,6,0"/>
+                    <TextBox Text="{Binding Username, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                             Style="{StaticResource ToolbarTextBoxStyle}" Width="96"
+                             ToolTip="服务端配置的登录用户名（必填）"/>
+                </StackPanel>
+
+                <!-- Password -->
+                <StackPanel Grid.Column="6" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,12,0">
+                    <TextBlock Text="PASS" Style="{StaticResource ToolbarLabelStyle}" Margin="0,0,6,0"/>
+                    <PasswordBox Style="{StaticResource ToolbarPasswordBoxStyle}" Width="104"
+                                 behaviors:PasswordBoxBehavior.BindPassword="True"
+                                 behaviors:PasswordBoxBehavior.Password="{Binding Password, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                 ToolTip="服务端配置的登录密码（必填）"/>
+                </StackPanel>
+
+                <!-- 主操作按钮：连接/断开 -->
                 <StackPanel Grid.Column="8" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Button Content="Connect" Style="{StaticResource PrimaryButtonStyle}"
+                            Command="{Binding ConnectCommand}" Margin="0,0,6,0"
+                            ToolTip="按上方 HOST/PORT/USER/PASS 建立连接"/>
                     <Button Content="Disconnect" Style="{StaticResource DangerButtonStyle}"
                             Command="{Binding StopCommand}"/>
                 </StackPanel>
@@ -51,8 +103,7 @@
 
         <!-- ====== 信息条（浅色）：状态 + 会话指标 + 远程操作 ====== -->
         <Border x:Name="ActionBar" Grid.Row="1" Background="#F4F6F8"
-                BorderBrush="#DDE3E8" BorderThickness="0,0,0,1" Padding="14,6"
-                Visibility="Collapsed">
+                BorderBrush="#DDE3E8" BorderThickness="0,0,0,1" Padding="14,6">
             <Grid>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*"/>
@@ -283,6 +334,25 @@
                         </Grid>
                     </StackPanel>
                 </Border>
+
+                <!-- 未连接占位提示：连接成功后隐藏 -->
+                <StackPanel x:Name="NotConnectedHint" HorizontalAlignment="Center" VerticalAlignment="Center"
+                            IsHitTestVisible="False">
+                    <StackPanel.Style>
+                        <Style TargetType="StackPanel">
+                            <Setter Property="Visibility" Value="Visible"/>
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding IsConnected}" Value="True">
+                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </StackPanel.Style>
+                    <TextBlock Text="未连接" FontSize="28" FontWeight="SemiBold" Foreground="#9AA7B0"
+                               HorizontalAlignment="Center" Margin="0,0,0,10"/>
+                    <TextBlock Text="在上方输入 HOST / PORT / USER / PASS 后点击 Connect，或在浏览窗口选择/新建连接"
+                               FontSize="14" Foreground="#AEBBC4" HorizontalAlignment="Center"/>
+                </StackPanel>
 
                 <!-- 文件剪贴板传输进度条：叠加在桌面显示区顶部 -->
                 <Border HorizontalAlignment="Center" VerticalAlignment="Top"
