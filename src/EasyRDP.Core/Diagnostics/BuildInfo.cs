@@ -35,6 +35,21 @@ namespace EasyRDP.Core.Diagnostics
         public const string ZrleFullFrameFixVersion = "v1-2026-09-09";
 
         /// <summary>
+        /// ZRLE 基线漂移修复版本标识（v1）：发送队列丢帧/渲染丢帧后强制全量渲染，
+        /// 并禁用 CopyRect 防止漂移被放大，修复 D14 切回后仍残留的 Ghost/拖影花屏。
+        /// </summary>
+        public const string ZrleDivergenceFixVersion = "v1-2026-09-10";
+
+        /// <summary>
+        /// TCP 帧同步修复版本标识（v1）：TcpTransport.Send 取消"大消息分块写+块间释放锁"
+        /// 的队头阻塞优化，改为整条消息持锁一次性写入。旧实现会让控制消息（光标更新等）
+        /// 在视频帧块间隙插队，TCP 字节流无消息边界 → 交错字节被接收端当作大帧 payload
+        /// 消费 → ZRLE 数据污染 → 解码失败/丢帧 → 客户端基线漂移 → 花屏
+        /// （日志实证：所有 ZRLE 解码失败帧均 >64KB，且失败前必有 "discarding 35 bytes"）。
+        /// </summary>
+        public const string TcpFramingFixVersion = "v1-2026-09-20";
+
+        /// <summary>
         /// 构建描述：程序集版本 + exe 文件写入时间（UTC，即构建时间）+ 可执行文件路径。
         /// 用于与部署侧的 exe 时间戳直接对比。
         /// </summary>

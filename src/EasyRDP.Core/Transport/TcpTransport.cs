@@ -64,53 +64,34 @@ namespace EasyRDP.Core.Transport
         }
 
         /// <summary>
-        /// 大消息分块阈值（字节）。>此值的消息分块写、块间释放发送锁让小消息插队。
-        /// 64KB：覆盖绝大多数单条控制消息（<1KB）与中小视频帧；1MB 级大帧分 ~16 块，
-        /// 每块间隙都可插入 35B 光标更新 / 剪贴板 / 输入反馈。
+        /// 发送一条完整线格式消息。整条消息在 _sendLock 内一次性写入，绝不中途释放锁。
+        /// 
+        /// D17 花屏根因修复：旧实现把 >64KB 消息分块写、并在块间释放锁让控制消息
+        /// （光标更新 35B / 保活等）插队，本意是消除队头阻塞。但 TCP 是字节流、
+        /// 没有消息边界——两个消息的字节一旦交错，接收端 MessageFramingBuffer
+        /// 会把插入的小消息当作大帧 payload 的一部分消费掉：
+        ///   (a) 大视频帧的 ZRLE payload 被污染 → ZRLE unpack 解析出乱码区域坐标
+        ///       （日志实证：所有 ZRLE 解码失败帧均 >64KB，解码失败前必有
+        ///       "MessageFramingBuffer: discarding 35 bytes"，35 字节正是
+        ///       0x06 光标消息 6+29 的完整尺寸）→ 丢帧 → 客户端基线漂移 → 花屏；
+        ///   (b) 大帧尾部剩余字节错位到下一消息解析 → 帧同步失步，需丢弃字节重对齐。
+        /// 持锁整写保证字节流中消息永不交错；局域网 1MB 帧写入 ~10ms，控制消息
+        /// 排队等待的延迟远小于"花屏+帧同步失步"的代价。
         /// </summary>
-        internal const int LargeMessageChunkSize = 64 * 1024;
-
         public void Send(byte[] message)
         {
             if (message == null)
                 return;
-            // 手动 Monitor.Enter/Exit（不能用 lock 语法糖）：大消息分块写需要在中途
-            // Exit/Enter 让小消息插队；lock 块内手动 Exit 会导致块尾隐式 Exit 抛
-            // SynchronizationLockException（lock 展开为 try/finally+Exit，重复释放）。
+            // 手动 Monitor.Enter/Exit（不能用 lock 语法糖）：Send 可能被
+            // 编码线程（视频帧）、光标会话线程（光标更新）、保活线程并发调用，
+            // 持锁整写是消息原子性的唯一保证。
             Monitor.Enter(_sendLock);
             try
             {
                 if (_client == null || !_client.Connected)
                     return;
                 NetworkStream stream = _client.GetStream();
-                if (message.Length <= LargeMessageChunkSize)
-                {
-                    stream.Write(message, 0, message.Length);
-                }
-                else
-                {
-                    // 队头阻塞消除：1MB 视频帧一次 Write 会长时间持有 _sendLock，
-                    // 期间 35B 光标更新/输入事件/剪贴板只能排队（表现为鼠标回显卡顿）。
-                    // 分块写 + 块间释放锁重取，等待中的小消息发送可在块间隙插队；
-                    // 无等待者时 Exit+Enter 仅为两次原子操作（纳秒级），无额外开销。
-                    // TCP 是字节流，接收端 MessageFramingBuffer 按完整消息解析，
-                    // 分块写不影响协议正确性。
-                    for (int offset = 0; offset < message.Length; offset += LargeMessageChunkSize)
-                    {
-                        int len = Math.Min(LargeMessageChunkSize, message.Length - offset);
-                        stream.Write(message, offset, len);
-                        if (offset + len < message.Length)
-                        {
-                            Monitor.Exit(_sendLock);
-                            Thread.Sleep(0); // 让出时间片给等待中的发送线程（若有）
-                            Monitor.Enter(_sendLock);
-                            // 重取锁期间连接可能已被其他线程关闭（Disconnected 清理置 null）
-                            if (_client == null || !_client.Connected)
-                                return;
-                            stream = _client.GetStream();
-                        }
-                    }
-                }
+                stream.Write(message, 0, message.Length);
                 // 调试日志：记录发送的完整消息（type + 总长度），供排障追踪。
                 // InputEvent（~120Hz 鼠标流）降频为每 20 条记录一次。
                 bool isInputEvent = message.Length > 1

@@ -89,8 +89,15 @@ namespace EasyRDP.Core.Protocol
         /// <summary>v3：池化压缩数据缓冲，每瓦片一个预分配数组（32KB），跨帧复用。</summary>
         private byte[][] _compressedDataPool;
 
-        /// <summary>鼠标按下状态：仅鼠标按下时启用 CopyRect 搜索（窗口拖动场景）。</summary>
+        /// <summary>鼠标按下状态：仅鼠标按下时启用 CopyRect 搜索（窗口拖动场景）。
+        /// D16 残留花屏：CopyRect 依赖服务端参考帧与客户端解码缓冲像素级一致，任何基线
+        /// 漂移（丢帧/网络抖动/解码错误）都会通过 CopyRect 把错误复制到新区域，形成
+        /// 持续 Ghost/拖影。临时禁用 CopyRect，以 Deflate/FillRect 全量编码变化瓦片，
+        /// 牺牲少量窗口拖动场景的性能，换取基线漂移不再被放大。
+        /// </summary>
         private volatile bool _mouseButtonDown;
+        /// <summary>CopyRect 总开关。false 时即使鼠标按下也不启用 CopyRect。</summary>
+        private const bool EnableCopyRect = false;
 
         // CopyRect 锚点位移传播状态（每帧重置）
         private bool _copyAnchorValid;
@@ -184,7 +191,8 @@ namespace EasyRDP.Core.Protocol
 
             // CopyRect 仅在非首帧且鼠标按下时启用（窗口拖动场景）；
             // 全量帧（首帧/强制关键帧）不启用——全屏重建时 CopyRect 搜索无收益且浪费 CPU
-            bool copyRectEnabled = !fullFrame && _mouseButtonDown;
+            // D16：EnableCopyRect=false 时彻底禁用，防止基线漂移被 CopyRect 放大为花屏。
+            bool copyRectEnabled = EnableCopyRect && !fullFrame && _mouseButtonDown;
 
             for (int ty = 0; ty < tilesY; ty++)
             {

@@ -68,6 +68,12 @@ namespace EasyRDP.Client.Wpf.Services
         private long _lastKeyframeRequestTicks;
         private const long KeyframeRequestCooldownMs = 500;
 
+        // D16 残留花屏防护：渲染层若因 UI 线程繁忙未能及时借走上一帧（CommitFrame 返回 false），
+        // 解码器内部 _frameBuffer 已推进、RenderTarget 的 WriteableBitmap 未更新 → 局部更新
+        // 会只覆盖新帧的脏矩形，其余区域保留更旧像素。下一帧提交时强制 full render（dirtyRects=null）
+        // 把解码器当前完整画面一次性写回 RenderTarget，消除漂移。
+        private volatile bool _forceFullRenderNext;
+
         // 最近一次 RTT 测量值（毫秒）。由接收线程在 Keepalive 回显到达时写入，
         // 诊断/流控线程读取；volatile 保证可见性。未测到为 -1。
         private volatile int _lastRttMs = -1;
@@ -859,12 +865,12 @@ namespace EasyRDP.Client.Wpf.Services
                     if (_decodeFailures <= 3 || _decodeFailures % 50 == 0)
                         Logger.Warn("Decode failed: status={0} seq={1} keyframe={2} dataLen={3} (total failures={4})",
                             result.Status, msg.SequenceNumber, msg.IsKeyframe, msg.Data.Length, _decodeFailures);
-                    // 解码脱同步恢复：P 帧丢失参考帧（dsRefLost/dsNoParamSets）后后续 P 帧持续失败，
-                    // 只能等周期性 IDR 恢复（低帧率下 10~15s，长时间黑屏）。立即请求 IDR，
-                    // 服务端收到后强制生成关键帧，1~2 帧内恢复画面。
-                    // D14：按帧头 codec 判断（H264 帧才有参考帧依赖，ZRLE 帧失败无需 IDR）。
-                    if (msg.Codec == CodecId.H264Software || msg.Codec == CodecId.H264Hardware)
-                        RequestDecoderKeyframe();
+                    // 解码脱同步恢复：连续解码失败时向服务端请求关键帧（IDR / ZRLE 全量帧）。
+                    // H264：P 帧丢参考帧后只能等 IDR 恢复；ZRLE：解码失败 = 本帧被丢弃，
+                    // 客户端解码缓冲停在旧画面、服务端参考帧已推进 → 后续增量帧叠到旧基线
+                    // 产生花屏。两种 codec 都请求全量重建（服务端对 ZRLE 请求同样强制
+                    // 全量编码），1~2 帧内恢复画面。
+                    RequestDecoderKeyframe();
                     if (_decodeFailures == 100)
                         RaiseFatal("Video decode failed repeatedly (" + _decodeFailures + " frames) - connection unusable");
                 }
@@ -879,21 +885,33 @@ namespace EasyRDP.Client.Wpf.Services
             // 阶段二：ZRLE 帧提取脏矩形列表随帧提交（渲染层据此局部更新）。
             // ExtractRects 只解析区域头部（不解压数据），开销可忽略。
             // D14：按帧头 codec 判断——H264 帧（或非 Zrle 帧）保持 dirtyRects=null → 全帧渲染。
+            // D16：上一帧 CommitFrame 被丢弃后，解码器缓冲已推进但 RenderTarget 未更新，
+            // 必须放弃局部更新、用当前完整解码帧重写 RenderTarget，防止画面漂移花屏。
             ScreenRect[] dirtyRects = null;
-            if (msg.Codec == CodecId.Zrle && msg.Data != null)
+            if (msg.Codec == CodecId.Zrle && msg.Data != null && !_forceFullRenderNext)
             {
                 dirtyRects = ZrleRegionCodec.ExtractRects(msg.Data);
                 if (_frameCount <= 10 || _frameCount % 100 == 0)
                 {
                     int rectCount = dirtyRects != null ? dirtyRects.Length : -1;
-                    Logger.Info("ExtractRects: seq={0} frameCount={1} dataLen={2} rects={3}",
-                        msg.SequenceNumber, _frameCount, msg.Data.Length, rectCount);
+                    Logger.Info("ExtractRects: seq={0} frameCount={1} dataLen={2} rects={3} forceFull={4}",
+                        msg.SequenceNumber, _frameCount, msg.Data.Length, rectCount, _forceFullRenderNext);
                 }
             }
 
             bool committed = _frameBuffer.CommitFrame(msg.Width, msg.Height, dirtyRects);
-            if (!committed && (_frameCount <= 10 || _frameCount % 100 == 0))
-                Logger.Warn("CommitFrame DROPPED (reader busy): seq={0} frameCount={1}", msg.SequenceNumber, _frameCount);
+            if (!committed)
+            {
+                if (_frameCount <= 10 || _frameCount % 100 == 0)
+                    Logger.Warn("CommitFrame DROPPED (reader busy): seq={0} frameCount={1}", msg.SequenceNumber, _frameCount);
+                // D16：RenderTarget 未拿到本帧，下一帧必须全量渲染以恢复同步
+                _forceFullRenderNext = true;
+            }
+            else if (_forceFullRenderNext)
+            {
+                // 本帧已按完整画面提交并交换到读槽，同步已恢复，清除标志
+                _forceFullRenderNext = false;
+            }
             Interlocked.Increment(ref _frameCount);
             Interlocked.Add(ref _receivedBytes, msg.Data != null ? msg.Data.Length : 0);
 

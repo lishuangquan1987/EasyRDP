@@ -184,6 +184,11 @@ namespace EasyRDP.Server.Wpf.Services
         // 强制一帧全量后客户端重建完整画面，基线重新对齐。
         private volatile bool _forceZrleKeyNext;
 
+        // D14 残留花屏防护：ZRLE 增量编码依赖服务端参考帧与客户端解码缓冲严格同步。
+        // 发送队列丢帧后服务端参考帧已推进、客户端未收到该帧 → 基线漂移 → 后续增量帧
+        // 叠到错误画面上产生持续花屏。服务端主动在丢帧后强制全量重建，使客户端重新对齐。
+        private const int ZrlePeriodicKeyFrameInterval = 120; // 约 1 分钟@2FPS，兜底防静默漂移
+
         // ── D14：动态混合编码（ZRLE 基线 + H264 高动态分流）──
         // 日志实证：ZRLE 无损 Deflate 在大变化场景（视频/滚动/全屏切换）单帧 100-366ms，
         // 帧率被锁死在 3-5 FPS；而静止/局部变化时 ZRLE 仅 8-40ms 且无损。
@@ -288,11 +293,13 @@ namespace EasyRDP.Server.Wpf.Services
             Logger.Info("ServerStreamSession {0} starting with codec {1}", sessionId, codec);
             // 版本诊断标识：部署后日志可见，用于确认运行的二进制包含 EncodeLoop 流控修复。
             // 若日志无此行或 flowControlFix != v3-2026-08-09，说明部署的是旧构建。
-            Logger.Info("=== EasyRDP Server build: {0} flowControlFix={1} keyframeFix={2} zrleFullFrameFix={3} ===",
+            Logger.Info("=== EasyRDP Server build: {0} flowControlFix={1} keyframeFix={2} zrleFullFrameFix={3} zrleDivergenceFix={4} tcpFramingFix={5} ===",
                 EasyRDP.Core.Diagnostics.BuildInfo.Describe(),
                 EasyRDP.Core.Diagnostics.BuildInfo.FlowControlFixVersion,
                 EasyRDP.Core.Diagnostics.BuildInfo.KeyframeRequestFixVersion,
-                EasyRDP.Core.Diagnostics.BuildInfo.ZrleFullFrameFixVersion);
+                EasyRDP.Core.Diagnostics.BuildInfo.ZrleFullFrameFixVersion,
+                EasyRDP.Core.Diagnostics.BuildInfo.ZrleDivergenceFixVersion,
+                EasyRDP.Core.Diagnostics.BuildInfo.TcpFramingFixVersion);
 
             // Create encoder — H264 是唯一支持的编码方式，不再回退到原始像素
             _encoder = EncoderFactory.Create(codec);
@@ -831,8 +838,12 @@ namespace EasyRDP.Server.Wpf.Services
                     // 1. 分辨率变化（编码器重建后首帧必须是 IDR）
                     // 2. 长间隔后恢复编码（≥60 帧跳过≈1-4s，解码器参考帧可能过时）
                     // 3. 周期性刷新（KeyframeInterval，防止累积漂移）
+                    // 4. 客户端显式请求 IDR / ZRLE 切回后基线重建
                     // 不在每次静态帧跳过后都强制——P 帧基于上一帧差分，
                     // 短暂跳过（几帧）不影响解码器参考帧有效性，避免大量大体积关键帧。
+                    bool zrlePeriodicKey = isZrle
+                        && Interlocked.Read(ref _framesEncoded) > 0
+                        && (Interlocked.Read(ref _framesEncoded) % ZrlePeriodicKeyFrameInterval == 0);
                     bool forceKey = resolutionChanged
                         || encodeSizeChanged
                         || _framesSkipped >= 60
@@ -840,16 +851,18 @@ namespace EasyRDP.Server.Wpf.Services
                         // 客户端请求的 IDR（解码脱同步恢复）：即使内容无变化也强制关键帧
                         || _keyframeRequested
                         // D14 修复：切回 ZRLE 后首帧全量（H264 有损与 ZRLE 参考帧基线对齐）
-                        || _forceZrleKeyNext;
+                        || _forceZrleKeyNext
+                        // D16：ZRLE 定期全量兜底，防止丢帧/网络抖动导致的参考帧静默漂移
+                        || zrlePeriodicKey;
 
                     // D16：ZRLE 全量帧语义收敛（配套 ZrleEncoder v4 尊重 forceKeyframe）。
                     // 周期性（seq % KeyframeInterval）与保活（_framesSkipped >= 60）的
                     // forceKey 对 ZRLE 无意义：周期性全量只浪费带宽（全屏 Deflate），
                     // 保活帧本应是 ~200-500B 的微型帧。仅"客户端可能脱同步"的显式信号
-                    // 才值得全量重建——_forceZrleKeyNext（H264→ZRLE 切回，基线不一致）
-                    // 与 _keyframeRequested（客户端显式请求）。分辨率/尺寸变化已由
-                    // 编码器 Reset+Initialize（_isFirstFrame=true）自然产生全量帧。
-                    if (isZrle && !_forceZrleKeyNext && !_keyframeRequested)
+                    // 才值得全量重建——_forceZrleKeyNext（H264→ZRLE 切回/发送队列丢帧），
+                    // _keyframeRequested（客户端显式请求），以及 zrlePeriodicKey（兜底）。
+                    // 分辨率/尺寸变化已由编码器 Reset+Initialize（_isFirstFrame=true）自然产生全量帧。
+                    if (isZrle && !_forceZrleKeyNext && !_keyframeRequested && !zrlePeriodicKey)
                         forceKey = false;
 
                     Logger.Debug("Session {0}: calling Encode seq={1} forceKey={2} res={3}x{4} bgraLen={5}",
@@ -1152,16 +1165,20 @@ namespace EasyRDP.Server.Wpf.Services
                             if (_sendQueueDrops == 1 || _sendQueueDrops % 30 == 0)
                                 Logger.Warn("Session {0}: send queue full, new frame dropped to preserve keyframe (seq={1}), total drops={2}",
                                     _sessionId, vfm.SequenceNumber, _sendQueueDrops);
+                            // D16：丢帧后强制下一 ZRLE 帧全量，确保客户端基线重置（冗余但安全）
+                            _forceZrleKeyNext = true;
                         }
                         else
                         {
-                            // 丢弃最旧的非关键帧，入队最新帧
+                            // 丢弃最旧的非关键帧，入队最新帧。服务端参考帧已包含被丢帧的更新，
+                            // 客户端未收到 → 必须强制下一 ZRLE 帧全量重建，否则增量帧叠到旧基线花屏。
                             if (_sendQueue.Count > 0)
                                 _sendQueue.Dequeue();
                             _sendQueueDrops++;
                             if (_sendQueueDrops == 1 || _sendQueueDrops % 30 == 0)
                                 Logger.Warn("Session {0}: send queue full, oldest frame dropped (seq={1}), total drops={2}",
                                     _sessionId, vfm.SequenceNumber, _sendQueueDrops);
+                            _forceZrleKeyNext = true;
                             _sendQueue.Enqueue(fts);
                             Monitor.Pulse(_lock);
                         }
