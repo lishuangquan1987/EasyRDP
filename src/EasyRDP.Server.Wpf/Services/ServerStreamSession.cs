@@ -70,12 +70,13 @@ namespace EasyRDP.Server.Wpf.Services
         // Capture buffers with ownership tracking: a buffer is only reused after the
         // encode thread has finished reading it. Plain A/B alternation could overwrite
         // a buffer the encoder is still reading when encode takes longer than 2 captures.
-        // 4 缓冲：编码耗时 200-900ms 时，2 缓冲丢弃率高达 90%+，
-        // 6 缓冲提高突发容限：偶发编码尖峰（如窗口弹出瞬间 ZRLE 全瓦片编码
-        // 实测 239ms）时截屏线程仍有缓冲可用，避免 all capture buffers busy 丢帧。
-        // 每缓冲 8.3MB(1080p BGRA)，6 缓冲共 50MB——XP 32 位 2GB 地址空间可接受。
-        private readonly byte[][] _captureBufs = new byte[6][];
-        private readonly bool[] _captureBufInUse = new bool[6];
+        // D18 内存优化：6→4 缓冲。原 6 缓冲（50MB）是为编码尖峰（239ms）时的突发
+        // 容限，但日志实证会话内 queueDrops/captureDrops 恒为 0，且 50MB 工作集在
+        // 弱机上加剧页错误风暴（每 100 帧 160 万次页错误，CPU 烧在换页上）。
+        // 4 缓冲（33MB）仍覆盖 200ms 编码尖峰；偶发超尖峰丢帧由"丢旧保新"兜底，
+        // 正确性无损。每缓冲 8.3MB(1080p BGRA)，4 缓冲共 33MB。
+        private readonly byte[][] _captureBufs = new byte[4][];
+        private readonly bool[] _captureBufInUse = new bool[4];
         private int _lastW, _lastH;
 
         /// <summary>编码实际宽度（向上取偶后），客户端用此值初始化解码器与显示。</summary>
@@ -776,7 +777,9 @@ namespace EasyRDP.Server.Wpf.Services
                 }
 
                 // D15 冷页防护：每 600 帧触碰全部捕获缓冲（防 OS 回收冷页导致硬页错误风暴）
-                if (Interlocked.Read(ref _framesEncoded) % 600 == 0)
+                // D18：冷页热身从 600→300 帧——缓冲减为 4 后每次热身成本更低，
+                // 更频繁地保持 33MB 缓冲页驻留，对抗弱机工作集修剪导致的换页风暴。
+                if (Interlocked.Read(ref _framesEncoded) % 300 == 0)
                     WarmupCaptureBuffers();
 
                 long encodeStart = Stopwatch.GetTimestamp();

@@ -53,6 +53,13 @@ namespace EasyRDP.Core.Protocol
         /// <summary>瓦片边长（像素）。64×64 = 16KB BGRA，Deflate 压缩效率与开销的平衡点。</summary>
         public const int TileSize = 64;
 
+        /// <summary>瓦片 Deflate 压缩输出缓冲上限（16KB + 4KB 余量）。
+        /// DEFLATE 对 16KB 输入的最坏输出 ≈ 输入 + 每 16KB 块 5 字节 + 头 ≈ 16.4KB，
+        /// 20KB 有 ~3.6KB 安全余量。旧值 32KB 使 1080p 压缩池达 18.5MB（578 槽 × 32KB），
+        /// D18 内存优化减至 ~11.6MB；若极端数据超出（理论上不可能），DeflateCompress
+        /// 抛异常被上层捕获 → 仅丢一帧，不损坏画面。</summary>
+        private const int MaxCompressedTileSize = TileSize * TileSize * 4 + 4096;
+
         /// <summary>CopyRect 搜索范围（±16 像素，步长 4）。</summary>
         private const int CopySearchRange = 16;
 
@@ -127,7 +134,7 @@ namespace EasyRDP.Core.Protocol
 
             // 预分配缓冲池（避免每帧 GC 压力）
             _tileBuffer = new byte[TileSize * TileSize * 4];
-            _compressBuffer = new byte[TileSize * TileSize * 4 * 2];
+            _compressBuffer = new byte[MaxCompressedTileSize];
             int tilesX = (width + TileSize - 1) / TileSize;
             int tilesY = (height + TileSize - 1) / TileSize;
             int maxTiles = tilesX * tilesY;
@@ -150,8 +157,8 @@ namespace EasyRDP.Core.Protocol
                 _copyRectDataPool[i] = new byte[8];
             }
 
-            // 池化压缩数据缓冲（每个瓦片一个预分配数组，32KB）
-            int maxCompressedSize = TileSize * TileSize * 4 * 2;
+            // 池化压缩数据缓冲（每个瓦片一个预分配数组，MaxCompressedTileSize=20KB）
+            int maxCompressedSize = MaxCompressedTileSize;
             _compressedDataPool = new byte[maxTiles][];
             for (int i = 0; i < maxTiles; i++)
                 _compressedDataPool[i] = new byte[maxCompressedSize];
