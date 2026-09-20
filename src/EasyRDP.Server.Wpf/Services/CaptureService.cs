@@ -27,7 +27,10 @@ namespace EasyRDP.Server.Wpf.Services
         private readonly IScreenCapturer _capturer;
         private Thread _captureThread;
         private volatile bool _running;
-        private int _frameIntervalMs = 16; // ~60fps
+        // volatile：ServerStreamSession 按编码模式跨线程设置（流控 50ms / 推送 16ms），
+        // 捕获线程循环读取；非 volatile 存在 JIT 缓存旧值风险，导致探测/全截频率失真
+        // （D20：曾观察到 16ms 初始值被持续使用，虚拟显卡上高频探测占满 CPU）。
+        private volatile int _frameIntervalMs = 16; // ~60fps
         // 捕获/编码分辨率上限：0 = 不降分辨率，按屏幕原生分辨率捕获与编码。
         // >0 时用 GDI StretchBlt 一步完成“截屏 + 降采样”，把昂贵的托管逐像素
         // 缩放（原 DownscaleBgra，弱机单核上 1080p 实测 100~300ms/帧）卸载给
@@ -41,14 +44,18 @@ namespace EasyRDP.Server.Wpf.Services
         // 生命周期锁：Start/Stop 在并发会话接入/断开下必须串行（防止检查-执行竞态产生双线程）
         private readonly object _lifecycleLock = new object();
 
-        // ── 静止跳过截屏（D13）──
-        // 弱机 BitBlt 全帧截屏实测 250~300ms/帧（Win7 虚拟机 + Hyper-V 虚拟显卡），
-        // 是 FPS 上不去的主因。桌面静止时用"低成本缩略图"探测变化，静止则跳过
-        // 昂贵的全帧 StretchBlt；只有检测到变化才做全帧截屏。这样静置时截屏开销
-        // 从 ~300ms/帧 降到 ~几 ms/帧，编码线程不再空等，FPS 得以释放给实际变化。
-        // 缩略图：全帧等比缩小 N 倍的 BGRA 像素，memcmp 批量对比。
+        // ── 静止跳过截屏（D13 + D20 虚拟显卡 CPU 优化）──
+        // 弱机/虚拟显卡 BitBlt 全帧截屏实测 250~300ms/帧（Win7 虚拟机 + Hyper-V 虚拟显卡），
+        // 桌面静止时用"低成本缩略图"探测变化，静止则跳过昂贵的全帧 StretchBlt；
+        // 只有检测到变化才做全帧截屏。
+        // D20 实证：Hyper-V 虚拟显卡上缩略图探测一次也要 76ms，若按 50ms 间隔持续探测，
+        // 捕获线程被探测占满 1 核（服务端 CPU 12% 主因，远程时整台服务器卡顿）。
+        // 修正：静止时探测降频到 250ms/次（省 4 倍探测 CPU），检测到变化立即恢复
+        // 短间隔快速响应；保活全截从 500ms 拉长到 2000ms（虚拟显卡全截 ~200ms 很贵，
+        // 且 ServerStreamSession 自带 keepalive 微型帧维持连接活跃，捕获保活无需高频）。
         private const int ThumbDivisor = 8;                 // 缩略图边长 = 原尺寸/8
-        private const int ThumbKeepaliveIntervalMs = 500;   // 静止时强制全帧截屏的间隔（保活）
+        private const int ThumbKeepaliveIntervalMs = 2000;  // 静止时强制全帧截屏的间隔（保活）
+        private const int ThumbIdleProbeIntervalMs = 250;   // 静止时缩略图探测间隔（省 CPU）
         private int _thumbW, _thumbH;                       // 当前缩略图尺寸
         private byte[] _thumbBuffer;                        // 最新缩略图 BGRA 像素（复用缓冲）
         private byte[] _thumbPrev;                          // 上一参考缩略图 BGRA 像素（比较基准）
@@ -254,8 +261,10 @@ namespace EasyRDP.Server.Wpf.Services
                     if (targetW > 0 && targetH > 0
                         && !thumbnailChanged && !_thumbNeedFull())
                     {
-                        // 桌面静止：跳过全帧截屏，等待下一个采集周期
-                        Thread.Sleep(_frameIntervalMs);
+                        // 桌面静止：跳过全帧截屏，低频探测（D20：虚拟显卡探测 ~76ms/次，
+                        // 高频探测会把捕获线程占满 1 核；静止降频到 250ms 省 4 倍 CPU，
+                        // 变化时走下方全截路径并恢复短间隔）
+                        Thread.Sleep(ThumbIdleProbeIntervalMs);
                         continue;
                     }
                     _thumbLastKeepaliveTicks = Stopwatch.GetTimestamp();

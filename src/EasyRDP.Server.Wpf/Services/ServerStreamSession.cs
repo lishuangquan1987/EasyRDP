@@ -70,13 +70,12 @@ namespace EasyRDP.Server.Wpf.Services
         // Capture buffers with ownership tracking: a buffer is only reused after the
         // encode thread has finished reading it. Plain A/B alternation could overwrite
         // a buffer the encoder is still reading when encode takes longer than 2 captures.
-        // D18 内存优化：6→4 缓冲。原 6 缓冲（50MB）是为编码尖峰（239ms）时的突发
-        // 容限，但日志实证会话内 queueDrops/captureDrops 恒为 0，且 50MB 工作集在
-        // 弱机上加剧页错误风暴（每 100 帧 160 万次页错误，CPU 烧在换页上）。
-        // 4 缓冲（33MB）仍覆盖 200ms 编码尖峰；偶发超尖峰丢帧由"丢旧保新"兜底，
-        // 正确性无损。每缓冲 8.3MB(1080p BGRA)，4 缓冲共 33MB。
-        private readonly byte[][] _captureBufs = new byte[4][];
-        private readonly bool[] _captureBufInUse = new bool[4];
+        // D18 内存优化：6→4 缓冲（日志实证 queueDrops/captureDrops 恒为 0，且大工作集
+        // 加剧页错误风暴）。D20 再 4→3：D13 缩略图跳过 + 流控模式后捕获帧本就稀疏
+        // （静止几乎不产帧），3 缓冲对正常编码尖峰仍宽松；偶发超尖峰丢帧由"丢旧保新"
+        // 兜底，正确性无损。每缓冲 8.3MB(1080p BGRA)，3 缓冲 25MB（1280 仅 15.7MB）。
+        private readonly byte[][] _captureBufs = new byte[3][];
+        private readonly bool[] _captureBufInUse = new bool[3];
         private int _lastW, _lastH;
 
         /// <summary>编码实际宽度（向上取偶后），客户端用此值初始化解码器与显示。</summary>
