@@ -51,7 +51,7 @@ namespace EasyRDP.Client.Wpf.ViewModels
         /// <summary>单选卡片选中态。</summary>
         public RelayCommand<RecentConnection> SelectItemCommand { get; }
 
-        /// <summary>菜单 File > New Connection（聚焦地址栏）。</summary>
+        /// <summary>菜单 File > New Connection（弹出完整连接表单：地址/端口/用户名/密码）。</summary>
         public RelayCommand NewConnectionCommand { get; }
 
         /// <summary>菜单 File/View > Refresh（重载列表）。</summary>
@@ -74,9 +74,6 @@ namespace EasyRDP.Client.Wpf.ViewModels
         /// <summary>请求关闭浏览窗口。</summary>
         public event Action? RequestClose;
 
-        /// <summary>请求聚焦地址栏（File > New Connection）。</summary>
-        public event Action? FocusAddressRequested;
-
         public HostBrowseWindowViewModel(RecentConnectionStore store, IDialogService dialogs, IUserNotifier notifier)
         {
             _store = store ?? throw new ArgumentNullException(nameof(store));
@@ -89,7 +86,9 @@ namespace EasyRDP.Client.Wpf.ViewModels
             RenameItemCommand = new RelayCommand<RecentConnection>(RenameItem);
             DeleteItemCommand = new RelayCommand<RecentConnection>(DeleteItem);
             SelectItemCommand = new RelayCommand<RecentConnection>(SelectItem);
-            NewConnectionCommand = new RelayCommand(() => FocusAddressRequested?.Invoke());
+            // New Connection：弹完整表单（端口/用户名/密码），确认后保存并连接。
+            // 旧实现只聚焦地址栏，地址栏无凭据输入位，用户"输入 IP 后没地方填端口/账号/密码"。
+            NewConnectionCommand = new RelayCommand(NewConnection);
             RefreshCommand = new RelayCommand(ReloadConnections);
             ExitCommand = new RelayCommand(() => RequestClose?.Invoke());
             AboutCommand = new RelayCommand(() =>
@@ -129,7 +128,11 @@ namespace EasyRDP.Client.Wpf.ViewModels
 
         // ====== 连接 ======
 
-        /// <summary>解析地址栏 "host[:port]" 并请求连接（地址栏无用户名/密码）。</summary>
+        /// <summary>
+        /// 解析地址栏 "[user@]host[:port]" 并请求连接。
+        /// 服务端要求非空凭据：地址栏无凭据且无已保存凭据时，弹编辑表单补全
+        /// （端口/用户名/密码），确认后保存并连接——解决"输入 IP 后没地方填凭据"。
+        /// </summary>
         private void ConnectFromAddressBar()
         {
             string hostPort = AddressText;
@@ -137,6 +140,17 @@ namespace EasyRDP.Client.Wpf.ViewModels
 
             string host = hostPort.Trim();
             string port = "2000";
+            string? username = null;
+            string? password = null;
+
+            // 可选 user@ 前缀（用户名内不应含 @，取最后一个 @ 分割）
+            int at = host.LastIndexOf('@');
+            if (at > 0)
+            {
+                username = host.Substring(0, at).Trim();
+                host = host.Substring(at + 1).Trim();
+            }
+            // 可选 :port 后缀
             int idx = host.LastIndexOf(':');
             if (idx > 0 && int.TryParse(host.Substring(idx + 1), out int p) && p > 0 && p < 65536)
             {
@@ -145,7 +159,95 @@ namespace EasyRDP.Client.Wpf.ViewModels
             }
             if (string.IsNullOrWhiteSpace(host)) return;
 
-            ConnectRequested?.Invoke(new RecentConnection { Host = host, Port = port });
+            // 已保存过该主机：复用保存的端口/凭据，避免每次重复输入
+            var saved = _store.Load().FirstOrDefault(r =>
+                string.Equals(r.Host, host, StringComparison.OrdinalIgnoreCase));
+            if (saved != null)
+            {
+                if (string.IsNullOrEmpty(username))
+                    username = saved.Username;
+                if (string.IsNullOrEmpty(password))
+                    password = saved.Password;
+                if (string.IsNullOrWhiteSpace(port) || port == "2000")
+                    port = string.IsNullOrWhiteSpace(saved.Port) ? "2000" : saved.Port;
+            }
+
+            // 凭据缺失：弹编辑表单补全。服务端握手强制校验非空凭据，
+            // 空凭据连接必然认证失败，与其失败后让用户困惑，不如先补全再连接。
+            if (string.IsNullOrEmpty(username) || string.IsNullOrEmpty(password))
+            {
+                var result = _dialogs.EditConnection(new RecentConnection
+                {
+                    Host = host,
+                    Port = port,
+                    Username = username,
+                    Password = password
+                });
+                if (result == null || string.IsNullOrWhiteSpace(result.Host))
+                    return; // 取消：不连接
+                SaveConnection(result);
+                ConnectRequested?.Invoke(ToConnection(result));
+                return;
+            }
+
+            ConnectRequested?.Invoke(new RecentConnection
+            {
+                Host = host,
+                Port = port,
+                Username = username,
+                Password = password
+            });
+        }
+
+        /// <summary>
+        /// File > New Connection：弹完整连接表单（空表单 + 默认端口），
+        /// 确认后保存为最近连接并立即发起连接。
+        /// </summary>
+        private void NewConnection()
+        {
+            var result = _dialogs.EditConnection(new RecentConnection { Host = "", Port = "2000" });
+            if (result == null || string.IsNullOrWhiteSpace(result.Host))
+                return; // 取消
+            SaveConnection(result);
+            ConnectRequested?.Invoke(ToConnection(result));
+        }
+
+        /// <summary>把编辑结果归一化为可直接发起连接的 RecentConnection。</summary>
+        private static RecentConnection ToConnection(ConnectionEditResult result)
+        {
+            return new RecentConnection
+            {
+                Host = result.Host.Trim(),
+                Port = string.IsNullOrWhiteSpace(result.Port) ? "2000" : result.Port.Trim(),
+                Username = result.Username,
+                Password = result.Password
+            };
+        }
+
+        /// <summary>
+        /// 把编辑结果保存为最近连接（同主机已存在则更新，否则新建）。
+        /// 新建条目完整落盘端口/用户名/密码——避免连接后只剩 IP、凭据丢失。
+        /// </summary>
+        private void SaveConnection(ConnectionEditResult result)
+        {
+            string host = (result.Host ?? "").Trim();
+            if (host.Length == 0) return;
+
+            var list = _store.Load();
+            var item = list.FirstOrDefault(x =>
+                string.Equals(x.Host, host, StringComparison.OrdinalIgnoreCase));
+            if (item == null)
+            {
+                item = new RecentConnection { Host = host };
+                list.Add(item);
+            }
+            item.DisplayName = string.IsNullOrWhiteSpace(result.DisplayName) ? null : result.DisplayName.Trim();
+            item.Port = string.IsNullOrWhiteSpace(result.Port) ? "2000" : result.Port.Trim();
+            item.Username = string.IsNullOrWhiteSpace(result.Username) ? null : result.Username.Trim();
+            item.Password = string.IsNullOrEmpty(result.Password) ? null : result.Password;
+            item.LastConnectedUtc = DateTime.UtcNow;
+            _store.Save(list);
+            ReloadConnections();
         }
 
         /// <summary>请求连接指定卡片（携带保存的端口/用户名/密码）。</summary>

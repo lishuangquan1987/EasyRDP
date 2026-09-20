@@ -4,7 +4,8 @@ namespace EasyRDP.Core.Diagnostics
     /// 构建诊断信息工具：打印程序集版本、exe 构建时间戳与关键修复特征标识。
     /// 用途：两端部署后从日志确认实际运行的二进制版本——此前多次"现象依旧"
     /// 的根因是部署的 exe 未包含工作区修复（git 提交缺失/进程未重启）。
-    /// 日志中若看到 flowControlFix=v3 与 requestPayloadFix=v2 即确认含全部修复。
+    /// 日志中若看到 flowControlFix=v3、requestPayloadFix=v2 与 zrleFullFrameFix=v1
+    /// 即确认含全部修复。
     /// </summary>
     public static class BuildInfo
     {
@@ -25,6 +26,13 @@ namespace EasyRDP.Core.Diagnostics
         /// 服务端收到后强制生成 IDR 快速恢复画面（避免低帧率下等周期性 IDR 的 10~15s 黑屏）。
         /// </summary>
         public const string KeyframeRequestFixVersion = "v1-2026-08-26";
+
+        /// <summary>
+        /// ZRLE 全量帧修复版本标识（v1）：ZrleEncoder 尊重 forceKeyframe 强制全量编码。
+        /// 修复 D14 H264→ZRLE 切回时客户端基线不重建导致的持久花屏
+        /// （v2 曾忽略 forceKeyframe，使 ServerStreamSession._forceZrleKeyNext 形同虚设）。
+        /// </summary>
+        public const string ZrleFullFrameFixVersion = "v1-2026-09-09";
 
         /// <summary>
         /// 构建描述：程序集版本 + exe 文件写入时间（UTC，即构建时间）+ 可执行文件路径。

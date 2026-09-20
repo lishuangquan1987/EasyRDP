@@ -18,7 +18,7 @@ namespace EasyRDP.Client.Wpf.Dialogs
             _owner = owner;
         }
 
-        /// <summary>打开编辑连接对话框；取消返回 null。</summary>
+        /// <summary>打开编辑连接对话框；取消返回 null。主机为空视为新建连接。</summary>
         public ConnectionEditResult? EditConnection(RecentConnection current)
         {
             var vm = new EditConnectionViewModel(current);
@@ -26,7 +26,9 @@ namespace EasyRDP.Client.Wpf.Dialogs
             {
                 DataContext = vm,
                 Owner = _owner,
-                Title = "Edit - " + (current?.Host ?? "")
+                Title = string.IsNullOrWhiteSpace(current?.Host)
+                    ? "New Connection"
+                    : "Edit - " + current.Host
             };
             vm.CloseRequested += confirmed => window.DialogResult = confirmed;
 

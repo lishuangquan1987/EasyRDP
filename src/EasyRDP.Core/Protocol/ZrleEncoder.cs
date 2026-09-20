@@ -36,6 +36,15 @@ namespace EasyRDP.Core.Protocol
     ///   后续瓦片先验证该位移（O(1)），失败才回退全搜索；避免窗口拖动时每瓦片
     ///   81 次候选哈希（O(n²)）在单核 XP 上的开销。另设变化瓦片数上限保护，
     ///   全屏滚动等大变化场景直接跳过 CopyRect 搜索。
+    ///
+    /// v4 修正（花屏根因）：
+    /// - 尊重 forceKeyframe 参数：为 true 时强制全量编码（所有瓦片视为变化）。
+    ///   背景：D14 混合编码在 H264→ZRLE 切回时依赖 forceKeyframe 重建客户端基线
+    ///   （H264 是有损编码，客户端画面与服务端 ZRLE 参考帧（原始像素）基线不一致，
+    ///   若切回后只发增量帧，客户端把增量叠到 H264 前的旧基线上 → 持久花屏）。
+    ///   v2 曾忽略该参数，导致 ServerStreamSession._forceZrleKeyNext 形同虚设。
+    ///   全量编码不改变参考帧更新逻辑（Encode 尾部照常推进参考帧），
+    ///   下一帧仍为增量，不损失 ZRLE 的无损增量特性。
     /// </summary>
     public class ZrleEncoder : IVideoEncoder
     {
@@ -147,9 +156,11 @@ namespace EasyRDP.Core.Protocol
         /// <summary>
         /// 编码一帧 BGRA 像素。
         /// 内部自动检测变化瓦片，只编码变化区域。
-        /// 
-        /// v2 修正：forceKeyframe 参数被忽略（ZRLE 无帧间依赖）；IsKeyframe 始终返回 false
-        /// （避免客户端 keyframe 保护导致周期性延迟尖峰）。
+        ///
+        /// v2 修正：IsKeyframe 始终返回 false（ZRLE 无帧间依赖，避免客户端 keyframe
+        /// 保护导致周期性延迟尖峰）。
+        /// v4 修正：forceKeyframe=true 时强制全量编码（所有瓦片视为变化），
+        /// 供混合编码切回/客户端请求时重建解码端基线（见类注释）。
         /// </summary>
         public EncodedFrame Encode(byte[] pixels, bool forceKeyframe)
         {
@@ -160,6 +171,9 @@ namespace EasyRDP.Core.Protocol
             int tilesY = (_height + TileSize - 1) / TileSize;
             int regionCount = 0;
             bool isFirstFrame = _isFirstFrame;
+            // v4：forceKeyframe 与首帧等价——全量编码所有瓦片。
+            // 参考帧仍按常规在尾部推进，全量帧之后下一帧回到增量编码。
+            bool fullFrame = forceKeyframe || isFirstFrame;
             // 编码耗时统计（供性能诊断）
             long swStart = System.Diagnostics.Stopwatch.GetTimestamp();
 
@@ -168,8 +182,9 @@ namespace EasyRDP.Core.Protocol
             _copyDx = 0;
             _copyDy = 0;
 
-            // CopyRect 仅在非首帧且鼠标按下时启用（窗口拖动场景）
-            bool copyRectEnabled = !isFirstFrame && _mouseButtonDown;
+            // CopyRect 仅在非首帧且鼠标按下时启用（窗口拖动场景）；
+            // 全量帧（首帧/强制关键帧）不启用——全屏重建时 CopyRect 搜索无收益且浪费 CPU
+            bool copyRectEnabled = !fullFrame && _mouseButtonDown;
 
             for (int ty = 0; ty < tilesY; ty++)
             {
@@ -182,8 +197,9 @@ namespace EasyRDP.Core.Protocol
                     int tileBytes = tileW * tileH * 4;
                     if (tileBytes <= 0) continue;
 
-                    // uint 步长比较：与参考帧同位置瓦片是否相同
-                    bool changed = isFirstFrame || !TileEquals(pixels, _referenceFrame, x0, y0, tileW, tileH);
+                    // uint 步长比较：与参考帧同位置瓦片是否相同。
+                    // v4：fullFrame（首帧/强制关键帧）时跳过比较，全部视为变化。
+                    bool changed = fullFrame || !TileEquals(pixels, _referenceFrame, x0, y0, tileW, tileH);
                     if (!changed) continue;
 
                     // 提取瓦片到预分配缓冲（避免 new byte[]）

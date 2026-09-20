@@ -288,10 +288,11 @@ namespace EasyRDP.Server.Wpf.Services
             Logger.Info("ServerStreamSession {0} starting with codec {1}", sessionId, codec);
             // 版本诊断标识：部署后日志可见，用于确认运行的二进制包含 EncodeLoop 流控修复。
             // 若日志无此行或 flowControlFix != v3-2026-08-09，说明部署的是旧构建。
-            Logger.Info("=== EasyRDP Server build: {0} flowControlFix={1} keyframeFix={2} ===",
+            Logger.Info("=== EasyRDP Server build: {0} flowControlFix={1} keyframeFix={2} zrleFullFrameFix={3} ===",
                 EasyRDP.Core.Diagnostics.BuildInfo.Describe(),
                 EasyRDP.Core.Diagnostics.BuildInfo.FlowControlFixVersion,
-                EasyRDP.Core.Diagnostics.BuildInfo.KeyframeRequestFixVersion);
+                EasyRDP.Core.Diagnostics.BuildInfo.KeyframeRequestFixVersion,
+                EasyRDP.Core.Diagnostics.BuildInfo.ZrleFullFrameFixVersion);
 
             // Create encoder — H264 是唯一支持的编码方式，不再回退到原始像素
             _encoder = EncoderFactory.Create(codec);
@@ -840,6 +841,16 @@ namespace EasyRDP.Server.Wpf.Services
                         || _keyframeRequested
                         // D14 修复：切回 ZRLE 后首帧全量（H264 有损与 ZRLE 参考帧基线对齐）
                         || _forceZrleKeyNext;
+
+                    // D16：ZRLE 全量帧语义收敛（配套 ZrleEncoder v4 尊重 forceKeyframe）。
+                    // 周期性（seq % KeyframeInterval）与保活（_framesSkipped >= 60）的
+                    // forceKey 对 ZRLE 无意义：周期性全量只浪费带宽（全屏 Deflate），
+                    // 保活帧本应是 ~200-500B 的微型帧。仅"客户端可能脱同步"的显式信号
+                    // 才值得全量重建——_forceZrleKeyNext（H264→ZRLE 切回，基线不一致）
+                    // 与 _keyframeRequested（客户端显式请求）。分辨率/尺寸变化已由
+                    // 编码器 Reset+Initialize（_isFirstFrame=true）自然产生全量帧。
+                    if (isZrle && !_forceZrleKeyNext && !_keyframeRequested)
+                        forceKey = false;
 
                     Logger.Debug("Session {0}: calling Encode seq={1} forceKey={2} res={3}x{4} bgraLen={5}",
                         _sessionId, _sequenceNumber, forceKey, frame.Width, frame.Height, frame.Pixels.Length);

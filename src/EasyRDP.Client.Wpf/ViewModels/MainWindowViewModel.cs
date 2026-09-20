@@ -971,8 +971,9 @@ namespace EasyRDP.Client.Wpf.ViewModels
                 handshakeRes.Codec, handshakeRes.ScreenWidth, handshakeRes.ScreenHeight);
             _running = true;
             IsConnected = true;
-            // 记录最近连接（持久化 + 主页置顶）
-            _recentStore.Touch(Host, SelectedProfile?.Name);
+            // 记录最近连接（持久化 + 主页置顶）：连同本次使用的端口/用户名/密码，
+            // 地址栏直连成功后最近连接条目不再只有 IP（否则下次连接凭据丢失）
+            _recentStore.Touch(Host, SelectedProfile?.Name, _port, _username, _password);
             RefreshRecentConnections();
             // 3 秒后捕获一帧保存为缩略图（等画面稳定）
             Task.Run(async () => { await Task.Delay(3000); SaveConnectionThumbnail(); });

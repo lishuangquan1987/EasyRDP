@@ -109,9 +109,11 @@ namespace EasyRDP.Client.Wpf.Services
         }
 
         /// <summary>
-        /// 记录一次成功连接：置顶或新建条目，更新时间戳。
+        /// 记录一次成功连接：置顶或新建条目，更新时间戳，并持久化本次连接使用的
+        /// 端口/用户名/密码（新建条目完整落盘；已存在条目补齐空字段并刷新时间戳）。
         /// </summary>
-        public void Touch(string host, string displayName)
+        public void Touch(string host, string displayName, string port = null,
+            string username = null, string password = null)
         {
             if (string.IsNullOrWhiteSpace(host)) return;
             var list = Load();
@@ -123,6 +125,14 @@ namespace EasyRDP.Client.Wpf.Services
                 existing.LastConnectedUtc = DateTime.UtcNow;
                 if (!string.IsNullOrWhiteSpace(displayName))
                     existing.DisplayName = displayName.Trim();
+                // 仅补齐空字段：卡片编辑（右键 Edit）保存的凭据是用户显式配置，
+                // 不应被本次连接使用的值覆盖；地址栏直连（无凭据）时此处补上空值无害。
+                if (!string.IsNullOrWhiteSpace(port))
+                    existing.Port = port.Trim();
+                if (!string.IsNullOrWhiteSpace(username))
+                    existing.Username = username.Trim();
+                if (!string.IsNullOrEmpty(password))
+                    existing.Password = password;
             }
             else
             {
@@ -130,6 +140,9 @@ namespace EasyRDP.Client.Wpf.Services
                 {
                     Host = h,
                     DisplayName = !string.IsNullOrWhiteSpace(displayName) ? displayName.Trim() : h,
+                    Port = string.IsNullOrWhiteSpace(port) ? "2000" : port.Trim(),
+                    Username = !string.IsNullOrWhiteSpace(username) ? username.Trim() : null,
+                    Password = !string.IsNullOrEmpty(password) ? password : null,
                     LastConnectedUtc = DateTime.UtcNow
                 });
             }
