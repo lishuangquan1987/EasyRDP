@@ -155,9 +155,11 @@
         </Border>
 
         <!-- ====== 中间：桌面显示区 ====== -->
+        <!-- D19：连接成功且首帧渲染后才显示远程桌面（ShowRemoteDesktop）；
+             连接成功但首帧未到时显示下方 ConnectingOverlay 转圈，避免黑屏。 -->
         <Border x:Name="RenderBorder" Grid.Row="2" Background="Black"
                 Focusable="True"
-                Visibility="{Binding IsConnected, Converter={StaticResource BoolToVis}}">
+                Visibility="{Binding ShowRemoteDesktop, Converter={StaticResource BoolToVis}}">
             <Grid>
                 <!-- Fant 高质量缩放：远程分辨率与窗口尺寸不一致时，线性插值会糊化文字/
                      代码高亮边缘，Fant（双三次变体）在放大/缩小时保留更多细节。
@@ -370,6 +372,41 @@
                 </Border>
             </Grid>
         </Border>
+
+        <!-- ====== 连接加载层（D19）：连接成功、首帧渲染前显示转圈等待，
+              避免连接后短暂黑屏；首帧写入后 ShowConnectingOverlay=false 自动隐藏 ====== -->
+        <Grid Grid.Row="2" Background="#CC0B1220"
+              IsHitTestVisible="False"
+              Visibility="{Binding ShowConnectingOverlay, Converter={StaticResource BoolToVis}}">
+            <Grid.Triggers>
+                <EventTrigger RoutedEvent="FrameworkElement.Loaded">
+                    <BeginStoryboard>
+                        <Storyboard>
+                            <DoubleAnimation Storyboard.TargetName="ConnectingSpinnerRotate"
+                                             Storyboard.TargetProperty="Angle"
+                                             From="0" To="360" Duration="0:0:1.1"
+                                             RepeatBehavior="Forever"/>
+                        </Storyboard>
+                    </BeginStoryboard>
+                </EventTrigger>
+            </Grid.Triggers>
+            <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+                <Grid Width="48" Height="48" HorizontalAlignment="Center">
+                    <Ellipse Width="40" Height="40" Stroke="#26FFFFFF" StrokeThickness="4"
+                             HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    <Ellipse Width="40" Height="40" Stroke="#4DB6FF" StrokeThickness="4"
+                             StrokeDashArray="1,3" StrokeDashCap="Round"
+                             HorizontalAlignment="Center" VerticalAlignment="Center"
+                             RenderTransformOrigin="0.5,0.5">
+                        <Ellipse.RenderTransform>
+                            <RotateTransform x:Name="ConnectingSpinnerRotate" Angle="0"/>
+                        </Ellipse.RenderTransform>
+                    </Ellipse>
+                </Grid>
+                <TextBlock Text="正在连接，获取远程画面…" FontSize="15" Foreground="#D0DAE2"
+                           HorizontalAlignment="Center" Margin="0,14,0,0"/>
+            </StackPanel>
+        </Grid>
 
         <!-- ====== 底部状态栏（浅色）：快捷键提示 ====== -->
         <Border x:Name="BottomBar" Grid.Row="3" Background="#F4F6F8"

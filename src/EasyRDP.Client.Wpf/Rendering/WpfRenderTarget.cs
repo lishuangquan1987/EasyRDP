@@ -59,6 +59,13 @@ namespace EasyRDP.Client.Wpf.Rendering
         /// 事件在 UI 线程触发（DoResize 在 UI 线程执行）。</summary>
         public event Action<WriteableBitmap?>? BitmapChanged;
 
+        /// <summary>首帧像素实际写入渲染位图时触发一次（UI 线程）。
+        /// 与 BitmapChanged 不同：后者在 Resize 创建 bitmap 时就触发（此时画面仍是
+        /// 透明/空），本事件在 WritePixels 成功后才触发——ViewModel 据此隐藏
+        /// "连接加载层"、显示远程桌面，避免连接后短暂黑屏。</summary>
+        public event Action? FirstFramePresented;
+        private bool _firstFramePresented;
+
         /// <summary>构造渲染目标。必须在 UI 线程调用，以便捕获正确的 Dispatcher。</summary>
         public WpfRenderTarget()
         {
@@ -176,6 +183,14 @@ namespace EasyRDP.Client.Wpf.Rendering
                     finally
                     {
                         bmp.Unlock();
+                    }
+                    // 首帧像素写入成功：触发一次 FirstFramePresented（UI 线程），
+                    // ViewModel 据此隐藏连接加载层、显示远程桌面
+                    if (!_firstFramePresented)
+                    {
+                        _firstFramePresented = true;
+                        var ffh = FirstFramePresented;
+                        if (ffh != null) ffh();
                     }
                 }
                 catch (Exception ex)
@@ -353,6 +368,13 @@ namespace EasyRDP.Client.Wpf.Rendering
                     finally
                     {
                         bmp.Unlock();
+                    }
+                    // 首帧像素写入成功：触发一次 FirstFramePresented（UI 线程）
+                    if (!_firstFramePresented)
+                    {
+                        _firstFramePresented = true;
+                        var ffh = FirstFramePresented;
+                        if (ffh != null) ffh();
                     }
                 }
                 catch (Exception ex)

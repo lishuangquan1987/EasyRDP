@@ -63,6 +63,8 @@ namespace EasyRDP.Client.Wpf.ViewModels
         private bool _isStartEnabled = true;
         private bool _isStopEnabled;
         private bool _isConnected;
+        // D19：首帧是否已渲染（连接成功但画面未到时显示加载层而非黑屏）
+        private bool _isFirstFrameRendered;
         private string _frameSize = "—";
         private int _frameRate;
         private string _codecName = "—";
@@ -476,7 +478,41 @@ namespace EasyRDP.Client.Wpf.ViewModels
         public bool IsConnected
         {
             get { return _isConnected; }
-            set { _isConnected = value; OnPropertyChanged(nameof(IsConnected)); }
+            set
+            {
+                _isConnected = value;
+                OnPropertyChanged(nameof(IsConnected));
+                // D19：远程桌面区可见性 = 已连接 && 首帧已渲染；
+                // 连接加载层可见性 = 已连接 && 首帧未渲染
+                OnPropertyChanged(nameof(ShowRemoteDesktop));
+                OnPropertyChanged(nameof(ShowConnectingOverlay));
+            }
+        }
+
+        /// <summary>首帧像素是否已写入渲染位图（连接成功但画面未到时为 false，
+        /// 用于显示"连接加载层"而非黑屏）。断开时重置。</summary>
+        public bool IsFirstFrameRendered
+        {
+            get { return _isFirstFrameRendered; }
+            set
+            {
+                _isFirstFrameRendered = value;
+                OnPropertyChanged(nameof(IsFirstFrameRendered));
+                OnPropertyChanged(nameof(ShowRemoteDesktop));
+                OnPropertyChanged(nameof(ShowConnectingOverlay));
+            }
+        }
+
+        /// <summary>远程桌面显示区可见性：连接成功且首帧已渲染。</summary>
+        public bool ShowRemoteDesktop
+        {
+            get { return _isConnected && _isFirstFrameRendered; }
+        }
+
+        /// <summary>连接加载层（转圈等待）可见性：连接成功但首帧尚未渲染。</summary>
+        public bool ShowConnectingOverlay
+        {
+            get { return _isConnected && !_isFirstFrameRendered; }
         }
 
         public string FrameSize
@@ -835,6 +871,8 @@ namespace EasyRDP.Client.Wpf.ViewModels
         {
             if (_running) return;
             _disconnecting = false;
+            // D19：新连接先重置首帧状态，首帧渲染前显示"连接加载层"而非残留画面/黑屏
+            IsFirstFrameRendered = false;
             SetBusy(true, "Connecting...");
 
             string host = _host.Trim();
@@ -956,6 +994,8 @@ namespace EasyRDP.Client.Wpf.ViewModels
             // 订阅 BitmapChanged：当 Resolution changed 触发 Resize 创建新 bitmap 时，
             // 同步更新 RenderBitmap 绑定，避免 Image.Source 指向旧 bitmap 导致黑屏
             _renderTarget.BitmapChanged += b => RenderBitmap = b;
+            // D19：首帧像素写入后隐藏"连接加载层"、显示远程桌面（回调在 UI 线程触发）
+            _renderTarget.FirstFramePresented += OnFirstFramePresented;
             _frameBuffer = new FrameBuffer();
 
             _streamSession.RenderTarget = _renderTarget;
@@ -1857,6 +1897,8 @@ namespace EasyRDP.Client.Wpf.ViewModels
             RenderBitmap = null;
 
             Logger.Info("Client session stopped");
+            // D19：断开后重置首帧状态（加载层逻辑随 IsConnected=false 一并失效）
+            IsFirstFrameRendered = false;
             IsConnected = false;
             FrameSize = "—";
             FrameRate = 0;
@@ -1866,6 +1908,21 @@ namespace EasyRDP.Client.Wpf.ViewModels
             ClipboardProgressValue = 0;
             ClipboardProgressText = "";
             SetBusy(false, "Disconnected");
+        }
+
+        /// <summary>首帧像素已写入渲染位图回调（WpfRenderTarget.FirstFramePresented，UI 线程）。
+        /// 置位后远程桌面区显示、连接加载层隐藏。防御性 CheckAccess：未来若事件源
+        /// 改为非 UI 线程触发，自动转调度。</summary>
+        private void OnFirstFramePresented()
+        {
+            if (_dispatcher.CheckAccess())
+            {
+                IsFirstFrameRendered = true;
+            }
+            else
+            {
+                _dispatcher.BeginInvoke(new Action(() => IsFirstFrameRendered = true));
+            }
         }
 
         /// <summary>远程光标更新回调（接收线程）→ 转发为 RemoteCursorChanged 事件。</summary>
