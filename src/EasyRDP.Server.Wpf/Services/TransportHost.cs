@@ -236,6 +236,9 @@ namespace EasyRDP.Server.Wpf.Services
         private volatile bool _ctrlKeyDown;
         private volatile bool _pasteKeyHeld;
         private int _pastePrefetching;
+        // Ctrl+V 预取最长等待：超过则立即回放按键（粘贴可能失败，但用户能立刻感知并重试；
+        // 后台下载继续，第二次粘贴会命中已就绪的数据），避免"按了没反应"的卡死观感
+        private const int PastePrefetchTimeoutMs = 8000;
 
         // 服务端接收客户端发来的图片剪贴板：key = "sessionId_transferId"
         private readonly System.Collections.Concurrent.ConcurrentDictionary<string, ImageClipboardReceiver> _serverImageReceivers
@@ -2074,7 +2077,7 @@ namespace EasyRDP.Server.Wpf.Services
                 try
                 {
                     string[] paths;
-                    bool ok = consumer.EnsureDownloaded(30000, out paths);
+                    bool ok = consumer.EnsureDownloaded(PastePrefetchTimeoutMs, out paths);
                     if (ok && paths != null && paths.Length > 0)
                     {
                         _clipboardFileRenderDone.Reset();
@@ -2098,8 +2101,16 @@ namespace EasyRDP.Server.Wpf.Services
                     _pasteKeyHeld = false;
                     try
                     {
-                        if (info != null && info.Input != null)
+                        // 只在 Ctrl 仍按下时回放：等待期间用户可能已松手，
+                        // 此时注入 V 会变成在远程窗口里输入普通字符
+                        if (_ctrlKeyDown && info != null && info.Input != null)
+                        {
                             info.Input.InjectKeyTap(EasyDesk.Core.Models.VirtualKeyCode.VK_V);
+                        }
+                        else
+                        {
+                            Logger.Info("Ctrl+V prefetch finished without replay (Ctrl released or session gone)");
+                        }
                     }
                     catch (Exception ex)
                     {
@@ -2560,7 +2571,16 @@ namespace EasyRDP.Server.Wpf.Services
                     (type, payload) => SendFileChannel(sessionId, type, payload),
                     () => streamSession.PendingFrames > 0,
                     FileTransferPaths.ReceivedDirectory());
-                fileTransfer.ProgressChanged += p => RaiseFileProgress(sessionId, p);
+                // 进度节流到 10Hz：每块都投递会频繁占用服务端 UI 线程（传输时拖慢界面与日志）
+                long lastProgressTicks = 0;
+                fileTransfer.ProgressChanged += p =>
+                {
+                    long now = System.Diagnostics.Stopwatch.GetTimestamp();
+                    if (now - lastProgressTicks < System.Diagnostics.Stopwatch.Frequency / 10)
+                        return;
+                    lastProgressTicks = now;
+                    RaiseFileProgress(sessionId, p);
+                };
                 fileTransfer.IncomingCompleted += (id, paths) => OnFilesReceived(sessionId, id, paths);
                 fileTransfer.OutgoingCompleted += id => OnFilesSent(sessionId, id);
                 fileTransfer.Failed += (id, reason, outgoing) => OnFileTransferFailed(sessionId, id, reason, outgoing);

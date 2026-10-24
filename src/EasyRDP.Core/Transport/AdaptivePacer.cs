@@ -31,6 +31,8 @@ namespace EasyRDP.Core.Transport
         private readonly Func<bool> _videoBacklogged;
         private double _rate = StartBytesPerSec;
         private double _tokens;
+        // 上次按时间提速的时刻（秒）：速度按"每秒 +10%"增长，避免按块 +64KB/s 时升速过慢
+        private double _lastGrowSeconds;
         private long _lastTicks;
 
         /// <summary>创建调速器。<paramref name="videoBacklogged"/> 返回 true 表示视频流正在等带宽。</summary>
@@ -38,6 +40,7 @@ namespace EasyRDP.Core.Transport
         {
             _videoBacklogged = videoBacklogged;
             _lastTicks = Stopwatch.GetTimestamp();
+            _lastGrowSeconds = Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency;
         }
 
         /// <summary>当前发送速率（字节/秒），用于日志与 UI 展示。</summary>
@@ -88,13 +91,21 @@ namespace EasyRDP.Core.Transport
             {
                 if (elapsedMs > CongestedSendMs)
                 {
-                    // 乘性降速：链路已饱和，快速让路
+                    // 乘性降速：链路已饱和，快速让路；重置升速计时，避免刚降速就立刻回升
                     _rate = Math.Max(MinBytesPerSec, _rate * 0.6);
+                    _lastGrowSeconds = Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency;
                 }
                 else if (elapsedMs < 5)
                 {
-                    // 加性提速：每块 +64KB/s（256KB 块下约等于每秒 +1MB/s 上限）
-                    _rate = Math.Min(MaxBytesPerSec, _rate + 64 * 1024);
+                    // 加性提速（按时间）：每 100ms 提升当前速率的 10%，约 1 秒翻倍。
+                    // 旧的按块 +64KB/s 在 4MB/s 起步时要 ~4 秒才翻倍，且 ACK 节奏会掩盖升速空间。
+                    double nowSeconds = Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency;
+                    double dt = nowSeconds - _lastGrowSeconds;
+                    if (dt >= 0.1)
+                    {
+                        _rate = Math.Min(MaxBytesPerSec, _rate * (1.0 + 0.1 * dt));
+                        _lastGrowSeconds = nowSeconds;
+                    }
                 }
             }
         }

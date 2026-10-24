@@ -2308,8 +2308,16 @@ namespace EasyRDP.Client.Wpf.ViewModels
                 SendFileMessage,
                 null, // 客户端没有服务端式的发送队列积压信号，调速只依赖 Send 阻塞耗时
                 ResolveReceivedDirectory());
+            // 进度节流到 10Hz：每 256KB 一块都投递会挤占渲染线程（传文件时画面掉帧）
+            long lastProgressTicks = 0;
             transfer.ProgressChanged += p =>
+            {
+                long now = System.Diagnostics.Stopwatch.GetTimestamp();
+                if (now - lastProgressTicks < System.Diagnostics.Stopwatch.Frequency / 10)
+                    return;
+                lastProgressTicks = now;
                 _dispatcher.BeginInvoke(new Action(() => OnFileTransferProgress(p)));
+            };
             transfer.IncomingCompleted += (id, paths) =>
                 _dispatcher.BeginInvoke(new Action(() => OnFilesReceived(paths)));
             transfer.OutgoingCompleted += id =>
