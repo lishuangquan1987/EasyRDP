@@ -44,6 +44,18 @@ namespace EasyRDP.Server.Wpf.Services
         /// <summary>会话 detached 事件（UI 绑定用）。</summary>
         public event Action<uint> SessionDetached;
 
+        /// <summary>文件传输进度（参数：会话 ID、进度）。回调在后台线程，UI 需切回界面线程。</summary>
+        public event Action<uint, EasyRDP.Core.Transfer.FileTransferProgress> FileTransferProgress;
+
+        /// <summary>本端接收文件完成（参数：会话 ID、保存路径列表）。</summary>
+        public event Action<uint, string[]> FilesReceived;
+
+        /// <summary>本端发送文件完成（参数：会话 ID）。</summary>
+        public event Action<uint> FilesSent;
+
+        /// <summary>文件传输失败（参数：会话 ID、原因、是否为本端发送方向）。</summary>
+        public event Action<uint, string, bool> FileTransferFailed;
+
         /// <summary>
         /// 免密码审批模式下请求操作员确认。处理程序在传输接收线程上同步执行，
         /// 必须向 UI 线程调度并阻塞等待用户选择（内部超时后返回 false）。
@@ -65,6 +77,12 @@ namespace EasyRDP.Server.Wpf.Services
         // Per-session transports (sessionId → ITransport)，替代旧的 MessageReassembler 字典。
         // 路由由 TransportHost 维护：MessageReceived 订阅用闭包捕获 sessionId。
         private readonly Dictionary<uint, ITransport> _transports = new Dictionary<uint, ITransport>();
+        // 文件通道：客户端用独立 TCP 连接打开（token 鉴权），不占会话名额。
+        // _fileChannelOwners: 通道连接 id → 归属会话 id；_fileChannelConnections: 会话 id → 通道连接 id
+        private readonly Dictionary<uint, uint> _fileChannelOwners = new Dictionary<uint, uint>();
+        private readonly Dictionary<uint, uint> _fileChannelConnections = new Dictionary<uint, uint>();
+        // 文件通道未建立时回退主连接：仅记录一次警告，避免每块数据刷日志
+        private volatile bool _fileChannelFallbackLogged;
         // sessionId 自增计数器（原来在 TcpTransportServer.AcceptLoop 分配，迁移到 TransportHost）
         private uint _nextSessionId = 1;
 
@@ -415,6 +433,7 @@ namespace EasyRDP.Server.Wpf.Services
                         kv.Value.Stream?.Stop();
                         kv.Value.Stream?.Dispose();
                         kv.Value.Input?.Dispose();
+                        kv.Value.FileTransfer?.Dispose();
                     }
                     catch { }
                     stoppedSessions.Add(kv.Value);
@@ -423,6 +442,9 @@ namespace EasyRDP.Server.Wpf.Services
                 _pendingAuths.Clear();
                 _activeCount = 0;
                 _transports.Clear();
+                _fileChannelOwners.Clear();
+                _fileChannelConnections.Clear();
+                _fileChannelFallbackLogged = false;
                 _lastActivity.Clear();
                 _remoteEndpoints.Clear();
             }
@@ -1114,6 +1136,273 @@ namespace EasyRDP.Server.Wpf.Services
             DisconnectSession(sessionId, "kicked");
         }
 
+        // ====== 文件通道与文件传输 ======
+
+        /// <summary>消息类型是否属于文件传输协议。</summary>
+        private static bool IsFileTransferMessageType(byte type)
+        {
+            return type == (byte)MessageType.FileTransferOffer
+                || type == (byte)MessageType.FileTransferStart
+                || type == (byte)MessageType.FileTransferData
+                || type == (byte)MessageType.FileTransferEnd
+                || type == (byte)MessageType.FileTransferCancel
+                || type == (byte)MessageType.FileTransferAck;
+        }
+
+        /// <summary>文件通道连接收到消息：只接受文件协议，其他消息丢弃（防止通道被当作会话使用）。</summary>
+        private void HandleFileChannelMessage(uint connectionId, uint ownerSessionId, MessageReceivedEventArgs e)
+        {
+            if (!IsFileTransferMessageType(e.MessageType))
+            {
+                Logger.Warn("File channel {0}: unexpected message type 0x{1:X2} ignored",
+                    connectionId, e.MessageType);
+                return;
+            }
+            SessionInfo info;
+            lock (_lock)
+            {
+                _sessions.TryGetValue(ownerSessionId, out info);
+            }
+            if (info == null || info.FileTransfer == null) return;
+            info.FileTransfer.HandleMessage(e.MessageType, e.Data);
+        }
+
+        /// <summary>
+        /// 处理打开文件通道请求：校验 token 与来源 IP 后，把该连接登记为会话的文件通道。
+        /// 通道连接不建立会话，也不计入 _activeCount / _maxSessions。
+        /// </summary>
+        private void HandleChannelOpen(uint connectionId, MessageReceivedEventArgs e)
+        {
+            ChannelOpenReqMessage req;
+            try
+            {
+                req = ChannelOpenReqMessage.Unpack(e.Data);
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn(ex, "ChannelOpen: bad payload from connection {0}", connectionId);
+                CloseConnection(connectionId);
+                return;
+            }
+
+            if (req.Version != Constants.ProtocolVersion)
+            {
+                Logger.Warn("ChannelOpen rejected: version {0} != {1}", req.Version, Constants.ProtocolVersion);
+                SendChannelOpenRes(connectionId, req.ChannelType, ChannelOpenResult.VersionMismatch, 0);
+                CloseConnection(connectionId);
+                return;
+            }
+            if (req.ChannelType != ChannelType.FileTransfer)
+            {
+                SendChannelOpenRes(connectionId, req.ChannelType, ChannelOpenResult.UnsupportedType, 0);
+                CloseConnection(connectionId);
+                return;
+            }
+
+            SessionInfo owner = null;
+            uint ownerId = 0;
+            lock (_lock)
+            {
+                foreach (var kv in _sessions)
+                {
+                    byte[] token = kv.Value.SessionToken;
+                    if (token != null && token.Length == req.Token.Length && token.Length > 0
+                        && AuthCrypto.FixedTimeEquals(token, req.Token))
+                    {
+                        owner = kv.Value;
+                        ownerId = kv.Key;
+                        break;
+                    }
+                }
+            }
+            if (owner == null)
+            {
+                Logger.Warn("ChannelOpen rejected: invalid token (connection {0})", connectionId);
+                SendChannelOpenRes(connectionId, req.ChannelType, ChannelOpenResult.InvalidToken, 0);
+                CloseConnection(connectionId);
+                return;
+            }
+
+            // token 泄漏时限制来源：通道必须与主会话来自同一主机
+            string channelRemote = GetRemoteEndpoint(connectionId);
+            if (!SameRemoteHost(channelRemote, owner.RemoteEndPoint))
+            {
+                Logger.Warn("ChannelOpen rejected: remote mismatch {0} vs {1} (session {2})",
+                    channelRemote, owner.RemoteEndPoint, ownerId);
+                SendChannelOpenRes(connectionId, req.ChannelType, ChannelOpenResult.InvalidToken, 0);
+                CloseConnection(connectionId);
+                return;
+            }
+
+            uint replaced = 0;
+            lock (_lock)
+            {
+                if (_fileChannelConnections.TryGetValue(ownerId, out replaced) && replaced != connectionId)
+                    _fileChannelOwners.Remove(replaced);
+                else
+                    replaced = 0;
+                _fileChannelConnections[ownerId] = connectionId;
+                _fileChannelOwners[connectionId] = ownerId;
+            }
+            if (replaced != 0)
+            {
+                Logger.Info("File channel replaced: session={0} old={1} new={2}", ownerId, replaced, connectionId);
+                CloseConnection(replaced);
+            }
+
+            SendChannelOpenRes(connectionId, req.ChannelType, ChannelOpenResult.Ok, ownerId);
+            Logger.Info("File channel opened: session={0} connection={1} remote={2}",
+                ownerId, connectionId, channelRemote);
+        }
+
+        private void SendChannelOpenRes(uint connectionId, ChannelType type, ChannelOpenResult result, uint ownerSessionId)
+        {
+            var res = new ChannelOpenResMessage
+            {
+                Version = Constants.ProtocolVersion,
+                ChannelType = type,
+                Result = result,
+                SessionId = ownerSessionId
+            };
+            SendMessage(connectionId, (byte)MessageType.ChannelOpenRes, res.Pack());
+        }
+
+        /// <summary>比较两个 "ip:port" 远端地址的主机部分是否相同。</summary>
+        private static bool SameRemoteHost(string a, string b)
+        {
+            if (string.IsNullOrEmpty(a) || string.IsNullOrEmpty(b)) return false;
+            return string.Equals(HostPart(a), HostPart(b), StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string HostPart(string endpoint)
+        {
+            int idx = endpoint.LastIndexOf(':');
+            return idx > 0 ? endpoint.Substring(0, idx) : endpoint;
+        }
+
+        /// <summary>关闭单个连接（文件通道或握手前连接），不触碰会话状态。</summary>
+        private void CloseConnection(uint connectionId)
+        {
+            ITransport transport;
+            lock (_lock)
+            {
+                _transports.TryGetValue(connectionId, out transport);
+            }
+            if (transport == null) return;
+            try { transport.Disconnect(); } catch { }
+        }
+
+        /// <summary>
+        /// 向指定会话的文件传输发送一条消息：优先走文件通道，
+        /// 通道未建立时回退主连接（并在日志中提示一次）。
+        /// </summary>
+        private bool SendFileChannel(uint sessionId, byte messageType, byte[] payload)
+        {
+            ITransport transport = null;
+            bool fallback = false;
+            lock (_lock)
+            {
+                uint connectionId;
+                if (_fileChannelConnections.TryGetValue(sessionId, out connectionId))
+                    _transports.TryGetValue(connectionId, out transport);
+                if (transport == null)
+                {
+                    _transports.TryGetValue(sessionId, out transport);
+                    fallback = transport != null;
+                }
+            }
+            if (transport == null) return false;
+            if (fallback && !_fileChannelFallbackLogged)
+            {
+                _fileChannelFallbackLogged = true;
+                Logger.Warn("File channel not open for session {0} — falling back to the main connection", sessionId);
+            }
+            try
+            {
+                transport.Send(Framing.BuildMessage(messageType, payload));
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn(ex, "File channel send failed (session {0})", sessionId);
+                return false;
+            }
+        }
+
+        /// <summary>向指定会话发送文件（服务端 → 客户端）。返回传输 ID；失败返回 0。</summary>
+        public uint SendFiles(uint sessionId, string[] paths)
+        {
+            SessionInfo info;
+            lock (_lock)
+            {
+                _sessions.TryGetValue(sessionId, out info);
+            }
+            if (info == null || info.FileTransfer == null)
+            {
+                Logger.Warn("SendFiles: session {0} not found", sessionId);
+                return 0;
+            }
+            try
+            {
+                uint transferId = info.FileTransfer.SendFiles(paths);
+                Logger.Info("Session {0}: file transfer {1} started ({2} file(s))",
+                    sessionId, transferId, paths.Length);
+                return transferId;
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn(ex, "SendFiles failed (session {0})", sessionId);
+                return 0;
+            }
+        }
+
+        private void RaiseFileProgress(uint sessionId, EasyRDP.Core.Transfer.FileTransferProgress progress)
+        {
+            var handler = FileTransferProgress;
+            if (handler != null) handler(sessionId, progress);
+        }
+
+        private void OnFilesReceived(uint sessionId, uint transferId, string[] paths)
+        {
+            Logger.Info("Session {0}: received {1} file(s) from client (transfer {2})",
+                sessionId, paths.Length, transferId);
+            foreach (string path in paths)
+                _audit.Log("FILE_RECV", sessionId, GetSessionUsername(sessionId), GetRemoteEndpoint(sessionId),
+                    "path=" + path);
+            var handler = FilesReceived;
+            if (handler != null) handler(sessionId, paths);
+        }
+
+        private void OnFilesSent(uint sessionId, uint transferId)
+        {
+            Logger.Info("Session {0}: file transfer {1} completed (send)", sessionId, transferId);
+            _audit.Log("FILE_SEND", sessionId, GetSessionUsername(sessionId), GetRemoteEndpoint(sessionId),
+                "transfer=" + transferId + " completed");
+            var handler = FilesSent;
+            if (handler != null) handler(sessionId);
+        }
+
+        private void OnFileTransferFailed(uint sessionId, uint transferId, string reason, bool outgoing)
+        {
+            Logger.Warn("Session {0}: file transfer {1} failed ({2}): {3}",
+                sessionId, transferId, outgoing ? "send" : "receive", reason);
+            _audit.Log("FILE_FAIL", sessionId, GetSessionUsername(sessionId), GetRemoteEndpoint(sessionId),
+                "transfer=" + transferId + " | " + (outgoing ? "send" : "receive") + " | " + reason);
+            var handler = FileTransferFailed;
+            if (handler != null) handler(sessionId, reason, outgoing);
+        }
+
+        private string GetSessionUsername(uint sessionId)
+        {
+            lock (_lock)
+            {
+                SessionInfo info;
+                if (_sessions.TryGetValue(sessionId, out info))
+                    return info.Username ?? "";
+            }
+            return "";
+        }
+
         private void OnClientConnected(object sender, TransportAcceptedEventArgs e)
         {
             uint sessionId;
@@ -1151,7 +1440,23 @@ namespace EasyRDP.Server.Wpf.Services
 
         private void OnMessageReceived(uint sessionId, MessageReceivedEventArgs e)
         {
-            if (e.MessageType == (byte)MessageType.HandshakeReq)
+            // 文件通道连接：只处理文件协议消息（不建立会话、不参与心跳与流控）
+            uint fileOwner = 0;
+            lock (_lock)
+            {
+                _fileChannelOwners.TryGetValue(sessionId, out fileOwner);
+            }
+            if (fileOwner != 0)
+            {
+                HandleFileChannelMessage(sessionId, fileOwner, e);
+                return;
+            }
+
+            if (e.MessageType == (byte)MessageType.ChannelOpenReq)
+            {
+                HandleChannelOpen(sessionId, e);
+            }
+            else if (e.MessageType == (byte)MessageType.HandshakeReq)
             {
                 HandleHandshake(sessionId, e);
             }
@@ -1172,6 +1477,15 @@ namespace EasyRDP.Server.Wpf.Services
                             Logger.Warn("InputEvent dropped: sessionId={0} not found in _sessions", sessionId);
                         return;
                     }
+                }
+
+                // 文件协议消息（通道未建立时的回退路径）：交给该会话的文件传输会话
+                if (IsFileTransferMessageType(e.MessageType))
+                {
+                    var fileTransfer = info.FileTransfer;
+                    if (fileTransfer != null)
+                        fileTransfer.HandleMessage(e.MessageType, e.Data);
+                    return;
                 }
 
                 if (e.MessageType == (byte)MessageType.InputEvent)
@@ -1730,10 +2044,10 @@ namespace EasyRDP.Server.Wpf.Services
                 return;
             }
 
+            EasyRDP.Core.Transfer.FileTransferSession fileTransfer = null;
             try
             {
                 var bounds = CaptureService.ResolveBounds(_captureService);
-
                 // Create sessions first (don't send Success until Start() passes)
                 // 按 ServerSettings.ChangeDetectionMode 创建帧变化检测器注入会话。
                 // 切换在下次会话接入时生效，已有会话保持原检测器不变。
@@ -1767,6 +2081,17 @@ namespace EasyRDP.Server.Wpf.Services
                 string codecName = negotiated.Value.ToString();
                 string resolution = bounds.Width + "x" + bounds.Height;
 
+                // 文件传输：优先走独立文件通道（不与视频抢发送锁）；
+                // 视频发送队列有积压时自适应降速让路。接收文件落到 我的文档\EasyRDP Received。
+                fileTransfer = new EasyRDP.Core.Transfer.FileTransferSession(
+                    (type, payload) => SendFileChannel(sessionId, type, payload),
+                    () => streamSession.PendingFrames > 0,
+                    FileTransferPaths.ReceivedDirectory());
+                fileTransfer.ProgressChanged += p => RaiseFileProgress(sessionId, p);
+                fileTransfer.IncomingCompleted += (id, paths) => OnFilesReceived(sessionId, id, paths);
+                fileTransfer.OutgoingCompleted += id => OnFilesSent(sessionId, id);
+                fileTransfer.Failed += (id, reason, outgoing) => OnFileTransferFailed(sessionId, id, reason, outgoing);
+
                 lock (_lock)
                 {
                     _sessions[sessionId] = new SessionInfo
@@ -1778,7 +2103,8 @@ namespace EasyRDP.Server.Wpf.Services
                         ConnectedAtUtc = DateTime.UtcNow,
                         Codec = codecName,
                         Resolution = resolution,
-                        SessionToken = sessionToken
+                        SessionToken = sessionToken,
+                        FileTransfer = fileTransfer
                     };
                     _activeCount++;
                 }
@@ -1823,6 +2149,10 @@ namespace EasyRDP.Server.Wpf.Services
             {
                 // Session startup failed — send error response and clean up
                 Logger.Error(ex, "Handshake session startup failed for sessionId={0}", sessionId);
+                if (fileTransfer != null)
+                {
+                    try { fileTransfer.Dispose(); } catch { }
+                }
                 res = new HandshakeRes { Result = HandshakeResult.InternalError };
                 SendResponse(sessionId, res);
                 DisconnectSession(sessionId, "session-start-failed");
@@ -1861,8 +2191,37 @@ namespace EasyRDP.Server.Wpf.Services
 
         private void OnTransportDisconnected(uint sessionId)
         {
+            bool isFileChannel;
+            bool hasSession;
+            lock (_lock)
+            {
+                isFileChannel = _fileChannelOwners.ContainsKey(sessionId);
+                hasSession = _sessions.ContainsKey(sessionId);
+            }
+
+            if (isFileChannel)
+            {
+                lock (_lock)
+                {
+                    uint owner;
+                    if (_fileChannelOwners.TryGetValue(sessionId, out owner))
+                    {
+                        _fileChannelOwners.Remove(sessionId);
+                        uint mapped;
+                        if (_fileChannelConnections.TryGetValue(owner, out mapped) && mapped == sessionId)
+                            _fileChannelConnections.Remove(owner);
+                    }
+                    _transports.Remove(sessionId);
+                    _lastActivity.Remove(sessionId);
+                    _remoteEndpoints.Remove(sessionId);
+                }
+                Logger.Info("File channel closed: connection={0}", sessionId);
+                return;
+            }
+
             DisconnectSession(sessionId, "transport-closed");
 
+            if (!hasSession) return;
             var handler = SessionDetached;
             if (handler != null) handler(sessionId);
         }
@@ -1936,6 +2295,20 @@ namespace EasyRDP.Server.Wpf.Services
             try { info.Stream?.Stop(); } catch { }
             try { info.Stream?.Dispose(); } catch { }
             try { info.Input?.Dispose(); } catch { }
+
+            // 文件传输：先取消未完成的传输（会经通道通知对端），再关闭通道连接
+            uint fileConnection = 0;
+            lock (_lock)
+            {
+                if (_fileChannelConnections.TryGetValue(sessionId, out fileConnection))
+                {
+                    _fileChannelConnections.Remove(sessionId);
+                    _fileChannelOwners.Remove(fileConnection);
+                }
+            }
+            try { info.FileTransfer?.Dispose(); } catch { }
+            if (fileConnection != 0)
+                CloseConnection(fileConnection);
 
             if (transport != null)
             {
@@ -2012,6 +2385,9 @@ namespace EasyRDP.Server.Wpf.Services
                     var now = DateTime.UtcNow;
                     foreach (var kv in _lastActivity)
                     {
+                        // 文件通道连接可能长时间空闲（没有传文件），不参与心跳超时判定
+                        if (_fileChannelOwners.ContainsKey(kv.Key))
+                            continue;
                         if ((now - kv.Value).TotalSeconds > 45) // 30s + 15s grace
                         {
                             timedOut.Add(kv.Key);

@@ -94,6 +94,10 @@ public partial class MainWindow : Window
         RenderBorder.SizeChanged += (s, e) => UpdateRenderScroll();
         _vm = new MainWindowViewModel();
         DataContext = _vm;
+        // 拖拽文件到远程画面即发送（无需点 Send File）
+        RenderBorder.AllowDrop = true;
+        RenderBorder.DragOver += OnRenderAreaDragOver;
+        RenderBorder.Drop += OnRenderAreaDrop;
         // 全屏由 ViewModel 通过 FullscreenRequested 事件请求，View 仅执行窗口操作（严格 MVVM）
         _vm.FullscreenRequested += SetFullscreenMode;
 
@@ -270,6 +274,25 @@ public partial class MainWindow : Window
             return IntPtr.Zero;
         }
         return IntPtr.Zero;
+    }
+
+    /// <summary>拖拽经过远程画面：仅接受文件拖放。</summary>
+    private void OnRenderAreaDragOver(object sender, DragEventArgs e)
+    {
+        e.Effects = e.Data.GetDataPresent(DataFormats.FileDrop)
+            ? DragDropEffects.Copy
+            : DragDropEffects.None;
+        e.Handled = true;
+    }
+
+    /// <summary>文件放下：把路径交给 ViewModel 发送到远程桌面。</summary>
+    private void OnRenderAreaDrop(object sender, DragEventArgs e)
+    {
+        if (!e.Data.GetDataPresent(DataFormats.FileDrop)) return;
+        var files = e.Data.GetData(DataFormats.FileDrop) as string[];
+        if (files == null || files.Length == 0) return;
+        _vm?.SendFiles(files);
+        e.Handled = true;
     }
 
     /// <summary>ViewModel 属性变化 → 同步仅 View 层拥有的 UI 元素（确保在 UI 线程执行）。</summary>

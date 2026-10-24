@@ -21,5 +21,7 @@ namespace EasyRDP.Server.Wpf.Services
         public string Resolution = "";
         /// <summary>文件通道鉴权 token（v5 新增，握手成功时生成）。</summary>
         public byte[] SessionToken = new byte[0];
+        /// <summary>本会话的文件传输（独立通道；通道未建立时回退主连接）。</summary>
+        public EasyRDP.Core.Transfer.FileTransferSession FileTransfer;
     }
 }

@@ -335,6 +335,36 @@ namespace EasyRDP.Server.Wpf.ViewModels
         /// <summary>踢出指定会话（参数为 SessionItem.IdValue）。</summary>
         public RelayCommand<uint> KickCommand { get; }
 
+        /// <summary>向指定会话发送文件（参数为 SessionItem.IdValue）。</summary>
+        public RelayCommand<uint> SendFileCommand { get; }
+
+        // ====== 文件传输进度（服务端收发共用一条进度条） ======
+
+        private bool _isFileTransferVisible;
+        private double _fileTransferPercent;
+        private string _fileTransferText = "";
+
+        /// <summary>是否显示文件传输进度面板。</summary>
+        public bool IsFileTransferVisible
+        {
+            get { return _isFileTransferVisible; }
+            private set { _isFileTransferVisible = value; OnPropertyChanged(nameof(IsFileTransferVisible)); }
+        }
+
+        /// <summary>文件传输进度百分比（0~100）。</summary>
+        public double FileTransferPercent
+        {
+            get { return _fileTransferPercent; }
+            private set { _fileTransferPercent = value; OnPropertyChanged(nameof(FileTransferPercent)); }
+        }
+
+        /// <summary>文件传输说明文字（方向/文件名/速率）。</summary>
+        public string FileTransferText
+        {
+            get { return _fileTransferText; }
+            private set { _fileTransferText = value; OnPropertyChanged(nameof(FileTransferText)); }
+        }
+
         public MainWindowViewModel(Dispatcher dispatcher, IUserNotifier notifier = null)
         {
             _dispatcher = dispatcher;
@@ -343,6 +373,7 @@ namespace EasyRDP.Server.Wpf.ViewModels
             StopCommand = new RelayCommand(StopServer, () => IsRunning);
             SaveSettingsCommand = new RelayCommand(SaveSettings);
             KickCommand = new RelayCommand<uint>(KickSession);
+            SendFileCommand = new RelayCommand<uint>(SendFilesToSession);
             CheckUpdateCommand = new RelayCommand(CheckUpdate,
                 () => AlyClientStatus == AlyClientStatus.DiscoveredUpdate
                     || AlyClientStatus == AlyClientStatus.DownloadedUpdate);
@@ -659,6 +690,10 @@ namespace EasyRDP.Server.Wpf.ViewModels
 
                 _transportHost = new TransportHost(_captureService, _transportAcceptor, inputSim, cursorCapturer, clipboard, _authConfig);
                 _transportHost.ApprovalRequested += OnApprovalRequested;
+                _transportHost.FileTransferProgress += OnFileTransferProgress;
+                _transportHost.FilesReceived += OnFilesReceived;
+                _transportHost.FilesSent += OnFilesSent;
+                _transportHost.FileTransferFailed += OnFileTransferFailed;
                 // 注入当前帧变化检测模式（运行时 UI 修改会通过属性 setter 同步更新）
                 _transportHost.ChangeDetectionMode = _changeDetectionMode;
                 _transportHost.SessionAttached += OnSessionAttached;
@@ -765,6 +800,10 @@ namespace EasyRDP.Server.Wpf.ViewModels
             if (_transportHost != null)
             {
                 _transportHost.ApprovalRequested -= OnApprovalRequested;
+                _transportHost.FileTransferProgress -= OnFileTransferProgress;
+                _transportHost.FilesReceived -= OnFilesReceived;
+                _transportHost.FilesSent -= OnFilesSent;
+                _transportHost.FileTransferFailed -= OnFileTransferFailed;
                 _transportHost.Stop();
                 _transportHost.SessionAttached -= OnSessionAttached;
                 _transportHost.SessionDetached -= OnSessionDetached;
@@ -782,6 +821,7 @@ namespace EasyRDP.Server.Wpf.ViewModels
             DisplayPort = "—";
             SessionCount = "0";
             Uptime = "—";
+            HideFileTransfer();
             AddLog("Server stopped");
         }
 
@@ -879,6 +919,106 @@ namespace EasyRDP.Server.Wpf.ViewModels
                 }
             }, System.Threading.CancellationToken.None, System.Threading.Tasks.TaskCreationOptions.None,
                 System.Threading.Tasks.TaskScheduler.Default);
+        }
+
+        /// <summary>选择文件并发送给指定会话（服务端 → 客户端）。</summary>
+        private void SendFilesToSession(uint sessionId)
+        {
+            var host = _transportHost;
+            if (host == null) return;
+
+            var dialog = new Microsoft.Win32.OpenFileDialog
+            {
+                Title = "Select files to send to the remote computer",
+                Multiselect = true,
+                CheckFileExists = true
+            };
+            if (dialog.ShowDialog() != true || dialog.FileNames.Length == 0) return;
+
+            uint transferId = host.SendFiles(sessionId, dialog.FileNames);
+            if (transferId == 0)
+            {
+                _notifier.ShowError("Failed to start the file transfer.", "Send File");
+                AddLog("Send file failed for session " + sessionId);
+                return;
+            }
+            AddLog("Sending " + dialog.FileNames.Length + " file(s) to session " + sessionId);
+            ShowFileTransfer("Preparing file transfer…", 0);
+        }
+
+        /// <summary>文件传输进度（后台线程回调）：切回 UI 线程更新进度条。</summary>
+        private void OnFileTransferProgress(uint sessionId, EasyRDP.Core.Transfer.FileTransferProgress progress)
+        {
+            if (progress == null) return;
+            _dispatcher.Invoke(() =>
+            {
+                string direction = progress.Outgoing ? "Sending" : "Receiving";
+                string text = string.Format("{0} {1} ({2}/{3}) — {4:F1} MB / {5:F1} MB · {6}",
+                    direction, progress.FileName, progress.FileIndex + 1, progress.FileCount,
+                    progress.BytesTransferred / 1048576.0, progress.TotalBytes / 1048576.0,
+                    FormatRate(progress.BytesPerSecond));
+                double percent = progress.TotalBytes > 0
+                    ? progress.BytesTransferred * 100.0 / progress.TotalBytes
+                    : 0;
+                ShowFileTransfer(text, percent);
+            });
+        }
+
+        /// <summary>本端接收文件完成：记录保存路径。</summary>
+        private void OnFilesReceived(uint sessionId, string[] paths)
+        {
+            _dispatcher.Invoke(() =>
+            {
+                AddLog("Received " + (paths != null ? paths.Length : 0) + " file(s) from session " + sessionId);
+                if (paths != null)
+                {
+                    foreach (string path in paths)
+                        AddLog("  saved: " + path);
+                }
+                HideFileTransfer();
+            });
+        }
+
+        /// <summary>本端发送文件完成。</summary>
+        private void OnFilesSent(uint sessionId)
+        {
+            _dispatcher.Invoke(() =>
+            {
+                AddLog("File transfer to session " + sessionId + " completed");
+                HideFileTransfer();
+            });
+        }
+
+        /// <summary>文件传输失败（任一方向）。</summary>
+        private void OnFileTransferFailed(uint sessionId, string reason, bool outgoing)
+        {
+            _dispatcher.Invoke(() =>
+            {
+                AddLog(string.Format("File transfer {0} failed: {1}",
+                    outgoing ? "to" : "from", reason));
+                HideFileTransfer();
+            });
+        }
+
+        private void ShowFileTransfer(string text, double percent)
+        {
+            FileTransferText = text;
+            FileTransferPercent = percent < 0 ? 0 : (percent > 100 ? 100 : percent);
+            IsFileTransferVisible = true;
+        }
+
+        private void HideFileTransfer()
+        {
+            IsFileTransferVisible = false;
+            FileTransferPercent = 0;
+        }
+
+        /// <summary>速率格式化（MB/s 或 KB/s）。</summary>
+        private static string FormatRate(double bytesPerSecond)
+        {
+            if (bytesPerSecond >= 1048576)
+                return (bytesPerSecond / 1048576.0).ToString("F1") + " MB/s";
+            return (bytesPerSecond / 1024.0).ToString("F0") + " KB/s";
         }
 
         private void AddLog(string message)

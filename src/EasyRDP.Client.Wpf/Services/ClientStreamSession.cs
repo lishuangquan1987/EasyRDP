@@ -377,6 +377,12 @@ namespace EasyRDP.Client.Wpf.Services
         /// </summary>
         public event Action<byte[]> ImageClipboardReceived;
 
+        /// <summary>
+        /// 收到文件传输协议消息（文件通道未建立时服务端会回退主连接）。
+        /// 参数为 MessageType 字节与 payload，由文件传输会话解析。
+        /// </summary>
+        public event Action<byte, byte[]> FileTransferMessageReceived;
+
         // 文件剪贴板延迟渲染 — 发送方：客户端复制文件后创建，响应服务端的 FileContentsReq
         private FileClipboardProvider _clipProvider;
         private readonly object _clipProviderLock = new object();
@@ -467,6 +473,16 @@ namespace EasyRDP.Client.Wpf.Services
             else if (e.MessageType == (byte)MessageType.ImageClipboardEnd)
             {
                 HandleImageClipboardEnd(e.Data);
+            }
+            else if (e.MessageType == (byte)MessageType.FileTransferOffer
+                     || e.MessageType == (byte)MessageType.FileTransferStart
+                     || e.MessageType == (byte)MessageType.FileTransferData
+                     || e.MessageType == (byte)MessageType.FileTransferEnd
+                     || e.MessageType == (byte)MessageType.FileTransferCancel
+                     || e.MessageType == (byte)MessageType.FileTransferAck)
+            {
+                Action<byte, byte[]> handler = FileTransferMessageReceived;
+                if (handler != null) handler(e.MessageType, e.Data);
             }
             else if (e.MessageType == (byte)MessageType.Keepalive)
             {

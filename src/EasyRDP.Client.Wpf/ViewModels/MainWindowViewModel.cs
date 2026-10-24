@@ -44,6 +44,14 @@ namespace EasyRDP.Client.Wpf.ViewModels
         private ClientStreamSession? _streamSession;
         private ClientInputSession? _inputSession;
         private ITransport? _transport;
+        // 文件传输：优先走独立通道（打开失败时回退主连接）
+        private ITransport? _fileChannel;
+        private EasyRDP.Core.Transfer.FileTransferSession? _fileTransfer;
+        private bool _isFileTransferVisible;
+        private double _fileTransferPercent;
+        private string _fileTransferText = "";
+        // 接收完成提示的自动隐藏定时器
+        private DispatcherTimer? _fileTransferNoticeTimer;
         private volatile bool _running;
         private volatile bool _disconnecting; // 防止 Disconnect → Disconnected 事件 → Stop 重入循环
         private DispatcherTimer? _fpsTimer;
@@ -158,6 +166,7 @@ namespace EasyRDP.Client.Wpf.ViewModels
                     || AlyClientStatus == AlyClientStatus.DownloadedUpdate);
             ToggleDetailsCommand = new RelayCommand(ToggleDetailsPanel);
             CycleZoomCommand = new RelayCommand(CycleZoom);
+            SendFileCommand = new RelayCommand(SendFilesByDialog, () => _running);
 
             // 本地系统信息（连接详情面板"系统性能"本地列，一次性获取）
             _localCpuText = GetLocalCpuText();
@@ -664,6 +673,30 @@ namespace EasyRDP.Client.Wpf.ViewModels
             get { return _clipboardProgressText; }
             set { _clipboardProgressText = value; OnPropertyChanged(nameof(ClipboardProgressText)); }
         }
+
+        /// <summary>是否显示显式文件传输进度面板（仅传输期间可见）。</summary>
+        public bool IsFileTransferVisible
+        {
+            get { return _isFileTransferVisible; }
+            private set { _isFileTransferVisible = value; OnPropertyChanged(nameof(IsFileTransferVisible)); }
+        }
+
+        /// <summary>显式文件传输进度（0-100）。</summary>
+        public double FileTransferPercent
+        {
+            get { return _fileTransferPercent; }
+            private set { _fileTransferPercent = value; OnPropertyChanged(nameof(FileTransferPercent)); }
+        }
+
+        /// <summary>显式文件传输说明文字（方向/文件名/速率）。</summary>
+        public string FileTransferText
+        {
+            get { return _fileTransferText; }
+            private set { _fileTransferText = value; OnPropertyChanged(nameof(FileTransferText)); }
+        }
+
+        /// <summary>选择文件发送到远程桌面。</summary>
+        public RelayCommand SendFileCommand { get; }
 
         public RelayCommand ConnectCommand { get; }
         /// <summary>取消自动重连（加载层上的 Cancel 按钮）。</summary>
@@ -1230,6 +1263,9 @@ namespace EasyRDP.Client.Wpf.ViewModels
                 handshakeRes.Codec, handshakeRes.ScreenWidth, handshakeRes.ScreenHeight);
             _running = true;
             IsConnected = true;
+            SendFileCommand.RaiseCanExecuteChanged();
+            // 文件传输：握手 token 打开独立通道；通道建立失败时自动回退主连接
+            StartFileTransfer(host, port.ToString(), handshakeRes.SessionToken);
             // 记录最近连接（持久化 + 主页置顶）：连同本次使用的端口/用户名/密码，
             // 地址栏直连成功后最近连接条目不再只有 IP（否则下次连接凭据丢失）
             _recentStore.Touch(Host, SelectedProfile?.Name, _port, _username, _password);
@@ -2090,6 +2126,261 @@ namespace EasyRDP.Client.Wpf.ViewModels
             return Math.Min(ms, MaxReconnectDelayMs);
         }
 
+        // ====== 文件传输（显式发送 / 接收） ======
+
+        /// <summary>
+        /// 连接成功后初始化文件传输：订阅主连接上的文件消息，并异步打开独立文件通道。
+        /// 通道建立失败时 SendFileMessage 自动回退主连接（功能降级但仍可用）。
+        /// </summary>
+        private void StartFileTransfer(string host, string port, byte[] sessionToken)
+        {
+            if (_streamSession == null) return;
+
+            var transfer = new EasyRDP.Core.Transfer.FileTransferSession(
+                SendFileMessage,
+                null, // 客户端没有服务端式的发送队列积压信号，调速只依赖 Send 阻塞耗时
+                ResolveReceivedDirectory());
+            transfer.ProgressChanged += p =>
+                _dispatcher.BeginInvoke(new Action(() => OnFileTransferProgress(p)));
+            transfer.IncomingCompleted += (id, paths) =>
+                _dispatcher.BeginInvoke(new Action(() => OnFilesReceived(paths)));
+            transfer.OutgoingCompleted += id =>
+                _dispatcher.BeginInvoke(new Action(() => OnFilesSentToRemote()));
+            transfer.Failed += (id, reason, outgoing) =>
+                _dispatcher.BeginInvoke(new Action(() => OnFileTransferError(reason, outgoing)));
+            _fileTransfer = transfer;
+            _streamSession.FileTransferMessageReceived += OnFileTransferMessage;
+
+            Task.Run(() => OpenFileChannel(host, port, sessionToken));
+        }
+
+        /// <summary>主连接上收到的文件协议消息（通道未建立时的回退路径）。</summary>
+        private void OnFileTransferMessage(byte messageType, byte[] payload)
+        {
+            var transfer = _fileTransfer;
+            if (transfer != null) transfer.HandleMessage(messageType, payload);
+        }
+
+        /// <summary>发送文件协议消息：优先文件通道，未建立时走主连接。</summary>
+        private bool SendFileMessage(byte messageType, byte[] payload)
+        {
+            ITransport? channel = _fileChannel;
+            ITransport? transport = channel != null && channel.IsConnected ? channel : _transport;
+            if (transport == null) return false;
+            try
+            {
+                transport.Send(Framing.BuildMessage(messageType, payload));
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn(ex, "File message send failed (type=0x{0:X2})", messageType);
+                return false;
+            }
+        }
+
+        /// <summary>用握手 token 打开独立文件通道（后台线程，最多等 2 秒）。</summary>
+        private void OpenFileChannel(string host, string port, byte[] sessionToken)
+        {
+            if (sessionToken == null || sessionToken.Length == 0) return;
+            string endpoint = host + ":" + port;
+
+            ITransport? channel = null;
+            try
+            {
+                var connector = new TcpTransportConnector();
+                channel = connector.Connect(endpoint, 3000);
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn(ex, "File channel connect failed");
+            }
+            if (channel == null)
+            {
+                Logger.Warn("File channel unavailable for {0} — file transfer will use the main connection", endpoint);
+                return;
+            }
+
+            var opened = new ManualResetEventSlim(false);
+            ChannelOpenResMessage? response = null;
+            channel.MessageReceived += (s, e) =>
+            {
+                if (e.MessageType == (byte)MessageType.ChannelOpenRes)
+                {
+                    try { response = ChannelOpenResMessage.Unpack(e.Data); }
+                    catch (Exception ex) { Logger.Warn(ex, "ChannelOpenRes unpack failed"); }
+                    opened.Set();
+                }
+                else
+                {
+                    OnFileTransferMessage(e.MessageType, e.Data);
+                }
+            };
+            channel.Disconnected += (s, e) =>
+            {
+                if (ReferenceEquals(_fileChannel, channel))
+                {
+                    _fileChannel = null;
+                    Logger.Info("File channel closed — falling back to the main connection");
+                }
+            };
+            channel.Start();
+
+            var req = new ChannelOpenReqMessage
+            {
+                Version = Constants.ProtocolVersion,
+                ChannelType = ChannelType.FileTransfer,
+                Token = sessionToken
+            };
+            channel.Send(Framing.BuildMessage((byte)MessageType.ChannelOpenReq, req.Pack()));
+
+            bool received = opened.Wait(2000);
+            opened.Dispose();
+            if (!received || response == null || response.Result != ChannelOpenResult.Ok)
+            {
+                Logger.Warn("File channel open failed (received={0}, result={1}) — using the main connection",
+                    received, response != null ? response.Result.ToString() : "none");
+                try { channel.Disconnect(); } catch { }
+                return;
+            }
+            if (!_running)
+            {
+                try { channel.Disconnect(); } catch { }
+                return;
+            }
+
+            _fileChannel = channel;
+            Logger.Info("File channel ready (session {0})", response.SessionId);
+        }
+
+        /// <summary>界面按钮入口：多选文件后发送。</summary>
+        private void SendFilesByDialog()
+        {
+            var dialog = new Microsoft.Win32.OpenFileDialog
+            {
+                Title = "Select files to send to the remote computer",
+                Multiselect = true,
+                CheckFileExists = true
+            };
+            if (dialog.ShowDialog() != true) return;
+            SendFiles(dialog.FileNames);
+        }
+
+        /// <summary>发送文件到远程桌面（按钮与拖拽到画面共用）。</summary>
+        public void SendFiles(string[] paths)
+        {
+            if (paths == null || paths.Length == 0) return;
+            var transfer = _fileTransfer;
+            if (transfer == null || !IsConnected)
+            {
+                _notifier.ShowWarning("Connect to a computer before sending files.", "Send File");
+                return;
+            }
+            try
+            {
+                uint transferId = transfer.SendFiles(paths);
+                Logger.Info("File transfer {0} started ({1} file(s))", transferId, paths.Length);
+                ShowFileTransfer("Preparing file transfer…", 0);
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn(ex, "SendFiles failed");
+                _notifier.ShowError(ex.Message, "Send File");
+            }
+        }
+
+        /// <summary>进度回调（已切到 UI 线程）。</summary>
+        private void OnFileTransferProgress(EasyRDP.Core.Transfer.FileTransferProgress progress)
+        {
+            if (progress == null) return;
+            string direction = progress.Outgoing ? "Sending" : "Receiving";
+            FileTransferText = string.Format("{0} {1} ({2}/{3}) — {4:F1} MB / {5:F1} MB · {6}",
+                direction, progress.FileName, progress.FileIndex + 1, progress.FileCount,
+                progress.BytesTransferred / 1048576.0, progress.TotalBytes / 1048576.0,
+                FormatRate(progress.BytesPerSecond));
+            FileTransferPercent = progress.TotalBytes > 0
+                ? progress.BytesTransferred * 100.0 / progress.TotalBytes
+                : 0;
+            IsFileTransferVisible = true;
+        }
+
+        /// <summary>本端接收完成：覆盖层提示保存位置并在 5 秒后自动隐藏（不弹模态框）。</summary>
+        private void OnFilesReceived(string[] paths)
+        {
+            if (paths == null || paths.Length == 0) return;
+            Logger.Info("Received {0} file(s): {1}", paths.Length, string.Join(", ", paths));
+            string folder = ResolveReceivedDirectory();
+            StatusText = string.Format("Received {0} file(s) — saved to {1}", paths.Length, folder);
+            ShowFileTransferNotice(string.Format("Received {0} file(s) → {1}", paths.Length, folder));
+        }
+
+        /// <summary>在传输覆盖层显示一条完成提示，5 秒后自动隐藏。</summary>
+        private void ShowFileTransferNotice(string text)
+        {
+            ShowFileTransfer(text, 100);
+            _fileTransferNoticeTimer?.Stop();
+            _fileTransferNoticeTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
+            _fileTransferNoticeTimer.Tick += (s, e) =>
+            {
+                _fileTransferNoticeTimer?.Stop();
+                _fileTransferNoticeTimer = null;
+                IsFileTransferVisible = false;
+            };
+            _fileTransferNoticeTimer.Start();
+        }
+
+        /// <summary>本端发送完成。</summary>
+        private void OnFilesSentToRemote()
+        {
+            IsFileTransferVisible = false;
+            Logger.Info("File transfer to the remote computer completed");
+        }
+
+        /// <summary>文件传输失败（任一方向）。</summary>
+        private void OnFileTransferError(string reason, bool outgoing)
+        {
+            IsFileTransferVisible = false;
+            Logger.Warn("File transfer {0} failed: {1}", outgoing ? "send" : "receive", reason);
+            _notifier.ShowError(reason, outgoing ? "Send File Failed" : "Receive File Failed");
+        }
+
+        private void ShowFileTransfer(string text, double percent)
+        {
+            FileTransferText = text;
+            FileTransferPercent = Math.Max(0, Math.Min(100, percent));
+            IsFileTransferVisible = true;
+        }
+
+        /// <summary>速率格式化（MB/s 或 KB/s）。</summary>
+        private static string FormatRate(double bytesPerSecond)
+        {
+            if (bytesPerSecond >= 1048576)
+                return (bytesPerSecond / 1048576.0).ToString("F1") + " MB/s";
+            return (bytesPerSecond / 1024.0).ToString("F0") + " KB/s";
+        }
+
+        /// <summary>接收目录：下载\EasyRDP Received（无下载目录时用我的文档）。</summary>
+        private static string ResolveReceivedDirectory()
+        {
+            string baseDir = "";
+            try
+            {
+                baseDir = System.IO.Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads");
+            }
+            catch
+            {
+            }
+            if (string.IsNullOrEmpty(baseDir) || !System.IO.Directory.Exists(baseDir))
+            {
+                try { baseDir = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments); }
+                catch { }
+            }
+            if (string.IsNullOrEmpty(baseDir))
+                baseDir = AppDomain.CurrentDomain.BaseDirectory;
+            return System.IO.Path.Combine(baseDir, "EasyRDP Received");
+        }
+
         /// <summary>清理连接与渲染资源（userInitiated=true 表示用户主动断开，不走重连）。</summary>
         private void StopInternal(bool userInitiated)
         {
@@ -2100,6 +2391,7 @@ namespace EasyRDP.Client.Wpf.ViewModels
                 IsReconnecting = false;
 
             if (_fpsTimer != null) { _fpsTimer.Stop(); _fpsTimer = null; }
+            if (_fileTransferNoticeTimer != null) { _fileTransferNoticeTimer.Stop(); _fileTransferNoticeTimer = null; }
             if (_clipboardTimer != null) { _clipboardTimer.Stop(); _clipboardTimer = null; }
             if (_heartbeatTimer != null)
             {
@@ -2116,6 +2408,23 @@ namespace EasyRDP.Client.Wpf.ViewModels
             }
 
             _running = false;
+
+            // 文件传输：先取消（会经通道通知对端），再关闭独立通道；必须在主传输断开之前
+            var fileTransfer = _fileTransfer;
+            _fileTransfer = null;
+            if (fileTransfer != null)
+            {
+                try { fileTransfer.Dispose(); } catch { }
+            }
+            var fileChannel = _fileChannel;
+            _fileChannel = null;
+            if (fileChannel != null)
+            {
+                try { fileChannel.Disconnect(); } catch { }
+            }
+            IsFileTransferVisible = false;
+            SendFileCommand.RaiseCanExecuteChanged();
+
             // 顺序修复：先断开传输（停止接收线程产生新消息），再停止会话。
             // 旧顺序反过来：会话 Stop 时接收线程仍可能在 ProcessVideoFrame 中调用
             // _decoder.Decode，而 Stop 已把 _decoder 置 null → AccessViolation。

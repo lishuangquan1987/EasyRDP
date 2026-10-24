@@ -161,6 +161,7 @@
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="*"/>
+                <RowDefinition Height="Auto"/>
             </Grid.RowDefinitions>
             <TextBlock Grid.Row="0" Text="Sessions" Style="{StaticResource SectionHeaderStyle}"/>
             <DataGrid Grid.Row="1" ItemsSource="{Binding Sessions}"
@@ -175,19 +176,39 @@
                     <DataGridTextColumn Header="Codec" Binding="{Binding Codec}" Width="130"/>
                     <DataGridTextColumn Header="Resolution" Binding="{Binding Resolution}" Width="120"/>
                     <DataGridTextColumn Header="Frames" Binding="{Binding Frames}" Width="90"/>
-                    <DataGridTemplateColumn Header="Action" Width="80">
+                    <DataGridTemplateColumn Header="Action" Width="150">
                         <DataGridTemplateColumn.CellTemplate>
                             <DataTemplate>
-                                <Button Content="Kick"
-                                        Command="{Binding DataContext.KickCommand, RelativeSource={RelativeSource AncestorType=Window}}"
-                                        CommandParameter="{Binding IdValue}"
-                                        Style="{StaticResource LightButtonStyle}" Height="24" Padding="10,0"
-                                        HorizontalAlignment="Left" Margin="6,0"/>
+                                <StackPanel Orientation="Horizontal">
+                                    <Button Content="Send File"
+                                            Command="{Binding DataContext.SendFileCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                            CommandParameter="{Binding IdValue}"
+                                            Style="{StaticResource LightButtonStyle}" Height="24" Padding="8,0"
+                                            Margin="6,0,0,0"
+                                            ToolTip="Select files to send to this remote computer"/>
+                                    <Button Content="Kick"
+                                            Command="{Binding DataContext.KickCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                            CommandParameter="{Binding IdValue}"
+                                            Style="{StaticResource LightButtonStyle}" Height="24" Padding="10,0"
+                                            HorizontalAlignment="Left" Margin="6,0"/>
+                                </StackPanel>
                             </DataTemplate>
                         </DataGridTemplateColumn.CellTemplate>
                     </DataGridTemplateColumn>
                 </DataGrid.Columns>
             </DataGrid>
+
+            <!-- 文件传输进度（服务端收发共用；仅在传输期间显示） -->
+            <Border Grid.Row="2" Margin="0,8,0,0" Padding="10,8"
+                    Background="#F4F6F8" BorderBrush="#DDE3E8" BorderThickness="1"
+                    Visibility="{Binding IsFileTransferVisible, Converter={StaticResource BoolToVis}}">
+                <StackPanel>
+                    <TextBlock Text="{Binding FileTransferText}" FontSize="12"
+                               Foreground="{StaticResource TextPrimaryBrush}" Margin="0,0,0,6"/>
+                    <ProgressBar Height="8" Minimum="0" Maximum="100"
+                                 Value="{Binding FileTransferPercent, Mode=OneWay}"/>
+                </StackPanel>
+            </Border>
         </Grid>
 
         <!-- ====== 底部：日志 ====== -->

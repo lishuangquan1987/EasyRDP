@@ -132,6 +132,9 @@
                             Command="{Binding CheckUpdateCommand}" Margin="0,0,6,0"
                             Visibility="{Binding IsUpdatePanelVisible, Converter={StaticResource BoolToVis}}"
                             ToolTip="Confirm download / apply the new version"/>
+                    <Button Content="Send File" Style="{StaticResource LightButtonStyle}"
+                            Command="{Binding SendFileCommand}" Margin="0,0,10,0"
+                            ToolTip="Select files to send to the remote computer (you can also drag files onto the desktop)"/>
                     <Button Content="Fullscreen" Style="{StaticResource LightButtonStyle}"
                             Command="{Binding FullscreenCommand}" Margin="0,0,6,0"
                             ToolTip="Toggle fullscreen / windowed (F11)"/>
@@ -356,6 +359,21 @@
                                    Foreground="White" HorizontalAlignment="Center" Margin="0,0,0,6"
                                    FontSize="13"/>
                         <ProgressBar Value="{Binding ClipboardProgressValue}" Maximum="100" Width="320"
+                                     Style="{StaticResource AccentProgressBarStyle}"/>
+                    </StackPanel>
+                </Border>
+
+                <!-- 显式文件传输进度条（Send File / 拖拽文件）：叠放在剪贴板进度条下方 -->
+                <Border HorizontalAlignment="Center" VerticalAlignment="Top"
+                        Margin="0,64,0,0" Padding="20,10"
+                        Background="#E0000000" CornerRadius="6"
+                        IsHitTestVisible="False"
+                        Visibility="{Binding IsFileTransferVisible, Converter={StaticResource BoolToVis}}">
+                    <StackPanel Orientation="Vertical">
+                        <TextBlock Text="{Binding FileTransferText}"
+                                   Foreground="White" HorizontalAlignment="Center" Margin="0,0,0,6"
+                                   FontSize="13"/>
+                        <ProgressBar Value="{Binding FileTransferPercent, Mode=OneWay}" Maximum="100" Width="320"
                                      Style="{StaticResource AccentProgressBarStyle}"/>
                     </StackPanel>
                 </Border>
