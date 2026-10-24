@@ -136,7 +136,7 @@
             </MenuItem>
         </Menu>
 
-        <!--  ====== 品牌行：logo + 地址输入框 + Sign in ======  -->
+        <!--  ====== 品牌行：logo + 在线统计 + 新建分组/连接（连接必须先有连接信息）  ======  -->
         <Border
             Padding="16,10"
             Background="White"
@@ -147,9 +147,7 @@
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
-                <!--  vnc connect 品牌  -->
                 <StackPanel
                     Grid.Column="0"
                     Margin="0,0,20,0"
@@ -171,33 +169,20 @@
                             Text=" connect" />
                     </TextBlock>
                 </StackPanel>
-                <!--  长地址输入框（蓝色高亮选中 IP），回车连接  -->
-                <TextBox
-                    x:Name="HostBox"
-                    Grid.Column="1"
-                    Height="30"
-                    Margin="0,0,16,0"
-                    Padding="10,0"
-                    VerticalContentAlignment="Center"
-                    Background="#F5F7F9"
-                    BorderBrush="#D0D7DE"
-                    BorderThickness="1"
-                    FontSize="13"
-                    Text="{Binding AddressText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                    ToolTip="Enter an IP, host[:port] or user@host[:port]; press Enter or click Connect">
-                    <TextBox.InputBindings>
-                        <KeyBinding Key="Enter" Command="{Binding ConnectAddressCommand}" />
-                    </TextBox.InputBindings>
-                </TextBox>
-                <!--  连接按钮（显式可点击，避免只靠回车不直观）  -->
-                <StackPanel Grid.Column="2" Orientation="Horizontal">
-                    <Button
-                        Height="30"
-                        Padding="16,0"
-                        Command="{Binding ConnectAddressCommand}"
-                        Content="Connect"
-                        Style="{StaticResource PrimaryButtonStyle}"
-                        ToolTip="Connect to the host typed in the address bar" />
+
+                <StackPanel Grid.Column="1" HorizontalAlignment="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                    <TextBlock Text="{Binding AvailabilitySummary}"
+                               FontSize="11" Foreground="#78909C" VerticalAlignment="Center"
+                               Margin="0,0,12,0"
+                               ToolTip="TCP probe result for each saved connection" />
+                    <Button Height="28" Padding="10,0" Content="+ Group"
+                            Command="{Binding NewGroupCommand}"
+                            Style="{StaticResource LightButtonStyle}" Margin="0,0,6,0"
+                            ToolTip="Create a connection group" />
+                    <Button Height="28" Padding="10,0" Content="+ Connection"
+                            Command="{Binding NewConnectionCommand}"
+                            Style="{StaticResource LightButtonStyle}"
+                            ToolTip="Create a saved connection (host / port / user / password)" />
                 </StackPanel>
             </Grid>
         </Border>
@@ -254,23 +239,6 @@
 
             <!--  左侧：工具条 + 搜索 + 树  -->
             <DockPanel Grid.Column="0" Background="#FCFDFE">
-                <Border DockPanel.Dock="Top" Padding="12,10" BorderBrush="#E8EDF1" BorderThickness="0,0,0,1">
-                    <DockPanel>
-                        <TextBlock DockPanel.Dock="Right" Text="{Binding AvailabilitySummary}"
-                                   FontSize="11" Foreground="#78909C" VerticalAlignment="Center"
-                                   ToolTip="TCP probe result for each saved connection" />
-                        <StackPanel Orientation="Horizontal">
-                            <Button Height="26" Padding="10,0" Content="+ Group"
-                                    Command="{Binding NewGroupCommand}"
-                                    Style="{StaticResource LightButtonStyle}" Margin="0,0,6,0"
-                                    ToolTip="Create a connection group" />
-                            <Button Height="26" Padding="10,0" Content="+ Connection"
-                                    Command="{Binding NewConnectionCommand}"
-                                    Style="{StaticResource LightButtonStyle}"
-                                    ToolTip="Create a saved connection" />
-                        </StackPanel>
-                    </DockPanel>
-                </Border>
                 <Border DockPanel.Dock="Top" Padding="12,8" BorderBrush="#E8EDF1" BorderThickness="0,0,0,1">
                     <Grid>
                         <TextBox Height="28" Padding="8,0" VerticalContentAlignment="Center"
@@ -504,7 +472,7 @@
                             </Style>
                         </TextBlock.Style>
                     </TextBlock>
-                    <TextBlock Text="or type an address above and press Connect"
+                    <TextBlock Text="Create a connection with + Connection, then double-click it"
                                FontSize="12" Foreground="#C2CDD6" Margin="0,6,0,0"
                                HorizontalAlignment="Center">
                         <TextBlock.Style>

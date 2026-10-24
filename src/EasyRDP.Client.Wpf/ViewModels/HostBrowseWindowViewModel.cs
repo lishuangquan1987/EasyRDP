@@ -21,7 +21,6 @@ namespace EasyRDP.Client.Wpf.ViewModels
         private readonly IDialogService _dialogs;
         private readonly IUserNotifier _notifier;
         private RecentConnection? _selected;
-        private string _addressText = "";
         // 搜索过滤（按名称/地址实时过滤树）
         private string _searchText = "";
         // 最近使用缓存（供 Recent 横条与"上次连接"展示，ReloadTree 时刷新一次）
@@ -166,17 +165,7 @@ namespace EasyRDP.Client.Wpf.ViewModels
             get { return SelectedThumbnail != null; }
         }
 
-        /// <summary>地址输入框文本（绑定到 XAML 地址栏）。</summary>
-        public string AddressText
-        {
-            get { return _addressText; }
-            set { _addressText = value ?? ""; OnPropertyChanged(nameof(AddressText)); }
-        }
-
         // ====== 命令 ======
-
-        /// <summary>地址栏回车连接。</summary>
-        public RelayCommand ConnectAddressCommand { get; }
 
         /// <summary>连接指定卡片（参数为 RecentConnection）。</summary>
         public RelayCommand<RecentConnection> ConnectItemCommand { get; }
@@ -255,7 +244,6 @@ namespace EasyRDP.Client.Wpf.ViewModels
             _dialogs = dialogs ?? throw new ArgumentNullException(nameof(dialogs));
             _notifier = notifier ?? new WpfUserNotifier();
 
-            ConnectAddressCommand = new RelayCommand(ConnectFromAddressBar);
             ConnectItemCommand = new RelayCommand<RecentConnection>(ConnectItem);
             EditItemCommand = new RelayCommand<RecentConnection>(EditItem);
             RenameItemCommand = new RelayCommand<RecentConnection>(RenameItem);
@@ -770,61 +758,6 @@ namespace EasyRDP.Client.Wpf.ViewModels
 
         // ====== 连接 ======
 
-        /// <summary>
-        /// 解析地址栏 "[user@]host[:port]" 并请求连接。
-        /// 服务端有两种认证模式：口令模式（需要 USER/PASS）和审批模式（免密码，由服务端确认）。
-        /// 客户端无法预知模式，因此凭据为空时直接尝试连接：审批模式可直接进入，
-        /// 口令模式会收到明确提示（"This server requires a password"）。
-        /// </summary>
-        private void ConnectFromAddressBar()
-        {
-            string hostPort = AddressText;
-            if (string.IsNullOrWhiteSpace(hostPort)) return;
-
-            string host = hostPort.Trim();
-            string port = "2000";
-            string? username = null;
-            string? password = null;
-
-            // 可选 user@ 前缀（用户名内不应含 @，取最后一个 @ 分割）
-            int at = host.LastIndexOf('@');
-            if (at > 0)
-            {
-                username = host.Substring(0, at).Trim();
-                host = host.Substring(at + 1).Trim();
-            }
-            // 可选 :port 后缀
-            int idx = host.LastIndexOf(':');
-            if (idx > 0 && int.TryParse(host.Substring(idx + 1), out int p) && p > 0 && p < 65536)
-            {
-                port = p.ToString();
-                host = host.Substring(0, idx).Trim();
-            }
-            if (string.IsNullOrWhiteSpace(host)) return;
-
-            // 已保存过该主机：复用保存的端口/凭据，避免每次重复输入
-            var saved = _store.Load().FirstOrDefault(r =>
-                string.Equals(r.Host, host, StringComparison.OrdinalIgnoreCase));
-            if (saved != null)
-            {
-                if (string.IsNullOrEmpty(username))
-                    username = saved.Username;
-                if (string.IsNullOrEmpty(password))
-                    password = saved.Password;
-                if (string.IsNullOrWhiteSpace(port) || port == "2000")
-                    port = string.IsNullOrWhiteSpace(saved.Port) ? "2000" : saved.Port;
-            }
-
-            // 直接连接：凭据为空可能是服务端审批模式（免密码），
-            // 口令模式下服务端会返回 AuthChallenge，客户端据此提示需要密码。
-            ConnectRequested?.Invoke(new RecentConnection
-            {
-                Host = host,
-                Port = port,
-                Username = username,
-                Password = password
-            });
-        }
 
         /// <summary>
         /// File > New Connection：弹完整连接表单（空表单 + 默认端口），
