@@ -28,8 +28,11 @@ namespace EasyRDP.Server.Wpf.Models
         /// <summary>程序启动后是否立即开始监听（Approve 模式下无需凭据；Password 模式凭据为空时静默跳过）。</summary>
         public bool AutoListen { get; set; }
 
-        /// <summary>允许局域网 UDP 发现（只暴露计算机名与 TCP 端口，不含凭据）。</summary>
+        /// <summary>允许局域网 UDP 发现（只暴露名称与 TCP 端口，不含凭据）。</summary>
         public bool AllowDiscovery { get; set; }
+
+        /// <summary>局域网发现时显示的名称（空=使用计算机名）。</summary>
+        public string ServerName { get; set; }
 
         /// <summary>连接认证模式（口令认证 / 人工审批）。</summary>
         public ServerAuthMode AuthMode { get; set; }
@@ -51,6 +54,7 @@ namespace EasyRDP.Server.Wpf.Models
             AutoStart = false;
             AutoListen = true;
             AllowDiscovery = true;
+            ServerName = "";
             // 默认口令认证：与历史版本行为一致；审批模式需显式切换
             AuthMode = ServerAuthMode.Password;
             AuthSalt = "";

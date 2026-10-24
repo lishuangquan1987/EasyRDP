@@ -1582,7 +1582,9 @@ namespace EasyRDP.Server.Wpf.Services
                 sessionId = _nextSessionId++;
             }
 
-            Logger.Info("Client connected: sessionId={0} remote={1}", sessionId, e.RemoteEndPoint);
+            // 在线探测（TCP connect 后立即断开）也会走到这里，Info 级别会刷屏；
+            // 真正建立会话时另有 Handshake success / Session attached 的 Info 日志
+            Logger.Debug("Client connected: sessionId={0} remote={1}", sessionId, e.RemoteEndPoint);
 
             var transport = e.Transport;
 

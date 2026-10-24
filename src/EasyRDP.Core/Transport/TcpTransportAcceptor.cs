@@ -101,8 +101,9 @@ namespace EasyRDP.Core.Transport
                     transport.Disconnected += (s, e) => RemoveTransport(transport);
                     lock (_lock) { _transports.Add(transport); }
 
-                    Logger.Info("Client connected: {0}", remote);
-                    Log("Client connected: " + remote);
+                    // TCP 连接建立不等于会话建立（客户端在线探测也会连上后立即断开）：
+                    // 只写调试日志，UI 日志由会话建立事件（Session attached）产生
+                    Logger.Debug("Client connected: {0}", remote);
 
                     // fire ClientConnected（同步）：TransportHost 在处理器内完成订阅 +
                     // SessionId 分配 + transport.Start()

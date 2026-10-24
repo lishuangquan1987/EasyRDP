@@ -108,6 +108,7 @@ namespace EasyRDP.Server.Wpf.Services
             sb.Append("\"AutoStart\":").Append(s.AutoStart ? "true" : "false").Append(',');
             sb.Append("\"AutoListen\":").Append(s.AutoListen ? "true" : "false").Append(',');
             sb.Append("\"AllowDiscovery\":").Append(s.AllowDiscovery ? "true" : "false").Append(',');
+            sb.Append("\"ServerName\":\"").Append(Escape(s.ServerName ?? "")).Append("\",");
             sb.Append("\"AuthMode\":").Append((int)s.AuthMode).Append(',');
             sb.Append("\"AuthSalt\":\"").Append(Escape(s.AuthSalt ?? "")).Append("\",");
             sb.Append("\"CaptureDisplay\":").Append(s.CaptureDisplay);
@@ -160,6 +161,7 @@ namespace EasyRDP.Server.Wpf.Services
                         else if (key == "Username") s.Username = token;
                         else if (key == "Password") s.Password = SecretProtector.Unprotect(token) ?? "";
                         else if (key == "AuthSalt") s.AuthSalt = token;
+                        else if (key == "ServerName") s.ServerName = token;
                         key = null;
                         expectValue = false;
                     }

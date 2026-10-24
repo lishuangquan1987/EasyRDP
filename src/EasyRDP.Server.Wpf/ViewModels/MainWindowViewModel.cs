@@ -53,6 +53,9 @@ namespace EasyRDP.Server.Wpf.ViewModels
         // 允许局域网 UDP 发现（只暴露计算机名与 TCP 端口）
         private bool _allowDiscovery = true;
         private DiscoveryService _discoveryService;
+        // 局域网发现显示名（空=计算机名）
+        private string _serverName = "";
+        private string _serverNameText = "";
         // 连接认证：默认口令模式（与历史版本一致）；审批模式免密码
         private ServerAuthMode _authMode = ServerAuthMode.Password;
         // PBKDF2 盐（Base64）：首次运行生成后固定，保证相同口令派生出相同密钥
@@ -329,6 +332,22 @@ namespace EasyRDP.Server.Wpf.ViewModels
             }
         }
 
+        /// <summary>局域网发现显示名（空=计算机名）；运行中修改会重建发现服务。</summary>
+        public string ServerNameText
+        {
+            get { return _serverNameText; }
+            set
+            {
+                string text = value ?? "";
+                if (_serverNameText == text) return;
+                _serverNameText = text;
+                _serverName = text;
+                OnPropertyChanged(nameof(ServerNameText));
+                if (IsRunning && _allowDiscovery)
+                    StartDiscoveryService(CurrentPort());
+            }
+        }
+
         /// <summary>
         /// 是否允许局域网 UDP 发现。运行中切换立即生效（启停 UDP 监听）。
         /// 发现应答只包含计算机名、TCP 端口、认证模式与是否已满，不含任何凭据。
@@ -415,6 +434,8 @@ namespace EasyRDP.Server.Wpf.ViewModels
             _authMode = settings.AuthMode;
             _authSalt = settings.AuthSalt ?? "";
             _allowDiscovery = settings.AllowDiscovery;
+            _serverName = settings.ServerName ?? "";
+            _serverNameText = _serverName;
             _captureDisplayIndex = settings.CaptureDisplay;
             RefreshDisplays();
             // 首次运行生成并立即落盘 PBKDF2 盐：盐固定后同一口令派生密钥稳定，
@@ -875,7 +896,7 @@ namespace EasyRDP.Server.Wpf.ViewModels
                     ? EasyRDP.Core.Discovery.DiscoveryConstants.AuthApprove
                     : EasyRDP.Core.Discovery.DiscoveryConstants.AuthPassword),
                 () => host.ActiveSessionCount >= host.MaxSessions,
-                Environment.MachineName);
+                string.IsNullOrWhiteSpace(_serverName) ? Environment.MachineName : _serverName.Trim());
             service.Start();
             _discoveryService = service;
             AddLog("LAN discovery: UDP " + EasyRDP.Core.Discovery.DiscoveryConstants.UdpPort
@@ -905,6 +926,7 @@ namespace EasyRDP.Server.Wpf.ViewModels
                 AuthMode = _authMode,
                 AuthSalt = _authSalt,
                 AllowDiscovery = _allowDiscovery,
+                ServerName = _serverName,
                 CaptureDisplay = _captureDisplayIndex
             });
             AddLog(ok ? "Settings saved" : "Settings save failed");
