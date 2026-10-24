@@ -53,7 +53,7 @@ EasyRDP/                       # monorepo
 ### 构建
 
 ```bash
-git clone --recursive https://github.com/<you>/EasyRDP.git
+git clone --recursive https://github.com/lishuangquan1987/EasyRDP.git
 cd EasyRDP
 
 dotnet build src/EasyRDP.Server.Wpf/EasyRDP.Server.Wpf.csproj -c Release
@@ -136,6 +136,23 @@ dotnet test EasyDesk/test/EasyDesk.Windows.Tests/EasyDesk.Windows.Tests.csproj
 
 - 服务端必须保持 `net40` 单一目标（XP 兼容），禁止引入 C# 6+ 语法特性。
 - 设计规范见 `docs/EasyRDP-Abstraction-Layers-Design.md`，排障记录见 `docs/EasyRDP-Troubleshooting.md`。
+
+## 发布与安装包
+
+在 GitHub 上创建并发布 Release（tag 形如 `v1.2.3`）会自动触发
+[`.github/workflows/release.yml`](.github/workflows/release.yml)：
+
+1. `windows-latest` 上构建客户端（自包含 win-x64，免装 .NET 运行时）与服务端（net40）；
+2. 用 Inno Setup 生成 `EasyRDP-Client-<版本>-Setup.exe` 与 `EasyRDP-Server-<版本>-Setup.exe`；
+3. 额外产出 `EasyRDP-Server-<版本>-portable.zip`（**Windows XP 请用这个**，
+   Inno Setup 6 的安装包最低支持 Windows 7）；
+4. 所有产物同时上传到 Actions Artifacts 和该 Release。
+
+安装包默认安装到用户目录（`%LOCALAPPDATA%\EasyRDP\{Client|Server}`），
+无需管理员权限——服务端日志与自动更新器都需要程序目录写权限。
+卸载不会删除 `%APPDATA%\EasyRDP` 下的连接配置与审计日志。
+
+也可在 Actions 页面手动运行该 workflow（`workflow_dispatch`）输入版本号，做预发布验证。
 
 ## 反馈
 

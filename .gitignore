@@ -17,3 +17,7 @@ reasonix.toml
 
 # WPF 临时构建文件
 *_wpftmp.csproj
+
+# Release staging / installer output
+stage/
+dist/

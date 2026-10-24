@@ -1,0 +1,4 @@
+{
+  "main_exe_relative_path": "../ApplicationFolder/EasyRDP.Client.Wpf.exe",
+  "must_close_process_name": ["EasyRDP.Client.Wpf"]
+}
