@@ -107,6 +107,10 @@ namespace EasyRDP.Server.Wpf.Services
         // ── 剪贴板变化通知（替代轮询）：AddClipboardFormatListener / WM_CLIPBOARDUPDATE ──
         private const int GWL_WNDPROC = -4;
         private const uint WM_CLIPBOARDUPDATE = 0x031D;
+        // 剪贴板延迟渲染：系统在粘贴时向所有者窗口索要真实数据
+        private const uint WM_RENDERFORMAT = 0x0305;
+        private const uint WM_RENDERALLFORMATS = 0x0306;
+        private const uint WM_DESTROYCLIPBOARD = 0x0307;
         private const uint QS_ALLINPUT = 0x04FF;
         private const uint PM_REMOVE = 0x0001;
         private const uint MWMO_INPUTAVAILABLE = 0x0004;
@@ -129,6 +133,24 @@ namespace EasyRDP.Server.Wpf.Services
         private static extern bool AddClipboardFormatListener(IntPtr hWnd);
         [System.Runtime.InteropServices.DllImport("user32.dll")]
         private static extern bool RemoveClipboardFormatListener(IntPtr hWnd);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+        private static extern bool OpenClipboard(IntPtr hWndNewOwner);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern bool EmptyClipboard();
+
+        [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+        private static extern IntPtr SetClipboardData(uint uFormat, IntPtr hMem);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern bool CloseClipboard();
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern IntPtr GetClipboardOwner();
+
+        [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+        private static extern void SetLastError(uint dwErrCode);
         [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
         private static extern IntPtr GetModuleHandle(string lpModuleName);
         [System.Runtime.InteropServices.DllImport("user32.dll")]
@@ -194,6 +216,27 @@ namespace EasyRDP.Server.Wpf.Services
         // 客户端发来的文件路径队列：由 ClipboardLoop 在 STA 线程消费，调用 SetFiles
         private readonly System.Collections.Concurrent.ConcurrentQueue<string[]> _serverFileSetQueue
             = new System.Collections.Concurrent.ConcurrentQueue<string[]>();
+
+        // ── 剪贴板文件延迟渲染（客户端复制 → 服务端粘贴时才下载） ──
+        // 收到 ClipFormatList 后只在剪贴板放 CF_HDROP 占位（延迟渲染），
+        // 系统在真正粘贴时发 WM_RENDERFORMAT，才下载文件并填充真实数据。
+        private readonly object _pendingFileLock = new object();
+        private FileClipboardConsumer _pendingFileConsumer;
+        private string _pendingFileConsumerKey;
+        private uint _pendingFileTransferId;
+        private volatile bool _pendingFileActive;
+        // 请求 ClipboardLoop（STA）安装占位
+        private volatile bool _pendingFileInstallRequested;
+        private int _pendingFileInstallAttempts;
+        // 需要在 STA 线程安装“已下载文件”的请求队列（Ctrl+V 预取完成后主动填充）
+        private readonly System.Collections.Concurrent.ConcurrentQueue<string[]> _clipboardFileRenderQueue
+            = new System.Collections.Concurrent.ConcurrentQueue<string[]>();
+        private readonly ManualResetEventSlim _clipboardFileRenderDone = new ManualResetEventSlim(false);
+        // Ctrl+V 快路径：Ctrl 状态跟踪 + 预取中扣住 V 键
+        private volatile bool _ctrlKeyDown;
+        private volatile bool _pasteKeyHeld;
+        private int _pastePrefetching;
+
         // 服务端接收客户端发来的图片剪贴板：key = "sessionId_transferId"
         private readonly System.Collections.Concurrent.ConcurrentDictionary<string, ImageClipboardReceiver> _serverImageReceivers
             = new System.Collections.Concurrent.ConcurrentDictionary<string, ImageClipboardReceiver>();
@@ -474,6 +517,7 @@ namespace EasyRDP.Server.Wpf.Services
                 try { kv.Value.Cancel(); } catch { }
             }
             _serverClipConsumers.Clear();
+            ClearPendingFileClipboard("server-stop", false);
 
             Logger.Info("TransportHost stopped");
 
@@ -522,6 +566,8 @@ namespace EasyRDP.Server.Wpf.Services
                         if (!_running) break;
                         try
                         {
+                            // 文本剪贴板覆盖文件占位：放弃延迟渲染（否则下次粘贴会取到旧文件）
+                            ClearPendingFileClipboard("remote-text-clipboard", true);
                             _clipboardService?.SetText(text);
                             // 更新 last，避免监听线程检测到"变化"又发回客户端（避免回环）
                             _lastServerClipboardText = text;
@@ -554,6 +600,37 @@ namespace EasyRDP.Server.Wpf.Services
                         }
                     }
 
+                    // 2.5) 剪贴板文件延迟渲染：安装占位 / 填充预取完成的真实文件
+                    if (_pendingFileInstallRequested)
+                    {
+                        _pendingFileInstallRequested = false;
+                        if (!InstallPendingFileClipboard())
+                        {
+                            // 剪贴板被其他程序短暂占用：稍后重试（最多 5 次）
+                            FileClipboardConsumer pendingConsumer;
+                            lock (_pendingFileLock) { pendingConsumer = _pendingFileConsumer; }
+                            if (pendingConsumer != null && _pendingFileInstallAttempts < 5)
+                            {
+                                _pendingFileInstallAttempts++;
+                                _pendingFileInstallRequested = true;
+                                Logger.Info("File clipboard placeholder install failed — retry {0}/5",
+                                    _pendingFileInstallAttempts);
+                            }
+                        }
+                        else
+                        {
+                            _pendingFileInstallAttempts = 0;
+                        }
+                    }
+                    string[] renderPaths;
+                    while (_clipboardFileRenderQueue.TryDequeue(out renderPaths))
+                    {
+                        if (!_running) break;
+                        try { ApplyClipboardFilesOnSta(renderPaths); }
+                        catch (Exception ex) { Logger.Warn(ex, "ApplyClipboardFilesOnSta failed"); }
+                        finally { _clipboardFileRenderDone.Set(); }
+                    }
+
                     // 3) 处理来自客户端的图片剪贴板设置请求（防回环：更新 _lastServerClipboardImageSig）
                     byte[] dibBytes;
                     while (_serverImageSetQueue.TryDequeue(out dibBytes))
@@ -561,6 +638,8 @@ namespace EasyRDP.Server.Wpf.Services
                         if (!_running) break;
                         try
                         {
+                            // 图片剪贴板覆盖文件占位：放弃延迟渲染
+                            ClearPendingFileClipboard("remote-image-clipboard", true);
                             _clipboardService?.SetImageDibBytes(dibBytes);
                             // 防回环：更新签名，避免 CheckImageClipboardChange 又发回客户端
                             _lastServerClipboardImageSig = dibBytes.Length + ":" + ComputeSimpleHash(dibBytes, 32);
@@ -628,8 +707,11 @@ namespace EasyRDP.Server.Wpf.Services
         {
             try
             {
-                IntPtr hWnd = CreateWindowEx(0, "STATIC", "EasyRDPClipboardListener", 0,
-                    0, 0, 0, 0, HWND_MESSAGE, IntPtr.Zero, GetModuleHandle(null), IntPtr.Zero);
+                // 注意：剪贴板所有者必须是可见性无关的顶层窗口。
+                // 用 message-only 窗口（HWND_MESSAGE）收不到延迟渲染的 WM_RENDERFORMAT，
+                // 因此这里创建隐藏的 WS_POPUP 顶层窗口（不显示、不进任务栏）。
+                IntPtr hWnd = CreateWindowEx(0, "STATIC", "EasyRDPClipboardListener", 0x80000000,
+                    0, 0, 0, 0, IntPtr.Zero, IntPtr.Zero, GetModuleHandle(null), IntPtr.Zero);
                 if (hWnd == IntPtr.Zero)
                 {
                     Logger.Warn("CreateClipboardListener: CreateWindowEx failed (err={0})",
@@ -643,6 +725,38 @@ namespace EasyRDP.Server.Wpf.Services
                     if (msg == WM_CLIPBOARDUPDATE)
                     {
                         try { _clipboardChangeSignal.Set(); } catch { }
+                        return IntPtr.Zero;
+                    }
+                    if (msg == WM_RENDERFORMAT)
+                    {
+                        // 系统请求真实数据（用户粘贴）：同步下载后填充 CF_HDROP
+                        uint format = (uint)w.ToInt64();
+                        Logger.Info("WM_RENDERFORMAT: format={0} pending={1} owner={2} listener={3}",
+                            format, _pendingFileActive, GetClipboardOwner(), _clipboardListenerHwnd);
+                        if (format == (uint)EasyRDP.Core.Clipboard.DropFilesBuilder.CF_HDROP && _pendingFileActive)
+                        {
+                            try { RenderPendingFileClipboard(60000); }
+                            catch (Exception ex) { Logger.Warn(ex, "RenderPendingFileClipboard failed"); }
+                        }
+                        else
+                        {
+                            Logger.Warn("WM_RENDERFORMAT ignored: no pending file clipboard data");
+                        }
+                        return IntPtr.Zero;
+                    }
+                    if (msg == WM_RENDERALLFORMATS)
+                    {
+                        // 即将失去剪贴板所有权：尽力短超时渲染一次
+                        if (_pendingFileActive)
+                        {
+                            try { RenderPendingFileClipboard(5000); }
+                            catch (Exception ex) { Logger.Warn(ex, "RenderAllFormats failed"); }
+                        }
+                        return IntPtr.Zero;
+                    }
+                    if (msg == WM_DESTROYCLIPBOARD)
+                    {
+                        ClearPendingFileClipboard("clipboard-destroyed", true);
                         return IntPtr.Zero;
                     }
                     return CallWindowProc(_clipboardPrevWndProc, h, msg, w, l);
@@ -696,6 +810,16 @@ namespace EasyRDP.Server.Wpf.Services
             _clipboardCheckCount++;
             try
             {
+                // 延迟渲染占位期间禁止读取 CF_HDROP：GetFileList 会触发 WM_RENDERFORMAT，
+                // 造成自锁/提前下载；若剪贴板已被其它程序接管，则放弃占位并继续常规同步。
+                if (_pendingFileActive)
+                {
+                    IntPtr owner = GetClipboardOwner();
+                    if (owner == _clipboardListenerHwnd)
+                        return;
+                    ClearPendingFileClipboard("clipboard-taken-by-other-app", true);
+                }
+
                 bool hasText = _clipboardService.ContainsText();
                 bool hasFiles = _clipboardService.ContainsFiles();
                 bool hasImage = _clipboardService.ContainsImage();
@@ -856,7 +980,7 @@ namespace EasyRDP.Server.Wpf.Services
                         // 单完整帧发送：并发响应的分片若交错且共用 frameId=0，
                         // 接收端重组器会把不同响应的分片混在一起导致 payload 损坏（下载失败 → 无粘贴菜单）。
                         // 每个响应作为完整帧发送，线上交错时互不干扰。
-                        SendMessage(targetSid, (byte)MessageType.ClipFileContentsRes, payload);
+                        SendFileChannel(targetSid, (byte)MessageType.ClipFileContentsRes, payload);
                     });
                 lock (_clipProviderLock)
                 {
@@ -1149,22 +1273,35 @@ namespace EasyRDP.Server.Wpf.Services
                 || type == (byte)MessageType.FileTransferAck;
         }
 
-        /// <summary>文件通道连接收到消息：只接受文件协议，其他消息丢弃（防止通道被当作会话使用）。</summary>
+        /// <summary>文件通道连接收到消息：只接受文件/剪贴板文件分块协议，其他消息丢弃（防止通道被当作会话使用）。</summary>
         private void HandleFileChannelMessage(uint connectionId, uint ownerSessionId, MessageReceivedEventArgs e)
         {
-            if (!IsFileTransferMessageType(e.MessageType))
+            if (IsFileTransferMessageType(e.MessageType))
             {
-                Logger.Warn("File channel {0}: unexpected message type 0x{1:X2} ignored",
-                    connectionId, e.MessageType);
+                SessionInfo info;
+                lock (_lock)
+                {
+                    _sessions.TryGetValue(ownerSessionId, out info);
+                }
+                if (info == null || info.FileTransfer == null) return;
+                info.FileTransfer.HandleMessage(e.MessageType, e.Data);
                 return;
             }
-            SessionInfo info;
-            lock (_lock)
+
+            // 剪贴板文件延迟渲染的分块收发也走文件通道（回退主连接时同样能处理）
+            if (e.MessageType == (byte)MessageType.ClipFileContentsReq)
             {
-                _sessions.TryGetValue(ownerSessionId, out info);
+                HandleClipFileContentsReqFromClient(ownerSessionId, e);
+                return;
             }
-            if (info == null || info.FileTransfer == null) return;
-            info.FileTransfer.HandleMessage(e.MessageType, e.Data);
+            if (e.MessageType == (byte)MessageType.ClipFileContentsRes)
+            {
+                HandleClipFileContentsResFromClient(ownerSessionId, e);
+                return;
+            }
+
+            Logger.Warn("File channel {0}: unexpected message type 0x{1:X2} ignored",
+                connectionId, e.MessageType);
         }
 
         /// <summary>
@@ -1506,6 +1643,9 @@ namespace EasyRDP.Server.Wpf.Services
                             Logger.Debug("InputEvent dispatch: sessionId={0} inputType={1} keyCode={2}",
                                 sessionId, inputMsg.Type, inputMsg.KeyCode);
                         }
+                        // 剪贴板文件延迟渲染：Ctrl+V 命中时先预取文件、扣住按键，下载完成后回放
+                        if (TryHandleClipboardPasteKey(info, inputMsg))
+                            return;
                         info.Input.HandleInput(inputMsg);
                         // 阶段二：鼠标按下/抬起时通知流会话（ZRLE CopyRect 触发条件），
                         // 仅在 ZRLE 模式下编码器会响应此状态，H264 路径无副作用。
@@ -1590,34 +1730,41 @@ namespace EasyRDP.Server.Wpf.Services
                 string sessionTag = "server_" + sessionId;
                 string key = sessionId + "_" + msg.TransferId;
 
-                // 创建 Consumer：通过 transport 向客户端发送 ClipFileContentsReq
+                // 创建 Consumer：文件内容经文件通道拉取（通道未建立时回退主连接）
                 var consumer = new FileClipboardConsumer(msg.TransferId, msg.Files, sessionTag,
                     (sidArg, payload) =>
                     {
                         // sidArg 被忽略（Consumer 不区分 session，由本回调封装）；用外层 sessionId 发送
-                        SendMessage(sessionId, (byte)MessageType.ClipFileContentsReq, payload);
+                        SendFileChannel(sessionId, (byte)MessageType.ClipFileContentsReq, payload);
                     },
                     localPaths =>
                     {
-                        // 下载完成（无论成功失败）后从字典移除，避免长期运行内存累积
+                        // 下载完成后从字典移除，避免长期运行内存累积
                         FileClipboardConsumer removed;
                         _serverClipConsumers.TryRemove(key, out removed);
-
                         Logger.Info("Server file clipboard download complete: session={0} transferId={1} files={2}",
                             sessionId, msg.TransferId, localPaths != null ? localPaths.Length : 0);
-                        if (localPaths != null && localPaths.Length > 0)
-                            EnqueueServerClipboardFiles(localPaths);
                     });
 
                 _serverClipConsumers[key] = consumer;
 
-                // 里程碑式进度日志：每 10% 记录一次，避免日志过多
+                // 取消上一个尚未消费的延迟渲染（用户连续复制了两次文件）
+                ClearPendingFileClipboard("superseded-by-new-copy", true);
+
+                lock (_pendingFileLock)
+                {
+                    _pendingFileConsumer = consumer;
+                    _pendingFileConsumerKey = key;
+                    _pendingFileTransferId = msg.TransferId;
+                }
+
+                // 通知状态日志（每 10% 一条）
                 int lastMilestone = -1;
                 consumer.ProgressChanged += (downloaded, total) =>
                 {
                     if (total <= 0) return;
                     int percent = (int)((downloaded * 100) / total);
-                    int milestone = percent / 10 * 10; // 0, 10, 20, ..., 100
+                    int milestone = percent / 10 * 10;
                     if (milestone > lastMilestone)
                     {
                         lastMilestone = milestone;
@@ -1626,14 +1773,340 @@ namespace EasyRDP.Server.Wpf.Services
                     }
                 };
 
-                consumer.StartDownload();
-                Logger.Info("Server received ClipFormatList: session={0} transferId={1} fileCount={2}",
+                // 由 ClipboardLoop（STA）安装延迟渲染占位：CF_HDROP 空数据
+                _pendingFileInstallAttempts = 0;
+                _pendingFileInstallRequested = true;
+                _clipboardSignal.Set();
+                Logger.Info("Server ClipFormatList staged (delayed): session={0} transferId={1} fileCount={2}",
                     sessionId, msg.TransferId, msg.Files.Count);
             }
             catch (Exception ex)
             {
                 Logger.Warn(ex, "HandleClipFormatListFromClient failed");
             }
+        }
+
+        /// <summary>
+        /// 在 STA 线程为最近一次文件复制安装延迟渲染占位：EmptyClipboard + SetClipboardData(CF_HDROP, NULL)。
+        /// 占位期间不下载任何数据，等系统发 WM_RENDERFORMAT 再拉取。
+        /// </summary>
+        private bool InstallPendingFileClipboard()
+        {
+            FileClipboardConsumer consumer;
+            lock (_pendingFileLock)
+            {
+                consumer = _pendingFileConsumer;
+            }
+            if (consumer == null) return false;
+
+            IntPtr hwnd = _clipboardListenerHwnd;
+            if (hwnd == IntPtr.Zero)
+            {
+                Logger.Warn("InstallPendingFileClipboard: clipboard listener window not available");
+                return false;
+            }
+
+            bool opened = false;
+            for (int attempt = 0; attempt < 5 && !opened; attempt++)
+            {
+                opened = OpenClipboard(hwnd);
+                if (!opened) Thread.Sleep(60);
+            }
+            if (!opened)
+            {
+                Logger.Warn("InstallPendingFileClipboard: OpenClipboard failed (err={0})",
+                    System.Runtime.InteropServices.Marshal.GetLastWin32Error());
+                return false;
+            }
+            bool installed = false;
+            try
+            {
+                EmptyClipboard();
+                // 延迟渲染：hMem=NULL 时成功返回值同样是 NULL，必须用 LastError 判定
+                SetLastError(0);
+                SetClipboardData((uint)EasyRDP.Core.Clipboard.DropFilesBuilder.CF_HDROP, IntPtr.Zero);
+                int lastError = System.Runtime.InteropServices.Marshal.GetLastWin32Error();
+                if (lastError != 0)
+                {
+                    Logger.Warn("InstallPendingFileClipboard: SetClipboardData(placeholder) failed (err={0})",
+                        lastError);
+                    return false;
+                }
+                installed = true;
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn(ex, "InstallPendingFileClipboard failed");
+            }
+            finally
+            {
+                CloseClipboard();
+            }
+
+            if (!installed) return false;
+            // 并发保护：安装期间可能已被新复制/其他程序接管而清理，此时不能再标记 active
+            lock (_pendingFileLock)
+            {
+                if (!ReferenceEquals(_pendingFileConsumer, consumer))
+                {
+                    Logger.Info("File clipboard placeholder discarded (pending transfer changed)");
+                    // 已放上去的占位必须一并移除，否则剪贴板会留下无法渲染的空 CF_HDROP
+                    _pendingFileActive = true;
+                    ClearClipboardPlaceholder();
+                    _pendingFileActive = false;
+                    return false;
+                }
+            }
+            _pendingFileActive = true;
+            // 防回环标记必须在剪贴板关闭后设置（SetOwnerFlag 内部会自行 OpenClipboard）
+            EasyRDP.Core.ClipboardOwnerHelper.SetOwnerFlag(EasyRDP.Core.ClipboardOwnerHelper.SideHost);
+            _lastServerClipboardFilesSig = "__pending_clipboard_files__";
+            Logger.Info("File clipboard placeholder installed (delayed rendering, transferId={0})",
+                _pendingFileTransferId);
+            return true;
+        }
+
+        /// <summary>清理延迟渲染状态；cancelConsumer=true 时同时取消正在进行的下载。</summary>
+        private void ClearPendingFileClipboard(string reason, bool cancelConsumer)
+        {
+            FileClipboardConsumer consumer;
+            string key;
+            lock (_pendingFileLock)
+            {
+                consumer = _pendingFileConsumer;
+                key = _pendingFileConsumerKey;
+                _pendingFileConsumer = null;
+                _pendingFileConsumerKey = null;
+                _pendingFileTransferId = 0;
+            }
+            bool wasActive = _pendingFileActive;
+            _pendingFileActive = false;
+            // 占位仍在剪贴板上但已无数据来源：必须移除，否则粘贴会拿到永远渲染不出来的空 CF_HDROP
+            if (wasActive) ClearClipboardPlaceholder();
+            if (consumer != null && cancelConsumer)
+            {
+                FileClipboardConsumer removed;
+                if (!string.IsNullOrEmpty(key))
+                    _serverClipConsumers.TryRemove(key, out removed);
+                try { consumer.Cancel(); } catch { }
+            }
+            if (wasActive || consumer != null)
+                Logger.Info("Pending file clipboard cleared: {0}", reason);
+        }
+
+        /// <summary>移除本端放置的延迟渲染占位（仍由本窗口持有时）。</summary>
+        private void ClearClipboardPlaceholder()
+        {
+            IntPtr hwnd = _clipboardListenerHwnd;
+            if (hwnd == IntPtr.Zero) return;
+            if (GetClipboardOwner() != hwnd) return; // 已被其它程序接管
+            for (int attempt = 0; attempt < 3; attempt++)
+            {
+                if (OpenClipboard(hwnd))
+                {
+                    try { EmptyClipboard(); }
+                    finally { CloseClipboard(); }
+                    Logger.Info("Clipboard placeholder removed");
+                    return;
+                }
+                Thread.Sleep(50);
+            }
+            Logger.Warn("ClearClipboardPlaceholder: OpenClipboard failed");
+        }
+
+        /// <summary>
+        /// 系统请求渲染 CF_HDROP（用户粘贴）：此时才下载文件并填充真实数据。
+        /// 在 WM_RENDERFORMAT 中同步执行——系统已开启剪贴板会话，不能再次 OpenClipboard。
+        /// </summary>
+        private void RenderPendingFileClipboard(int timeoutMs)
+        {
+            FileClipboardConsumer consumer;
+            uint transferId;
+            lock (_pendingFileLock)
+            {
+                consumer = _pendingFileConsumer;
+                transferId = _pendingFileTransferId;
+            }
+            if (consumer == null)
+            {
+                Logger.Warn("Clipboard render requested but no pending file transfer — clearing the placeholder");
+                _pendingFileActive = false;
+                return;
+            }
+
+            Logger.Info("Clipboard render requested: downloading (transferId={0}, timeout={1}ms)",
+                transferId, timeoutMs);
+            string[] paths;
+            bool ok = consumer.EnsureDownloaded(timeoutMs, out paths);
+            if (!ok || paths == null || paths.Length == 0)
+            {
+                Logger.Warn("Clipboard render: file download failed or timed out");
+                ClearPendingFileClipboard("render-failed", true);
+                return;
+            }
+
+            IntPtr hDrop = EasyRDP.Core.Clipboard.DropFilesBuilder.Build(paths);
+            if (hDrop == IntPtr.Zero)
+            {
+                ClearPendingFileClipboard("build-dropfiles-failed", true);
+                return;
+            }
+            if (SetClipboardData((uint)EasyRDP.Core.Clipboard.DropFilesBuilder.CF_HDROP, hDrop) == IntPtr.Zero)
+            {
+                System.Runtime.InteropServices.Marshal.FreeHGlobal(hDrop);
+                Logger.Warn("Clipboard render: SetClipboardData failed (err={0})",
+                    System.Runtime.InteropServices.Marshal.GetLastWin32Error());
+                ClearPendingFileClipboard("set-clipboard-data-failed", true);
+                return;
+            }
+
+            _pendingFileActive = false; // 剪贴板现在持有真实数据，不能按占位清理
+            ClearPendingFileClipboard("rendered", false);
+            _lastServerClipboardFilesSig = string.Join("|", paths);
+            Logger.Info("Clipboard render: {0} file(s) provided", paths.Length);
+        }
+
+        /// <summary>
+        /// 在 STA 线程把已下载的文件填充到剪贴板（Ctrl+V 预取快路径：先于系统渲染请求完成）。
+        /// 占位已不在本端（其他程序接管剪贴板）时放弃，避免抢占用户新复制的内容。
+        /// </summary>
+        private void ApplyClipboardFilesOnSta(string[] paths)
+        {
+            if (paths == null || paths.Length == 0) return;
+            if (!_pendingFileActive) return;
+            IntPtr hwnd = _clipboardListenerHwnd;
+            if (hwnd == IntPtr.Zero) return;
+
+            if (!OpenClipboard(hwnd))
+            {
+                Logger.Warn("ApplyClipboardFilesOnSta: OpenClipboard failed (err={0})",
+                    System.Runtime.InteropServices.Marshal.GetLastWin32Error());
+                return;
+            }
+            try
+            {
+                IntPtr hDrop = EasyRDP.Core.Clipboard.DropFilesBuilder.Build(paths);
+                if (hDrop == IntPtr.Zero) return;
+                EmptyClipboard();
+                if (SetClipboardData((uint)EasyRDP.Core.Clipboard.DropFilesBuilder.CF_HDROP, hDrop) == IntPtr.Zero)
+                {
+                    System.Runtime.InteropServices.Marshal.FreeHGlobal(hDrop);
+                    Logger.Warn("ApplyClipboardFilesOnSta: SetClipboardData failed (err={0})",
+                        System.Runtime.InteropServices.Marshal.GetLastWin32Error());
+                    return;
+                }
+                _pendingFileActive = false;
+                EasyRDP.Core.ClipboardOwnerHelper.SetOwnerFlag(EasyRDP.Core.ClipboardOwnerHelper.SideHost);
+                _lastServerClipboardFilesSig = string.Join("|", paths);
+                ClearPendingFileClipboard("filled-ahead-of-paste", false);
+                Logger.Info("File clipboard filled ahead of paste: {0} file(s)", paths.Length);
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn(ex, "ApplyClipboardFilesOnSta failed");
+            }
+            finally
+            {
+                CloseClipboard();
+            }
+        }
+
+        /// <summary>
+        /// 输入侧 Ctrl+V 快路径：延迟渲染占位存在时，先下载文件再回放 V 键，
+        /// 避免资源管理器在占位为空时粘贴失败（右键粘贴仍走 WM_RENDERFORMAT 兜底）。
+        /// </summary>
+        /// <returns>true 表示该按键已被拦截，不应再转发给输入模拟器。</returns>
+        private bool TryHandleClipboardPasteKey(SessionInfo info, InputEventMessage msg)
+        {
+            const int VkControl = 0x11;
+            const int VkLControl = 0xA2;
+            const int VkRControl = 0xA3;
+            const int VkV = 0x56;
+
+            if (msg.Type == InputEventType.KeyDown)
+            {
+                if (msg.KeyCode == VkControl || msg.KeyCode == VkLControl || msg.KeyCode == VkRControl)
+                {
+                    _ctrlKeyDown = true;
+                    return false;
+                }
+                if (msg.KeyCode == VkV && _ctrlKeyDown && _pendingFileActive)
+                {
+                    BeginPastePrefetch(info);
+                    _pasteKeyHeld = true;
+                    Logger.Info("Ctrl+V detected — holding the key until the clipboard files are ready");
+                    return true;
+                }
+            }
+            else if (msg.Type == InputEventType.KeyUp)
+            {
+                if (msg.KeyCode == VkControl || msg.KeyCode == VkLControl || msg.KeyCode == VkRControl)
+                {
+                    _ctrlKeyDown = false;
+                    return false;
+                }
+                if (msg.KeyCode == VkV && _pasteKeyHeld)
+                {
+                    // KeyUp 也扣住：下载完成时统一回放一次完整按键
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /// <summary>后台预取文件，完成后在 STA 线程填充剪贴板并回放 V 键。</summary>
+        private void BeginPastePrefetch(SessionInfo info)
+        {
+            if (Interlocked.Exchange(ref _pastePrefetching, 1) != 0)
+                return;
+
+            FileClipboardConsumer consumer;
+            lock (_pendingFileLock) { consumer = _pendingFileConsumer; }
+            if (consumer == null)
+            {
+                Interlocked.Exchange(ref _pastePrefetching, 0);
+                _pasteKeyHeld = false;
+                return;
+            }
+
+            System.Threading.ThreadPool.QueueUserWorkItem(state =>
+            {
+                try
+                {
+                    string[] paths;
+                    bool ok = consumer.EnsureDownloaded(30000, out paths);
+                    if (ok && paths != null && paths.Length > 0)
+                    {
+                        _clipboardFileRenderDone.Reset();
+                        _clipboardFileRenderQueue.Enqueue(paths);
+                        _clipboardSignal.Set();
+                        // 等 STA 线程真正写入剪贴板（最多 3 秒），再回放按键
+                        _clipboardFileRenderDone.Wait(3000);
+                    }
+                    else
+                    {
+                        Logger.Warn("Ctrl+V prefetch failed — replaying the key anyway");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.Warn(ex, "Ctrl+V prefetch failed");
+                }
+                finally
+                {
+                    Interlocked.Exchange(ref _pastePrefetching, 0);
+                    _pasteKeyHeld = false;
+                    try
+                    {
+                        if (info != null && info.Input != null)
+                            info.Input.InjectKeyTap(EasyDesk.Core.Models.VirtualKeyCode.VK_V);
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Warn(ex, "Replay V key failed");
+                    }
+                }
+            });
         }
 
         /// <summary>
@@ -2271,6 +2744,15 @@ namespace EasyRDP.Server.Wpf.Services
             }
             // 清理 per-session Consumer：Cancel 正在进行的下载
             string sessionPrefix = sessionId + "_";
+            // 延迟渲染：该会话待消费的文件作废（否则粘贴会去下载一个已断开的传输）
+            bool pendingForSession;
+            lock (_pendingFileLock)
+            {
+                pendingForSession = _pendingFileConsumerKey != null
+                    && _pendingFileConsumerKey.StartsWith(sessionPrefix);
+            }
+            if (pendingForSession)
+                ClearPendingFileClipboard("session-disconnected", true);
             foreach (var kv in _serverClipConsumers)
             {
                 if (kv.Key.StartsWith(sessionPrefix))

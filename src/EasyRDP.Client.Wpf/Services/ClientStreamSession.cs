@@ -359,12 +359,6 @@ namespace EasyRDP.Client.Wpf.Services
         public event Action<string> ClipboardReceived;
 
         /// <summary>
-        /// 收到服务端发来的文件剪贴板传输完成事件。订阅者必须在 UI 线程（STA）调用 Clipboard.SetFiles。
-        /// 参数为客户端本地临时文件的路径数组。
-        /// </summary>
-        public event Action<string[]> FileClipboardReceived;
-
-        /// <summary>
         /// 文件剪贴板下载进度事件：(downloadedBytes, totalBytes)。
         /// 在下载线程触发，订阅者需自行 marshal 到 UI 线程。
         /// 用于 UI 进度条显示。
@@ -376,6 +370,18 @@ namespace EasyRDP.Client.Wpf.Services
         /// 参数为完整的 CF_DIB 字节数组。
         /// </summary>
         public event Action<byte[]> ImageClipboardReceived;
+
+        /// <summary>
+        /// 服务端复制了文件（仅元信息到达）：VM 据此放置延迟渲染占位，
+        /// 真正粘贴时再取 consumer 下载。
+        /// </summary>
+        public event Action<uint> FilePasteOffered;
+
+        /// <summary>
+        /// 文件通道发送委托（由 VM 注入，优先走独立通道；未注入时回退主连接）。
+        /// 参数：MessageType 与 payload，返回是否已发送。
+        /// </summary>
+        public Func<byte, byte[], bool> FileChannelSend { get; set; }
 
         /// <summary>
         /// 收到文件传输协议消息（文件通道未建立时服务端会回退主连接）。
@@ -736,31 +742,33 @@ namespace EasyRDP.Client.Wpf.Services
         }
 
         /// <summary>
-        /// 处理 ClipFormatList（延迟渲染）：服务端发来的文件元信息广播。
-        /// 创建 FileClipboardConsumer 并启动按需下载，下载完成后触发 FileClipboardReceived 事件。
+        /// 收到 ClipFormatList（延迟渲染）：服务端用户复制了文件，只登记元信息，
+        /// 不立即下载；等本机真正粘贴（WM_RENDERFORMAT）或 Ctrl+V 时再由 VM 触发下载。
         /// </summary>
         private void HandleClipFormatList(byte[] data)
         {
             try
             {
                 var msg = ClipFormatListMessage.Unpack(data);
-                Logger.Info("ClipFormatList received: transferId={0} fileCount={1}",
+                Logger.Info("ClipFormatList received (delayed): transferId={0} fileCount={1}",
                     msg.TransferId, msg.Files.Count);
 
-                // 捕获 transport 局部变量，避免 Stop() 把 _transport 置 null 后，
-                // Consumer 后台线程调用 sendAction 时出现 NullReferenceException
-                var transport = _transport;
-                if (transport == null)
+                if (_transport == null)
                 {
-                    Logger.Warn("HandleClipFormatList: transport is null, cannot start download");
+                    Logger.Warn("HandleClipFormatList: transport is null, cannot stage the transfer");
                     return;
                 }
 
                 var consumer = new FileClipboardConsumer(msg.TransferId, msg.Files, "client",
                     (sid, payload) =>
                     {
-                        // 用局部变量 transport，而非字段 _transport
-                        transport.Send(Framing.BuildMessage((byte)MessageType.ClipFileContentsReq, payload));
+                        // 优先走文件通道（不与视频流抢带宽），未建立时回退主连接
+                        var channelSend = FileChannelSend;
+                        if (channelSend != null && channelSend((byte)MessageType.ClipFileContentsReq, payload))
+                            return;
+                        var transport = _transport;
+                        if (transport != null)
+                            transport.Send(Framing.BuildMessage((byte)MessageType.ClipFileContentsReq, payload));
                     },
                     localPaths =>
                     {
@@ -770,16 +778,14 @@ namespace EasyRDP.Client.Wpf.Services
 
                         Logger.Info("File clipboard download complete: transferId={0} files={1}",
                             msg.TransferId, localPaths != null ? localPaths.Length : 0);
-                        // 无论成功失败都触发（空数组=全部失败）：VM 据此清除"传输中"状态
-                        var handler = FileClipboardReceived;
-                        if (handler != null)
-                            handler(localPaths);
+                        // 进度收尾：通知 UI 传输结束（失败时 VM 会清除进度条）
+                        var progressHandler = FileClipboardProgress;
+                        if (progressHandler != null)
+                            progressHandler(localPaths != null ? 1 : 0, 1);
                     });
 
                 _clipConsumers[msg.TransferId] = consumer;
 
-                // 转发 Consumer 进度事件到本 Session 的 FileClipboardProgress 事件
-                // 订阅者（如 MainWindowViewModel）用于更新 UI 进度条
                 consumer.ProgressChanged += (downloaded, total) =>
                 {
                     var handler = FileClipboardProgress;
@@ -787,12 +793,34 @@ namespace EasyRDP.Client.Wpf.Services
                         handler(downloaded, total);
                 };
 
-                consumer.StartDownload();
+                // 不下载：由 VM 在剪贴板放置延迟渲染占位，粘贴时才调用 EnsureDownloaded
+                var offered = FilePasteOffered;
+                if (offered != null)
+                    offered(msg.TransferId);
             }
             catch (Exception ex)
             {
                 Logger.Warn(ex, "HandleClipFormatList failed");
             }
+        }
+
+        /// <summary>取指定传输的延迟下载 consumer（VM 用于粘贴时按需下载）。</summary>
+        public FileClipboardConsumer GetClipConsumer(uint transferId)
+        {
+            FileClipboardConsumer consumer;
+            return _clipConsumers.TryGetValue(transferId, out consumer) ? consumer : null;
+        }
+
+        /// <summary>
+        /// 文件通道上收到的剪贴板文件分块消息（服务端的 FileContentsRes 响应）：
+        /// 转给与主连接相同的处理器，使延迟下载可以走独立通道。
+        /// </summary>
+        public void HandleClipboardChannelMessage(byte messageType, byte[] payload)
+        {
+            if (messageType == (byte)MessageType.ClipFileContentsReq)
+                HandleClipFileContentsReq(payload);
+            else if (messageType == (byte)MessageType.ClipFileContentsRes)
+                HandleClipFileContentsRes(payload);
         }
 
         /// <summary>

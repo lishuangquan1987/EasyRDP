@@ -41,6 +41,25 @@ namespace EasyRDP.Server.Wpf.Services
             Logger.Info("Input display offset set to ({0},{1})", offsetX, offsetY);
         }
 
+        /// <summary>
+        /// 注入一次完整按键（按下 + 抬起）。用于剪贴板 Ctrl+V 快路径：
+        /// 客户端按键被扣住，文件就绪后由服务端主动回放。
+        /// </summary>
+        public void InjectKeyTap(VirtualKeyCode key)
+        {
+            if (_disposed) return;
+            try
+            {
+                _inputSimulator.SendKeyDown(key);
+                _inputSimulator.SendKeyUp(key);
+                Logger.Info("Injected key tap after clipboard prefetch: vk=0x{0:X2}", (int)key);
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn(ex, "InjectKeyTap failed: vk=0x{0:X2}", (int)key);
+            }
+        }
+
         public bool HandleInput(InputEventMessage msg)
         {
             if (_disposed) return false;

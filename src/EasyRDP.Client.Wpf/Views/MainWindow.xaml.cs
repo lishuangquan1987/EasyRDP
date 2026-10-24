@@ -35,6 +35,9 @@ public partial class MainWindow : Window
     private const uint MONITOR_DEFAULTTONEAREST = 0x00000002;
     // 剪贴板变化通知（及时性）：WM_CLIPBOARDUPDATE（Vista/Win7 起可用）
     private const int WM_CLIPBOARDUPDATE = 0x031D;
+    // 剪贴板延迟渲染：粘贴时才由系统索要真实数据（WM_RENDERFORMAT=0x0305）
+    private const int WM_RENDERFORMAT = 0x0305;
+    private const int WM_RENDERALLFORMATS = 0x0306;
 
     [DllImport("user32.dll")]
     private static extern bool AddClipboardFormatListener(IntPtr hwnd);
@@ -222,6 +225,9 @@ public partial class MainWindow : Window
         if (source != null)
         {
             source.AddHook(WndProc);
+            // 延迟渲染的剪贴板所有者窗口：系统会向本窗口发 WM_RENDERFORMAT
+            if (_vm != null)
+                _vm.ClipboardOwnerHandle = source.Handle;
             // 注册剪贴板变化监听：复制/剪切时收到 WM_CLIPBOARDUPDATE，及时同步到服务端
             try
             {
@@ -244,6 +250,24 @@ public partial class MainWindow : Window
         {
             // 及时通知 ViewModel 检查并同步剪贴板（UI 线程）
             _vm.NotifyLocalClipboardChanged();
+            return IntPtr.Zero;
+        }
+        if (msg == WM_RENDERFORMAT)
+        {
+            // 剪贴板文件延迟渲染：系统此时索要真实数据（用户正在粘贴）
+            uint format = (uint)wParam.ToInt64();
+            bool handledByVm = _vm != null && _vm.HandleClipboardRenderRequest(format);
+            if (handledByVm)
+            {
+                handled = true;
+                return IntPtr.Zero;
+            }
+            return IntPtr.Zero;
+        }
+        if (msg == WM_RENDERALLFORMATS)
+        {
+            _vm?.HandleClipboardRenderAllFormats();
+            handled = true;
             return IntPtr.Zero;
         }
         if (msg == WM_GETMINMAXINFO && _fullscreen)

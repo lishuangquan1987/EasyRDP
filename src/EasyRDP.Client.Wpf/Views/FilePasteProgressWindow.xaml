@@ -1,0 +1,16 @@
+<Window x:Class="EasyRDP.Client.Wpf.Views.FilePasteProgressWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="EasyRDP" Width="430" Height="150"
+        WindowStyle="ToolWindow" ResizeMode="NoResize" ShowInTaskbar="False"
+        WindowStartupLocation="CenterOwner"
+        Background="{StaticResource WindowBackgroundBrush}">
+    <StackPanel Margin="22,18">
+        <TextBlock Text="Preparing files for paste…" FontSize="15" FontWeight="SemiBold"
+                   Foreground="{StaticResource TextPrimaryBrush}"/>
+        <ProgressBar Height="10" Margin="0,16,0,10" Maximum="100"
+                     Value="{Binding ClipboardProgressValue, Mode=OneWay}"/>
+        <TextBlock Text="{Binding ClipboardProgressText}" FontSize="12" Foreground="#6B7A88"
+                   TextTrimming="CharacterEllipsis"/>
+    </StackPanel>
+</Window>

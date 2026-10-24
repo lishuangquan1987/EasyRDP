@@ -57,6 +57,10 @@ namespace EasyRDP.Core.Protocol
 #endif
         private int _streamIdSeq;
         private volatile bool _cancelled;
+        // 延迟渲染：下载完成（成功或失败）或取消时唤醒等待者，供 WM_RENDERFORMAT 同步取文件
+        private readonly ManualResetEventSlim _finished = new ManualResetEventSlim(false);
+        private int _started;
+        private volatile string[] _resultPaths;
 
 #if NET40
         /// <summary>net40 单块请求的等待状态：响应数据 + 完成信号。</summary>
@@ -105,12 +109,44 @@ namespace EasyRDP.Core.Protocol
         }
 
         /// <summary>
-        /// 启动后台下载线程。在接收线程调用（收到 ClipFormatList 后立即启动）。
-        /// 下载完成后在后台线程触发 onFinish 回调。
+        /// 启动后台下载线程（幂等）。在接收线程调用（收到 ClipFormatList 后立即启动），
+        /// 或在延迟渲染需要文件时由 EnsureDownloaded 触发。
         /// </summary>
         public void StartDownload()
         {
+            if (Interlocked.Exchange(ref _started, 1) != 0)
+                return;
             ThreadPool.QueueUserWorkItem(state => DownloadFiles());
+        }
+
+        /// <summary>
+        /// 等待下载完成并返回本地文件路径（用于剪贴板延迟渲染：系统请求 CF_HDROP 时才下载）。
+        /// 首次调用会自动启动下载。
+        /// </summary>
+        /// <param name="timeoutMs">等待上限（毫秒）。</param>
+        /// <param name="paths">下载完成后的本地文件路径；失败/超时为空数组。</param>
+        /// <returns>true 表示至少下载到一个文件。</returns>
+        public bool EnsureDownloaded(int timeoutMs, out string[] paths)
+        {
+            paths = new string[0];
+            StartDownload();
+            if (!_finished.Wait(timeoutMs))
+            {
+                Logger.Warn("FileClipboardConsumer: download not finished within {0}ms (transferId={1})",
+                    timeoutMs, _transferId);
+                return false;
+            }
+            string[] result = _resultPaths;
+            if (result == null || result.Length == 0)
+                return false;
+            paths = result;
+            return true;
+        }
+
+        /// <summary>下载是否已结束（成功/失败/取消都会置位）。</summary>
+        public bool IsFinished
+        {
+            get { return _finished.IsSet; }
         }
 
         /// <summary>
@@ -152,6 +188,8 @@ namespace EasyRDP.Core.Protocol
         public void Cancel()
         {
             _cancelled = true;
+            // 唤醒 EnsureDownloaded 等待者（下载线程可能还没启动）
+            try { _finished.Set(); } catch { }
 #if NET40
             // 唤醒所有等待中的 worker，让其尽快退出
             foreach (var kv in _net40Pending)
@@ -255,11 +293,13 @@ namespace EasyRDP.Core.Protocol
                 // 无论成功失败都通知完成（空数组=全部失败），让 UI 清除"传输中"状态
                 if (!_cancelled)
                 {
+                    string[] completedPaths = localPaths.ToArray();
+                    _resultPaths = completedPaths;
                     Logger.Info("FileClipboardConsumer download finished: transferId={0} files={1}{2}",
-                        _transferId, localPaths.Count, localPaths.Count == 0 ? " (all failed)" : "");
+                        _transferId, completedPaths.Length, completedPaths.Length == 0 ? " (all failed)" : "");
                     if (_onFinish != null)
                     {
-                        try { _onFinish(localPaths.ToArray()); }
+                        try { _onFinish(completedPaths); }
                         catch (Exception ex) { Logger.Warn(ex, "FileClipboardConsumer onFinish callback failed"); }
                     }
                 }
@@ -267,6 +307,11 @@ namespace EasyRDP.Core.Protocol
             catch (Exception ex)
             {
                 Logger.Warn(ex, "FileClipboardConsumer DownloadFiles failed: transferId={0}", _transferId);
+            }
+            finally
+            {
+                // 唤醒延迟渲染等待者：失败时路径为空，调用方据此放弃本次粘贴
+                try { _finished.Set(); } catch { }
             }
         }
 

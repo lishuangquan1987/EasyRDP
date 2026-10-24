@@ -95,6 +95,19 @@ namespace EasyRDP.Client.Wpf.ViewModels
         private string _lastClipboardText = "";
         // 上次文件剪贴板签名（拼接路径），用于检测变化 + 防回环
         private string _lastClipboardFilesSig = "";
+
+        // ── 剪贴板文件延迟渲染（服务端复制 → 本机粘贴时才下载）──
+        // 粘贴时若下载尚未完成，先快速等 300ms；仍无结果再弹模态进度窗
+        private const int PasteFastWaitMs = 300;
+        private FileClipboardConsumer? _pendingClipConsumer;
+        private bool _pendingClipActive;
+        private uint _pendingClipTransferId;
+        // 渲染重入保护：系统/本程序可能同时读取剪贴板
+        private bool _renderingClipboardFiles;
+
+        /// <summary>本窗口句柄（延迟渲染的剪贴板所有者），由 View 在窗口创建后注入。</summary>
+        public IntPtr ClipboardOwnerHandle { get; set; }
+
         // 上次图片剪贴板签名（CF_DIB 字节数 + 前 32 字节哈希），用于检测变化 + 防回环
         private string _lastClipboardImageSig = "";
 
@@ -1243,7 +1256,9 @@ namespace EasyRDP.Client.Wpf.ViewModels
             // 订阅服务端→客户端剪贴板同步事件：服务端用户复制 → 客户端自动设置本地剪贴板
             _streamSession.ClipboardReceived += OnClipboardReceivedFromServer;
             // 订阅文件剪贴板同步事件：服务端用户复制文件 → 客户端写入临时目录并设置 CF_HDROP
-            _streamSession.FileClipboardReceived += OnFileClipboardReceivedFromServer;
+            // 文件剪贴板：服务端复制文件时只发元信息，本端粘贴时才下载（延迟渲染）
+            _streamSession.FilePasteOffered += OnFilePasteOffered;
+            _streamSession.FileChannelSend = SendFileMessage;
             // 订阅文件剪贴板下载进度事件：更新 UI 进度条
             _streamSession.FileClipboardProgress += OnFileClipboardProgress;
             // 订阅图片剪贴板同步事件：服务端用户复制图片 → 客户端设置 CF_DIB
@@ -1626,8 +1641,9 @@ namespace EasyRDP.Client.Wpf.ViewModels
                 var provider = new FileClipboardProvider(transferId, filePaths,
                     (sid, payload) =>
                     {
-                        // 每个响应作为完整消息发送，线上交错时互不干扰。
-                        transport.Send(Framing.BuildMessage((byte)MessageType.ClipFileContentsRes, payload));
+                        // 优先文件通道（不与视频流竞争），回退主连接
+                        if (!SendFileMessage((byte)MessageType.ClipFileContentsRes, payload))
+                            transport.Send(Framing.BuildMessage((byte)MessageType.ClipFileContentsRes, payload));
                     });
                 _streamSession?.SetFileClipboardProvider(provider);
 
@@ -1659,6 +1675,8 @@ namespace EasyRDP.Client.Wpf.ViewModels
             {
                 try
                 {
+                    // 文本剪贴板覆盖文件占位：放弃延迟渲染
+                    ClearPendingFileClipboard("remote-text-clipboard", true);
                     // 先更新 lastClipboardText，避免 _clipboardTimer 检测到变化触发回发
                     _lastClipboardText = text;
                     TrySetClipboard(() => Clipboard.SetText(text), "text clipboard");
@@ -1672,50 +1690,165 @@ namespace EasyRDP.Client.Wpf.ViewModels
         }
 
         /// <summary>
-        /// 服务端→客户端文件剪贴板同步回调。文件数据已由 FileClipboardConsumer 按需下载并写入临时目录，
-        /// 这里只需在 UI 线程（STA）调用 Clipboard.SetFileDropList 设置 CF_HDROP。
-        /// 防回环：设置 Owner Flag + 更新 _lastClipboardFilesSig，避免 _clipboardTimer 检测到文件变化又发回服务端。
+        /// 服务端复制了文件（仅元信息到达）：登记 consumer 并在剪贴板放置延迟渲染占位。
+        /// 真正的下载推迟到用户粘贴时（WM_RENDERFORMAT 或 Ctrl+V 触发的渲染请求）。
         /// </summary>
-        private void OnFileClipboardReceivedFromServer(string[] localFilePaths)
+        private void OnFilePasteOffered(uint transferId)
         {
-            if (!_running) return; // 断连后忽略，避免设置剪贴板
+            if (!_running) return;
             _dispatcher.BeginInvoke(new Action(() =>
             {
+                if (!_running) return;
+                var session = _streamSession;
+                var consumer = session != null ? session.GetClipConsumer(transferId) : null;
+                if (consumer == null)
+                {
+                    Logger.Warn("File paste offered but consumer missing: transferId={0}", transferId);
+                    return;
+                }
+
+                if (ClipboardOwnerHandle == IntPtr.Zero)
+                {
+                    Logger.Warn("File paste offered before the window handle was available");
+                    return;
+                }
+
+                // 取消上一个尚未消费的占位（用户连续复制）
+                ClearPendingFileClipboard("superseded", true);
+                _pendingClipConsumer = consumer;
+                _pendingClipTransferId = transferId;
+
+                if (ClipboardNative.SetDelayedPlaceholder(ClipboardOwnerHandle))
+                {
+                    _pendingClipActive = true;
+                    // 防回环：标记来源 + 签名占位，CheckLocalClipboard 期间直接跳过
+                    EasyRDP.Core.ClipboardOwnerHelper.SetOwnerFlag(EasyRDP.Core.ClipboardOwnerHelper.SideClient);
+                    _lastClipboardFilesSig = "__pending_clipboard_files__";
+                    Logger.Info("Delayed file clipboard placeholder installed (transferId={0})", transferId);
+                }
+                else
+                {
+                    Logger.Warn("Failed to install the delayed file clipboard placeholder (transferId={0})", transferId);
+                    _pendingClipConsumer = null;
+                }
+            }));
+        }
+
+        /// <summary>
+        /// 处理 WM_RENDERFORMAT（用户粘贴时才索要数据）：下载文件并填充真实 CF_HDROP。
+        /// 必须同步完成——系统当前已开启剪贴板会话。
+        /// </summary>
+        /// <returns>true 表示已处理（调用方不应再调用默认窗口过程）。</returns>
+        public bool HandleClipboardRenderRequest(uint format)
+        {
+            if (format != (uint)EasyRDP.Core.Clipboard.DropFilesBuilder.CF_HDROP) return false;
+            if (!_pendingClipActive) return false;
+            // 同一剪贴板数据可能被多处同时读取（系统剪贴板服务/本程序轮询），只处理一次
+            if (_renderingClipboardFiles) return false;
+
+            var consumer = _pendingClipConsumer;
+            if (consumer == null)
+            {
+                ClearPendingFileClipboard("render-without-consumer", false);
+                return false;
+            }
+
+            _renderingClipboardFiles = true;
+            try
+            {
+                return RenderPendingFileClipboardCore(consumer);
+            }
+            finally
+            {
+                _renderingClipboardFiles = false;
+            }
+        }
+
+        /// <summary>实际执行：等待下载完成并把真实 CF_HDROP 交给系统（已在渲染会话中）。</summary>
+        private bool RenderPendingFileClipboardCore(FileClipboardConsumer consumer)
+        {
+            Logger.Info("Clipboard render requested: downloading files (transferId={0})", _pendingClipTransferId);
+            string[] paths;
+            if (!consumer.EnsureDownloaded(PasteFastWaitMs, out paths))
+            {
+                // 未就绪：弹模态进度窗（内部泵消息，下载线程继续跑），传输结束自动关闭
+                IsClipboardTransferring = true;
+                ClipboardProgressText = "Preparing files for paste…";
+                ClipboardProgressValue = 0;
                 try
                 {
-                    if (localFilePaths == null || localFilePaths.Length == 0)
-                    {
-                        // 传输失败（文件被占用/读取失败等）：清除"传输中"状态，避免进度条卡在 100%
-                        IsClipboardTransferring = false;
-                        ClipboardProgressValue = 0;
-                        ClipboardProgressText = "";
-                        Logger.Warn("File clipboard transfer failed (no files downloaded)");
-                        return;
-                    }
-                    // WPF Clipboard.SetFileDropList 需要 System.Collections.Specialized.StringCollection
-                    var fileList = new System.Collections.Specialized.StringCollection();
-                    fileList.AddRange(localFilePaths);
-                    // 重试：CLIPBRD_E_CANT_OPEN 是剪贴板被其他线程短暂占用的竞态（实测出现）
-                    TrySetClipboard(() => Clipboard.SetFileDropList(fileList), "file clipboard");
-
-                    // Owner Flag 防回环：标记为 SideClient（表示"由客户端从服务端同步过来"），
-                    // _clipboardTimer 轮询看到此标记即跳过，避免回发到服务端
-                    EasyRDP.Core.ClipboardOwnerHelper.SetOwnerFlag(EasyRDP.Core.ClipboardOwnerHelper.SideClient);
-                    _lastClipboardFilesSig = string.Join("|", localFilePaths);
-
-                    Logger.Info("File clipboard set from server: count={0}", localFilePaths.Length);
-                    foreach (var p in localFilePaths)
-                        Logger.Info("  - {0}", p);
-
-                    // 文件已设置到剪贴板，隐藏进度条
-                    IsClipboardTransferring = false;
+                    var progress = new Views.FilePasteProgressWindow(this, () => consumer.IsFinished);
+                    if (Application.Current != null && Application.Current.MainWindow != null)
+                        progress.Owner = Application.Current.MainWindow;
+                    progress.ShowDialog();
                 }
                 catch (Exception ex)
                 {
-                    Logger.Warn(ex, "File clipboard set from server failed");
-                    IsClipboardTransferring = false;
+                    Logger.Warn(ex, "File paste progress window failed");
                 }
-            }));
+                if (!consumer.EnsureDownloaded(0, out paths))
+                {
+                    Logger.Warn("Clipboard render: file download failed or timed out");
+                    ClearPendingFileClipboard("render-failed", true);
+                    IsClipboardTransferring = false;
+                    ClipboardProgressText = "";
+                    ClipboardProgressValue = 0;
+                    return false;
+                }
+            }
+
+            IntPtr hDrop = EasyRDP.Core.Clipboard.DropFilesBuilder.Build(paths);
+            if (hDrop == IntPtr.Zero)
+            {
+                ClearPendingFileClipboard("build-dropfiles-failed", true);
+                return false;
+            }
+            if (!ClipboardNative.SetFilesInRenderSession(hDrop))
+            {
+                System.Runtime.InteropServices.Marshal.FreeHGlobal(hDrop);
+                Logger.Warn("Clipboard render: SetClipboardData failed (err={0})",
+                    System.Runtime.InteropServices.Marshal.GetLastWin32Error());
+                ClearPendingFileClipboard("set-clipboard-data-failed", true);
+                return false;
+            }
+
+            _pendingClipActive = false;
+            _pendingClipConsumer = null;
+            // 此刻剪贴板由系统打开（渲染会话），不能调用 SetOwnerFlag；用签名防回环即可
+            _lastClipboardFilesSig = string.Join("|", paths);
+            IsClipboardTransferring = false;
+            ClipboardProgressText = "";
+            ClipboardProgressValue = 0;
+            Logger.Info("Clipboard render: {0} file(s) provided", paths.Length);
+            foreach (string p in paths)
+                Logger.Info("  - {0}", p);
+            return true;
+        }
+
+        /// <summary>WM_RENDERALLFORMATS：即将失去剪贴板所有权，放弃尚未渲染的占位。</summary>
+        public void HandleClipboardRenderAllFormats()
+        {
+            if (!_pendingClipActive) return;
+            ClearPendingFileClipboard("render-all-formats", true);
+        }
+
+        /// <summary>清理延迟渲染状态；cancelConsumer=true 时取消尚未开始的下载。</summary>
+        private void ClearPendingFileClipboard(string reason, bool cancelConsumer)
+        {
+            var consumer = _pendingClipConsumer;
+            _pendingClipConsumer = null;
+            _pendingClipTransferId = 0;
+            bool wasActive = _pendingClipActive;
+            _pendingClipActive = false;
+            // 占位仍在剪贴板上但已无数据来源：移除，避免粘贴拿到永远渲染不出来的空 CF_HDROP
+            if (wasActive && ClipboardOwnerHandle != IntPtr.Zero)
+                ClipboardNative.ClearIfOwner(ClipboardOwnerHandle);
+            if (consumer != null && cancelConsumer)
+            {
+                try { consumer.Cancel(); } catch { }
+            }
+            if (wasActive || consumer != null)
+                Logger.Info("Pending file clipboard cleared: {0}", reason);
         }
 
         /// <summary>
@@ -1760,6 +1893,16 @@ namespace EasyRDP.Client.Wpf.ViewModels
             _checkingClipboard = true;
             try
             {
+                // 延迟渲染占位期间禁止读取剪贴板（ContainsFileDropList 会让系统索要数据）。
+                // 若剪贴板已被其它程序接管，则放弃占位并继续常规同步。
+                if (_pendingClipActive)
+                {
+                    if (ClipboardOwnerHandle != IntPtr.Zero
+                        && ClipboardNative.GetOwner() == ClipboardOwnerHandle)
+                        return;
+                    ClearPendingFileClipboard("clipboard-taken-by-other-app", true);
+                }
+
                 bool hasText = Clipboard.ContainsText();
                 bool hasFiles = Clipboard.ContainsFileDropList();
                 bool hasImage = Clipboard.ContainsImage();
@@ -1947,6 +2090,8 @@ namespace EasyRDP.Client.Wpf.ViewModels
             {
                 try
                 {
+                    // 图片剪贴板覆盖文件占位：放弃延迟渲染
+                    ClearPendingFileClipboard("remote-image-clipboard", true);
                     // 通过 DataObject 直接设置 CF_DIB 原始字节，避免 BitmapSource 转换损失
                     var dataObj = new DataObject();
                     using (var ms = new System.IO.MemoryStream(dibBytes))
@@ -2154,9 +2299,15 @@ namespace EasyRDP.Client.Wpf.ViewModels
             Task.Run(() => OpenFileChannel(host, port, sessionToken));
         }
 
-        /// <summary>主连接上收到的文件协议消息（通道未建立时的回退路径）。</summary>
+        /// <summary>主连接/文件通道上收到的文件或剪贴板文件分块消息。</summary>
         private void OnFileTransferMessage(byte messageType, byte[] payload)
         {
+            if (messageType == (byte)MessageType.ClipFileContentsReq
+                || messageType == (byte)MessageType.ClipFileContentsRes)
+            {
+                _streamSession?.HandleClipboardChannelMessage(messageType, payload);
+                return;
+            }
             var transfer = _fileTransfer;
             if (transfer != null) transfer.HandleMessage(messageType, payload);
         }
@@ -2424,6 +2575,11 @@ namespace EasyRDP.Client.Wpf.ViewModels
             }
             IsFileTransferVisible = false;
             SendFileCommand.RaiseCanExecuteChanged();
+
+            // 剪贴板文件延迟渲染：断连后不再有数据来源，清掉占位
+            ClearPendingFileClipboard("disconnect", true);
+            if (ClipboardOwnerHandle != IntPtr.Zero)
+                ClipboardNative.ClearIfOwner(ClipboardOwnerHandle);
 
             // 顺序修复：先断开传输（停止接收线程产生新消息），再停止会话。
             // 旧顺序反过来：会话 Stop 时接收线程仍可能在 ProcessVideoFrame 中调用
