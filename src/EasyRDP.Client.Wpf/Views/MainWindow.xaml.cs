@@ -842,14 +842,21 @@ public partial class MainWindow : Window
             _localCursorX, _localCursorY,
             RenderImage.ActualWidth, RenderImage.ActualHeight,
             _lastRemoteCursorX, _lastRemoteCursorY);
-        _vm.HandleMouseDown(e.ChangedButton);
+        // 精确坐标（含 DPI 换算）：服务端据此先定位再按下，避免落点偏移
+        var downPos = e.GetPosition(RenderImage);
+        _vm.HandleMouseDown(e.ChangedButton,
+            downPos.X * _dpiScaleX, downPos.Y * _dpiScaleY,
+            RenderImage.ActualWidth * _dpiScaleX, RenderImage.ActualHeight * _dpiScaleY);
     }
 
     /// <summary>将鼠标释放事件路由到 ViewModel，并释放鼠标捕获。</summary>
     private void RenderImage_PreviewMouseUp(object sender, MouseButtonEventArgs e)
     {
         RefreshLocalCursorPosition(e);
-        _vm.HandleMouseUp(e.ChangedButton);
+        var upPos = e.GetPosition(RenderImage);
+        _vm.HandleMouseUp(e.ChangedButton,
+            upPos.X * _dpiScaleX, upPos.Y * _dpiScaleY,
+            RenderImage.ActualWidth * _dpiScaleX, RenderImage.ActualHeight * _dpiScaleY);
         Mouse.Capture(null);
     }
 

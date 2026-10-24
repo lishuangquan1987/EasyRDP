@@ -30,6 +30,9 @@ namespace EasyRDP.Client.Wpf.Services
         // 最近一次实际发送给服务端的鼠标坐标（诊断用，点击时与本地位置/回显对比）
         private int _lastSentMouseX;
         private int _lastSentMouseY;
+        // 鼠标按键是否按下：拖动（画线/拖拽/缩放）期间每次都立即发送，
+        // 8ms 合并会造成位移跳跃，部分应用的拖动逻辑会忽略这种跳变
+        private volatile bool _buttonDown;
         private Timer _mouseFlushTimer;
         // 8ms ≈ 120Hz 合并发送：降低输入链路延迟（16ms 时鼠标回显最多多等 16ms）
         private const int MouseFlushIntervalMs = 8;
@@ -115,9 +118,21 @@ namespace EasyRDP.Client.Wpf.Services
                 _pendingMouseY = y;
                 _hasPendingMouse = true;
             }
+            // 拖动中：立即发送（保证连续位移，精细拖线不失步）
+            if (_buttonDown)
+            {
+                FlushPendingMouse();
+                return;
+            }
             // 及时性：距上次发送已超过 ~8ms 时立即发送，连续快速移动仍由定时器合并发送
             if (Stopwatch.GetTimestamp() - Volatile.Read(ref _lastMouseSendTicks) >= ImmediateFlushTicks)
                 FlushPendingMouse();
+        }
+
+        /// <summary>标记鼠标按键按下/抬起（按下期间移动不再合并发送）。</summary>
+        public void SetButtonDown(bool down)
+        {
+            _buttonDown = down;
         }
 
         /// <summary>立即发送待处理的鼠标移动（在鼠标按键/滚轮事件前调用，保证点击位置准确）。</summary>

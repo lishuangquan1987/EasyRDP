@@ -93,21 +93,17 @@ namespace EasyRDP.Server.Wpf.Services
                         int prevY = _lastRequestedY;
                         _lastRequestedX = absX;
                         _lastRequestedY = absY;
-                        if (_leftButtonDown)
+                        // 统一使用绝对定位：每个像素直接设置光标，不受系统鼠标加速影响，
+                        // 精细拖动（1px 细线、边框缩放）才能跟手。相对位移会被加速曲线放大/压缩。
+                        if (_leftButtonDown && (++_relativeMoveCounter % 20) == 0)
                         {
-                            int dx = absX - prevX;
-                            int dy = absY - prevY;
-                            if (dx == 0 && dy == 0) return true;
-                            // 每 20 次做一次绝对校正，抵消相对位移的累计取整误差
-                            if ((++_relativeMoveCounter % 20) == 0)
-                                _inputSimulator.SendMouseMove(absX, absY, true);
-                            else
-                                _inputSimulator.SendMouseMove(dx, dy, false);
-                            return true;
+                            Logger.Debug("DragMove abs=({0},{1}) from=({2},{3})", absX, absY, prevX, prevY);
                         }
-                        if ((_mouseMoveLogCounter++ % 20) == 0)
+                        else if ((_mouseMoveLogCounter++ % 20) == 0)
+                        {
                             Logger.Debug("MouseMove requested=({0},{1}) offset=({2},{3})",
                                 msg.X, msg.Y, _displayOffsetX, _displayOffsetY);
+                        }
                         _inputSimulator.SendMouseMove(absX, absY, true);
                         return true;
                     case InputEventType.MouseDown:
@@ -120,13 +116,19 @@ namespace EasyRDP.Server.Wpf.Services
                         Logger.Debug("MouseDown button={0} at ({1},{2}) lastRequested=({3},{4})",
                             msg.KeyCode, downX, downY, _lastRequestedX, _lastRequestedY);
                         if (msg.X != 0 || msg.Y != 0)
+                        {
                             _inputSimulator.SendMouseMove(downX, downY, true);
+                            // 关键：同步字段，否则拖动期间的增量/诊断基于过期坐标
+                            _lastRequestedX = downX;
+                            _lastRequestedY = downY;
+                        }
                         _inputSimulator.SendMouseButton((MouseButton)msg.KeyCode, true);
                         if (msg.KeyCode == (int)MouseButton.Left)
                         {
                             _leftButtonDown = true;
                             _relativeMoveCounter = 0;
                         }
+                        Logger.Debug("MouseDown button={0} at ({1},{2})", msg.KeyCode, downX, downY);
                         return true;
                     case InputEventType.MouseUp:
                         int upX = msg.X != 0 || msg.Y != 0 ? msg.X + _displayOffsetX : _lastRequestedX;
@@ -134,10 +136,15 @@ namespace EasyRDP.Server.Wpf.Services
                         Logger.Debug("MouseUp button={0} at ({1},{2}) lastRequested=({3},{4})",
                             msg.KeyCode, upX, upY, _lastRequestedX, _lastRequestedY);
                         if (msg.X != 0 || msg.Y != 0)
+                        {
                             _inputSimulator.SendMouseMove(upX, upY, true);
+                            _lastRequestedX = upX;
+                            _lastRequestedY = upY;
+                        }
                         _inputSimulator.SendMouseButton((MouseButton)msg.KeyCode, false);
                         if (msg.KeyCode == (int)MouseButton.Left)
                             _leftButtonDown = false;
+                        Logger.Debug("MouseUp button={0} at ({1},{2})", msg.KeyCode, upX, upY);
                         return true;
                     case InputEventType.MouseWheel:
                         _inputSimulator.SendMouseWheel(msg.WheelDelta);

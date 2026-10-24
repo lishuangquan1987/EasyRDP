@@ -2722,36 +2722,40 @@ namespace EasyRDP.Client.Wpf.ViewModels
             _inputSession.QueueMouseMove(sx, sy);
         }
 
-        public void HandleMouseDown(System.Windows.Input.MouseButton changedButton)
+        /// <summary>
+        /// 鼠标按下：使用**按下瞬间的精确映射坐标**（不能用最近一次节流发送的坐标——
+        /// 快速移动到 1px 细线上按下时，旧坐标可能偏 1~3px，落点已经在热区之外，
+        /// 表现为"鼠标形状已变成拖动/缩放，但拖不动"）。
+        /// </summary>
+        public void HandleMouseDown(System.Windows.Input.MouseButton changedButton,
+            double imageX, double imageY, double imageW, double imageH)
         {
             if (_inputSession == null || !_running) return;
-            // WPF MouseButton: Left=0 Right=1 Middle=2 XButton1=3 XButton2=4，
-            // EasyDesk MouseButton: Left=1 Right=2 Middle=3 XButton1=4 XButton2=5，
-            // 显式映射避免依赖枚举值相邻性（+1 脆弱）。
-            _inputSession.FlushPendingMouse(); // 先落地最新光标位置，保证点击位置准确
             int btn = MapMouseButton(changedButton);
             if (btn == 0) return;
-            // 携带映射坐标：服务端收到 MouseDown 后先移动光标到 (X,Y) 再点击，
-            // 避免光标因编码负载滞后导致点击落在旧位置（"点击无效果"假象）
-            int sentX, sentY;
-            _inputSession.GetLastSentMouse(out sentX, out sentY);
-            var msg = new InputEventMessage { Type = InputEventType.MouseDown, KeyCode = btn, X = sentX, Y = sentY };
+
+            int sx, sy;
+            _inputSession.MapCoordinates(imageX, imageY, imageW, imageH, out sx, out sy, ZoomMode);
+            _inputSession.SetButtonDown(true);
+            var msg = new InputEventMessage { Type = InputEventType.MouseDown, KeyCode = btn, X = sx, Y = sy };
             _inputSession.SendInput(msg);
-            Logger.Debug("Click down button={0} mapped=({1},{2})", changedButton, sentX, sentY);
+            Logger.Debug("Click down button={0} precise=({1},{2})", changedButton, sx, sy);
         }
 
-        public void HandleMouseUp(System.Windows.Input.MouseButton changedButton)
+        /// <summary>鼠标抬起：同样携带精确坐标，保证 Up 位置与 Down 一致。</summary>
+        public void HandleMouseUp(System.Windows.Input.MouseButton changedButton,
+            double imageX, double imageY, double imageW, double imageH)
         {
             if (_inputSession == null || !_running) return;
-            _inputSession.FlushPendingMouse();
             int btn = MapMouseButton(changedButton);
             if (btn == 0) return;
-            // 携带映射坐标：与 MouseDown 对称，确保 Up 位置与 Down 一致
-            int sentX, sentY;
-            _inputSession.GetLastSentMouse(out sentX, out sentY);
-            var msg = new InputEventMessage { Type = InputEventType.MouseUp, KeyCode = btn, X = sentX, Y = sentY };
+
+            int sx, sy;
+            _inputSession.MapCoordinates(imageX, imageY, imageW, imageH, out sx, out sy, ZoomMode);
+            _inputSession.SetButtonDown(false);
+            var msg = new InputEventMessage { Type = InputEventType.MouseUp, KeyCode = btn, X = sx, Y = sy };
             _inputSession.SendInput(msg);
-            Logger.Debug("Click up button={0} mapped=({1},{2})", changedButton, sentX, sentY);
+            Logger.Debug("Click up button={0} precise=({1},{2})", changedButton, sx, sy);
         }
 
         /// <summary>

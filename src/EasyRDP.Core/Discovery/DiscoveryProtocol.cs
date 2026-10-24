@@ -57,7 +57,13 @@ namespace EasyRDP.Core.Discovery
         public bool Busy { get; set; }
 
         /// <summary>服务端显示名（计算机名）。WPF 绑定只支持属性，不能是字段。</summary>
-        public string Name { get; set; } = "";
+        public string Name { get; set; }
+
+        /// <summary>构造：C# 5（net40 目标）不支持自动属性初始值设定项，在此初始化。</summary>
+        public DiscoveredServer()
+        {
+            Name = "";
+        }
 
         /// <summary>去重键：ip:tcpPort。</summary>
         public string Key
