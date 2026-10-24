@@ -111,6 +111,8 @@ namespace EasyRDP.Server.Wpf.Services
         private const uint WM_RENDERFORMAT = 0x0305;
         private const uint WM_RENDERALLFORMATS = 0x0306;
         private const uint WM_DESTROYCLIPBOARD = 0x0307;
+        // 复制后该时间窗内的渲染请求来自系统剪贴板服务（Win11 剪贴板历史等），不是用户粘贴
+        private const int ClipboardProbeSuppressMs = 1200;
         private const uint QS_ALLINPUT = 0x04FF;
         private const uint PM_REMOVE = 0x0001;
         private const uint MWMO_INPUTAVAILABLE = 0x0004;
@@ -225,6 +227,8 @@ namespace EasyRDP.Server.Wpf.Services
         private string _pendingFileConsumerKey;
         private uint _pendingFileTransferId;
         private volatile bool _pendingFileActive;
+        // 占位安装时刻：用于识别系统剪贴板服务的探测式读取
+        private long _pendingFileInstalledTicks;
         // 请求 ClipboardLoop（STA）安装占位
         private volatile bool _pendingFileInstallRequested;
         private int _pendingFileInstallAttempts;
@@ -738,6 +742,15 @@ namespace EasyRDP.Server.Wpf.Services
                             format, _pendingFileActive, GetClipboardOwner(), _clipboardListenerHwnd);
                         if (format == (uint)EasyRDP.Core.Clipboard.DropFilesBuilder.CF_HDROP && _pendingFileActive)
                         {
+                            // 复制后极短时间内的渲染请求来自系统剪贴板服务（Win11 剪贴板历史），
+                            // 不是用户粘贴：不下载、空返回，保持延迟占位等真正的粘贴请求。
+                            long elapsedMs = (long)((System.Diagnostics.Stopwatch.GetTimestamp()
+                                - _pendingFileInstalledTicks) * 1000.0 / System.Diagnostics.Stopwatch.Frequency);
+                            if (elapsedMs >= 0 && elapsedMs < ClipboardProbeSuppressMs)
+                            {
+                                Logger.Info("WM_RENDERFORMAT ignored: system probe {0}ms after copy (not a paste)", elapsedMs);
+                                return IntPtr.Zero;
+                            }
                             try { RenderPendingFileClipboard(60000); }
                             catch (Exception ex) { Logger.Warn(ex, "RenderPendingFileClipboard failed"); }
                         }
@@ -821,6 +834,11 @@ namespace EasyRDP.Server.Wpf.Services
                     if (owner == _clipboardListenerHwnd)
                         return;
                     ClearPendingFileClipboard("clipboard-taken-by-other-app", true);
+                    // 接管方是 EasyRDP 同步内容（有 owner 标记）时同样不能读取：
+                    // 读取会触发对端的 WM_RENDERFORMAT，表现为"复制后未粘贴就开始传输"
+                    if (EasyRDP.Core.ClipboardOwnerHelper.GetOwnerFlag()
+                        != EasyRDP.Core.ClipboardOwnerHelper.SideNone)
+                        return;
                 }
 
                 bool hasText = _clipboardService.ContainsText();
@@ -877,11 +895,12 @@ namespace EasyRDP.Server.Wpf.Services
         {
             try
             {
-                // Owner Flag 防回环：剪贴板若是服务端从客户端同步过来并打上 SideHost 标记的，跳过不回传
+                // Owner Flag 防回环：只要是 EasyRDP 同步过来的剪贴板（任一端标记），
+                // 都既不回传也不读取（读取会触发对端的延迟渲染下载）
                 byte owner = EasyRDP.Core.ClipboardOwnerHelper.GetOwnerFlag();
-                if (owner == EasyRDP.Core.ClipboardOwnerHelper.SideHost)
+                if (owner != EasyRDP.Core.ClipboardOwnerHelper.SideNone)
                 {
-                    return; // 远程同步过来的，不回传
+                    return;
                 }
 
                 string[] files = _clipboardService.GetFileList();
@@ -1861,6 +1880,7 @@ namespace EasyRDP.Server.Wpf.Services
                 }
             }
             _pendingFileActive = true;
+            _pendingFileInstalledTicks = System.Diagnostics.Stopwatch.GetTimestamp();
             // 防回环标记必须在剪贴板关闭后设置（SetOwnerFlag 内部会自行 OpenClipboard）
             EasyRDP.Core.ClipboardOwnerHelper.SetOwnerFlag(EasyRDP.Core.ClipboardOwnerHelper.SideHost);
             _lastServerClipboardFilesSig = "__pending_clipboard_files__";

@@ -99,9 +99,14 @@ namespace EasyRDP.Client.Wpf.ViewModels
         // ── 剪贴板文件延迟渲染（服务端复制 → 本机粘贴时才下载）──
         // 粘贴时若下载尚未完成，先快速等 300ms；仍无结果再弹模态进度窗
         private const int PasteFastWaitMs = 300;
+        // 复制后该时间窗内的 CF_HDROP 渲染请求来自系统剪贴板服务（Win11 剪贴板历史等），
+        // 不是用户粘贴：忽略它、保持延迟占位，避免"复制即开始传输"。
+        private const int ClipboardProbeSuppressMs = 1200;
         private FileClipboardConsumer? _pendingClipConsumer;
         private bool _pendingClipActive;
         private uint _pendingClipTransferId;
+        // 占位安装时刻：用于识别系统剪贴板服务的探测式读取
+        private long _pendingClipInstalledTicks;
         // 渲染重入保护：系统/本程序可能同时读取剪贴板
         private bool _renderingClipboardFiles;
 
@@ -1744,6 +1749,7 @@ namespace EasyRDP.Client.Wpf.ViewModels
                 if (ClipboardNative.SetDelayedPlaceholder(ClipboardOwnerHandle))
                 {
                     _pendingClipActive = true;
+                    _pendingClipInstalledTicks = System.Diagnostics.Stopwatch.GetTimestamp();
                     // 防回环：标记来源 + 签名占位，CheckLocalClipboard 期间直接跳过
                     EasyRDP.Core.ClipboardOwnerHelper.SetOwnerFlag(EasyRDP.Core.ClipboardOwnerHelper.SideClient);
                     _lastClipboardFilesSig = "__pending_clipboard_files__";
@@ -1766,6 +1772,18 @@ namespace EasyRDP.Client.Wpf.ViewModels
         {
             if (format != (uint)EasyRDP.Core.Clipboard.DropFilesBuilder.CF_HDROP) return false;
             if (!_pendingClipActive) return false;
+
+            // 复制后极短时间内的渲染请求来自系统剪贴板服务（Win11 剪贴板历史会在
+            // 剪贴板变化瞬间读取一次），不是用户粘贴：不下载、不提供数据，
+            // 保持延迟占位，等真正的粘贴请求（稍后再次触发）再下载。
+            long elapsedMs = (long)((System.Diagnostics.Stopwatch.GetTimestamp() - _pendingClipInstalledTicks)
+                * 1000.0 / System.Diagnostics.Stopwatch.Frequency);
+            if (elapsedMs >= 0 && elapsedMs < ClipboardProbeSuppressMs)
+            {
+                Logger.Info("Clipboard render ignored: system probe {0}ms after copy (not a paste)", elapsedMs);
+                return true;
+            }
+
             // 同一剪贴板数据可能被多处同时读取（系统剪贴板服务/本程序轮询），只处理一次
             if (_renderingClipboardFiles) return false;
 
@@ -1917,13 +1935,17 @@ namespace EasyRDP.Client.Wpf.ViewModels
             try
             {
                 // 延迟渲染占位期间禁止读取剪贴板（ContainsFileDropList 会让系统索要数据）。
-                // 若剪贴板已被其它程序接管，则放弃占位并继续常规同步。
+                // 若剪贴板已被接管，则放弃占位；若接管方是本端/对端同步的内容（有 owner 标记），
+                // 也不能读取——读取会触发对端的 WM_RENDERFORMAT，导致"没粘贴就开始传输"。
                 if (_pendingClipActive)
                 {
                     if (ClipboardOwnerHandle != IntPtr.Zero
                         && ClipboardNative.GetOwner() == ClipboardOwnerHandle)
                         return;
                     ClearPendingFileClipboard("clipboard-taken-by-other-app", true);
+                    if (EasyRDP.Core.ClipboardOwnerHelper.GetOwnerFlag()
+                        != EasyRDP.Core.ClipboardOwnerHelper.SideNone)
+                        return;
                 }
 
                 bool hasText = Clipboard.ContainsText();
@@ -1933,12 +1955,12 @@ namespace EasyRDP.Client.Wpf.ViewModels
                 // 优先处理文件剪贴板（CF_HDROP）：用户右键复制文件时触发
                 if (hasFiles)
                 {
-                    // Owner Flag 防回环：剪贴板若是客户端从服务端同步过来并打上 SideClient 标记的，
-                    // 跳过不回传，避免回环。本地用户复制时 owner=SideNone，正常发送。
+                    // Owner Flag 防回环：只要是 EasyRDP 同步过来的剪贴板（任一端标记），
+                    // 都既不回传也不读取——读取本身会触发对端的延迟渲染下载。
                     byte owner = EasyRDP.Core.ClipboardOwnerHelper.GetOwnerFlag();
-                    if (owner == EasyRDP.Core.ClipboardOwnerHelper.SideClient)
+                    if (owner != EasyRDP.Core.ClipboardOwnerHelper.SideNone)
                     {
-                        return; // 远程同步过来的，不回传
+                        return;
                     }
 
                     var dropList = Clipboard.GetFileDropList();
