@@ -4,7 +4,7 @@
 自研二进制协议（v5 挑战-响应认证）、ZRLE + H.264 混合编码、独立文件通道、剪贴板延迟传输、
 多显示器运行中切换、局域网自动发现。全部内网直连，不依赖任何第三方云服务。
 
-<img src="docs/images/client-browse.png" width="900" alt="EasyRDP 客户端：分组树、在线状态、最近使用、局域网发现">
+<img src="https://github.com/lishuangquan1987/EasyRDP/tree/master/docs/images/client-browse.png" width="900" alt="EasyRDP 客户端：分组树、在线状态、最近使用、局域网发现">
 
 ## 特性
 
@@ -20,9 +20,9 @@
 | **服务端运维** | 最小化到托盘（关窗口不停服务）、开机自启、启动即监听、会话列表（踢出 / 发送文件）、审计日志 |
 | **诊断与更新** | 连接详情面板（CPU/GPU/内存/OS、FPS、码率、分辨率、RTT）、内置 aly 自动更新 |
 
-<img src="docs/images/server-main.png" width="760" alt="EasyRDP 服务端：监听配置、会话列表、审计与文件传输">
+<img src="https://github.com/lishuangquan1987/EasyRDP/tree/master/docs/images/server-main.png" width="760" alt="EasyRDP 服务端：监听配置、会话列表、审计与文件传输">
 
-<img src="docs/images/client-session.png" width="900" alt="EasyRDP 客户端已连接：状态、FPS、编码与远程操作按钮">
+<img src="https://github.com/lishuangquan1987/EasyRDP/tree/master/docs/images/client-session.png" width="900" alt="EasyRDP 客户端已连接：状态、FPS、编码与远程操作按钮">
 
 ## 架构
 
