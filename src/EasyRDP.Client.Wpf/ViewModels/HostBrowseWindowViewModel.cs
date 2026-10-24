@@ -28,6 +28,16 @@ namespace EasyRDP.Client.Wpf.ViewModels
         private List<RecentConnection> _recentCache = new List<RecentConnection>();
         // 树中选中的连接节点（右侧详情数据源）
         private ConnectionTreeNode? _selectedNode;
+        // 在线探测：key = "host:port"，值为最近一次探测结果
+        private readonly Dictionary<string, ServerAvailability> _availability =
+            new Dictionary<string, ServerAvailability>(StringComparer.OrdinalIgnoreCase);
+        private readonly System.Windows.Threading.Dispatcher _dispatcher =
+            System.Windows.Threading.Dispatcher.CurrentDispatcher;
+        private readonly System.Windows.Threading.DispatcherTimer _probeTimer;
+        private int _onlineCount;
+        private int _offlineCount;
+        // 探测频控：30 秒内不重复探测（手动刷新除外）
+        private long _lastProbeTicks;
 
         /// <summary>最近连接列表（缩略图网格数据源）。</summary>
         public ObservableCollection<RecentConnection> Connections { get; } = new ObservableCollection<RecentConnection>();
@@ -42,6 +52,18 @@ namespace EasyRDP.Client.Wpf.ViewModels
         public bool HasRecents
         {
             get { return Recents.Count > 0; }
+        }
+
+        /// <summary>在线统计文本（如 "Online 3 · Offline 12"）。</summary>
+        public string AvailabilitySummary
+        {
+            get { return string.Format("Online {0} · Offline {1}", _onlineCount, _offlineCount); }
+        }
+
+        /// <summary>选中连接的服务端在线状态。</summary>
+        public string SelectedAvailabilityText
+        {
+            get { return _selectedNode != null ? _selectedNode.AvailabilityText : ""; }
         }
 
         /// <summary>搜索文本：按名称或地址实时过滤分组树。</summary>
@@ -73,6 +95,7 @@ namespace EasyRDP.Client.Wpf.ViewModels
                 OnPropertyChanged(nameof(SelectedUserText));
                 OnPropertyChanged(nameof(SelectedGroupText));
                 OnPropertyChanged(nameof(SelectedLastConnectedText));
+                OnPropertyChanged(nameof(SelectedAvailabilityText));
                 OnPropertyChanged(nameof(SelectedThumbnail));
                 OnPropertyChanged(nameof(HasSelectedThumbnail));
             }
@@ -262,6 +285,115 @@ namespace EasyRDP.Client.Wpf.ViewModels
 
             ReloadConnections();
             ReloadTree();
+
+            // 在线状态：立即探测一次，之后每 30 秒刷新（TCP 连接测试，不占会话名额）
+            _probeTimer = new System.Windows.Threading.DispatcherTimer
+            {
+                Interval = TimeSpan.FromSeconds(30)
+            };
+            _probeTimer.Tick += (s2, e2) => RefreshAvailability();
+            _probeTimer.Start();
+            RefreshAvailability();
+        }
+
+        /// <summary>停止在线探测（窗口关闭时调用）。</summary>
+        public void StopAvailabilityProbe()
+        {
+            try { _probeTimer?.Stop(); } catch { }
+        }
+
+        // ====== 在线状态 ======
+
+        /// <summary>重新探测所有已保存连接与最近连接的服务端是否在线。</summary>
+        public void RefreshAvailability()
+        {
+            long now = System.Diagnostics.Stopwatch.GetTimestamp();
+            if (now - _lastProbeTicks < System.Diagnostics.Stopwatch.Frequency * 5)
+                return; // 5 秒内不重复探测
+            _lastProbeTicks = now;
+
+            var targets = new List<KeyValuePair<string, int>>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            string last;
+            foreach (var p in _profileStore.Load(out last))
+            {
+                if (string.IsNullOrWhiteSpace(p.Host)) continue;
+                int port = ParsePort(p.Port);
+                if (seen.Add(p.Host.Trim() + ":" + port))
+                    targets.Add(new KeyValuePair<string, int>(p.Host.Trim(), port));
+            }
+            foreach (var r in _recentCache)
+            {
+                if (string.IsNullOrWhiteSpace(r.Host)) continue;
+                int port = ParsePort(r.Port);
+                if (seen.Add(r.Host.Trim() + ":" + port))
+                    targets.Add(new KeyValuePair<string, int>(r.Host.Trim(), port));
+            }
+
+            // 先显示"检测中"，避免沿用上一次的陈旧状态
+            foreach (var g in Nodes)
+                foreach (var n in g.Children)
+                    n.Availability = ServerAvailability.Unknown;
+            UpdateAvailabilitySummary();
+
+            if (targets.Count == 0) return;
+
+            ServerAvailabilityProbe.ProbeMany(targets, 900, 8, (host, port, online) =>
+            {
+                _dispatcher.BeginInvoke(new Action(() =>
+                {
+                    string key = host.ToLowerInvariant() + ":" + port;
+                    _availability[key] = online ? ServerAvailability.Online : ServerAvailability.Offline;
+                    ApplyAvailability(host, port, _availability[key]);
+                    UpdateAvailabilitySummary();
+                }));
+            });
+        }
+
+        /// <summary>把探测结果套用到所有指向同一 host:port 的节点。</summary>
+        private void ApplyAvailability(string host, int port, ServerAvailability state)
+        {
+            foreach (var g in Nodes)
+            {
+                foreach (var n in g.Children)
+                {
+                    var p = n.Profile;
+                    if (p == null || string.IsNullOrWhiteSpace(p.Host)) continue;
+                    if (!string.Equals(p.Host.Trim(), host, StringComparison.OrdinalIgnoreCase)) continue;
+                    if (ParsePort(p.Port) != port) continue;
+                    n.Availability = state;
+                    if (ReferenceEquals(n, _selectedNode))
+                        OnPropertyChanged(nameof(SelectedAvailabilityText));
+                }
+            }
+        }
+
+        /// <summary>重算在线/离线统计。</summary>
+        private void UpdateAvailabilitySummary()
+        {
+            int online = 0;
+            int offline = 0;
+            foreach (var g in Nodes)
+            {
+                foreach (var n in g.Children)
+                {
+                    if (n.Availability == ServerAvailability.Online) online++;
+                    else if (n.Availability == ServerAvailability.Offline) offline++;
+                }
+            }
+            _onlineCount = online;
+            _offlineCount = offline;
+            OnPropertyChanged(nameof(AvailabilitySummary));
+        }
+
+        /// <summary>端口解析（非法值回退 2000，与连接逻辑一致）。</summary>
+        private static int ParsePort(string port)
+        {
+            int value;
+            if (int.TryParse((port ?? "").Trim(), out value) && value > 0 && value < 65536)
+                return value;
+            return 2000;
         }
 
         // ====== 列表加载与刷新 ======
@@ -370,6 +502,8 @@ namespace EasyRDP.Client.Wpf.ViewModels
                     ungroupedNode.Children.Add(CreateProfileNode(p));
                 Nodes.Add(ungroupedNode);
             }
+
+            UpdateAvailabilitySummary();
         }
 
         /// <summary>树选中项变化（View 代码后置调用）：同步右侧详情。</summary>
@@ -391,9 +525,9 @@ namespace EasyRDP.Client.Wpf.ViewModels
         }
 
         /// <summary>把保存的连接配置包装成树节点（含缩略图）。</summary>
-        private static ConnectionTreeNode CreateProfileNode(ServerProfile p)
+        private ConnectionTreeNode CreateProfileNode(ServerProfile p)
         {
-            return new ConnectionTreeNode
+            var node = new ConnectionTreeNode
             {
                 DisplayName = string.IsNullOrWhiteSpace(p.Name) ? p.Host : p.Name,
                 Detail = p.Host + ":" + (string.IsNullOrWhiteSpace(p.Port) ? "2000" : p.Port),
@@ -401,6 +535,12 @@ namespace EasyRDP.Client.Wpf.ViewModels
                 Profile = p,
                 GroupName = p.Group ?? ""
             };
+            // 沿用最近一次探测结果（重建树时不清空在线状态）
+            string key = (p.Host ?? "").Trim().ToLowerInvariant() + ":" + ParsePort(p.Port);
+            ServerAvailability state;
+            if (_availability.TryGetValue(key, out state))
+                node.Availability = state;
+            return node;
         }
 
         /// <summary>连接树节点（Recent 条目或保存的连接配置）。</summary>

@@ -1,5 +1,7 @@
 using System.Collections.ObjectModel;
+using System.ComponentModel;
 using System.Windows.Media;
+using EasyRDP.Client.Wpf.Services;
 
 namespace EasyRDP.Client.Wpf.Models
 {
@@ -7,8 +9,10 @@ namespace EasyRDP.Client.Wpf.Models
     /// 浏览窗口树节点：分组节点（IsGroup=true，Children=连接）或连接节点（Profile 非空）。
     /// 分组名 "Recent" 为虚拟分组（最近使用，不可拖入/不可重命名）。
     /// </summary>
-    public class ConnectionTreeNode
+    public class ConnectionTreeNode : INotifyPropertyChanged
     {
+        private ServerAvailability _availability = ServerAvailability.Unknown;
+
         /// <summary>是否分组节点。</summary>
         public bool IsGroup { get; set; }
 
@@ -43,7 +47,39 @@ namespace EasyRDP.Client.Wpf.Models
         /// <summary>未分组虚拟节点（可拖入，但不可重命名/删除）。</summary>
         public bool IsUngrouped { get; set; }
 
+        /// <summary>服务端在线状态（连接节点；探测更新时通知界面）。</summary>
+        public ServerAvailability Availability
+        {
+            get { return _availability; }
+            set
+            {
+                if (_availability == value) return;
+                _availability = value;
+                var handler = PropertyChanged;
+                if (handler == null) return;
+                handler(this, new PropertyChangedEventArgs(nameof(Availability)));
+                handler(this, new PropertyChangedEventArgs(nameof(AvailabilityText)));
+            }
+        }
+
+        /// <summary>在线状态文本（详情面板显示）。</summary>
+        public string AvailabilityText
+        {
+            get
+            {
+                switch (_availability)
+                {
+                    case ServerAvailability.Online: return "Online";
+                    case ServerAvailability.Offline: return "Offline";
+                    default: return "Checking…";
+                }
+            }
+        }
+
         /// <summary>显示副标题。</summary>
         public string Subtitle { get { return Detail; } }
+
+        /// <summary>属性变化通知（Availability 更新用）。</summary>
+        public event PropertyChangedEventHandler PropertyChanged;
     }
 }

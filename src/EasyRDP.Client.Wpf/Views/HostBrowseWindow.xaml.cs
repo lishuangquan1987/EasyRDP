@@ -125,6 +125,7 @@ namespace EasyRDP.Client.Wpf.Views
         protected override void OnClosing(CancelEventArgs e)
         {
             _refreshTimer?.Stop();
+            _vm?.StopAvailabilityProbe();
             base.OnClosing(e);
         }
     }

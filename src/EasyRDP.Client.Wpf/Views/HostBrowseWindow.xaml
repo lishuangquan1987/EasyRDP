@@ -255,16 +255,21 @@
             <!--  左侧：工具条 + 搜索 + 树  -->
             <DockPanel Grid.Column="0" Background="#FCFDFE">
                 <Border DockPanel.Dock="Top" Padding="12,10" BorderBrush="#E8EDF1" BorderThickness="0,0,0,1">
-                    <StackPanel Orientation="Horizontal">
-                        <Button Height="26" Padding="10,0" Content="+ Group"
-                                Command="{Binding NewGroupCommand}"
-                                Style="{StaticResource LightButtonStyle}" Margin="0,0,6,0"
-                                ToolTip="Create a connection group" />
-                        <Button Height="26" Padding="10,0" Content="+ Connection"
-                                Command="{Binding NewConnectionCommand}"
-                                Style="{StaticResource LightButtonStyle}"
-                                ToolTip="Create a saved connection" />
-                    </StackPanel>
+                    <DockPanel>
+                        <TextBlock DockPanel.Dock="Right" Text="{Binding AvailabilitySummary}"
+                                   FontSize="11" Foreground="#78909C" VerticalAlignment="Center"
+                                   ToolTip="TCP probe result for each saved connection" />
+                        <StackPanel Orientation="Horizontal">
+                            <Button Height="26" Padding="10,0" Content="+ Group"
+                                    Command="{Binding NewGroupCommand}"
+                                    Style="{StaticResource LightButtonStyle}" Margin="0,0,6,0"
+                                    ToolTip="Create a connection group" />
+                            <Button Height="26" Padding="10,0" Content="+ Connection"
+                                    Command="{Binding NewConnectionCommand}"
+                                    Style="{StaticResource LightButtonStyle}"
+                                    ToolTip="Create a saved connection" />
+                        </StackPanel>
+                    </DockPanel>
                 </Border>
                 <Border DockPanel.Dock="Top" Padding="12,8" BorderBrush="#E8EDF1" BorderThickness="0,0,0,1">
                     <Grid>
@@ -400,7 +405,10 @@
                                 </Grid.ColumnDefinitions>
                                 <TextBlock x:Name="RowGlyph" Grid.Column="0" Text="&#xE7F4;"
                                            FontFamily="Segoe MDL2 Assets" FontSize="13" Foreground="#78909C"
-                                           VerticalAlignment="Center" Margin="0,0,8,0" />
+                                           VerticalAlignment="Center" Margin="0,0,6,0" />
+                                <Ellipse x:Name="StatusDot" Grid.Column="0" Width="7" Height="7"
+                                         HorizontalAlignment="Left" VerticalAlignment="Center"
+                                         Margin="-11,0,0,0" Fill="#CFD8DC" />
                                 <TextBlock x:Name="NameText" Grid.Column="1" Text="{Binding DisplayName}"
                                            FontSize="12.5" Foreground="#263238" VerticalAlignment="Center"
                                            TextTrimming="CharacterEllipsis" />
@@ -413,6 +421,13 @@
                                     <Setter TargetName="RowGlyph" Property="Text" Value="&#xE8B7;" />
                                     <Setter TargetName="RowGlyph" Property="Foreground" Value="#1565C0" />
                                     <Setter TargetName="NameText" Property="FontWeight" Value="SemiBold" />
+                                    <Setter TargetName="StatusDot" Property="Visibility" Value="Collapsed" />
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding Availability}" Value="Online">
+                                    <Setter TargetName="StatusDot" Property="Fill" Value="#43A047" />
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding Availability}" Value="Offline">
+                                    <Setter TargetName="StatusDot" Property="Fill" Value="#E53935" />
                                 </DataTrigger>
                                 <DataTrigger Binding="{Binding IsUngrouped}" Value="True">
                                     <Setter TargetName="RowGlyph" Property="Text" Value="&#xE8F4;" />
@@ -453,6 +468,8 @@
                     <TextBlock Text="{Binding SelectedAddress}" FontSize="13" Foreground="#607D8B" />
 
                     <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                        <TextBlock Text="{Binding SelectedAvailabilityText}" FontSize="12" FontWeight="SemiBold"
+                                   Foreground="#43A047" Margin="0,0,10,0" />
                         <TextBlock Text="{Binding SelectedGroupText}" FontSize="12" Foreground="#78909C" />
                         <TextBlock Text="   ·   " FontSize="12" Foreground="#B0BEC5" />
                         <TextBlock Text="{Binding SelectedUserText}" FontSize="12" Foreground="#78909C" />
