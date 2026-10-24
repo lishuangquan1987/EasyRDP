@@ -2,7 +2,7 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:behaviors="clr-namespace:EasyRDP.Shared"
-        Title="Edit Connection" Width="400" Height="430"
+        Title="Edit Connection" Width="420" Height="470"
         WindowStartupLocation="CenterOwner"
         ResizeMode="NoResize" WindowStyle="ToolWindow" ShowInTaskbar="False">
     <StackPanel Margin="14">
@@ -22,10 +22,15 @@
         <TextBox Text="{Binding Username, UpdateSourceTrigger=PropertyChanged}"
                  Height="26" VerticalContentAlignment="Center" Margin="0,0,0,8"/>
 
-        <TextBlock Text="Password (optional):" Margin="0,0,0,4"/>
+        <TextBlock Text="Password (leave empty if the server asks for approval):" Margin="0,0,0,4"/>
         <PasswordBox Height="26" Margin="0,0,0,8"
                      behaviors:PasswordBoxBehavior.BindPassword="True"
                      behaviors:PasswordBoxBehavior.Password="{Binding Password, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"/>
+
+        <CheckBox Content="Remember password on this computer"
+                  IsChecked="{Binding RememberPassword, Mode=TwoWay}"
+                  ToolTip="Stored with Windows DPAPI, readable only by your Windows account. Uncheck to use the password once without saving it."
+                  Margin="0,0,0,10"/>
 
         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
             <Button Content="OK" Width="72" Margin="0,0,8,0" IsDefault="True" Command="{Binding OkCommand}"/>

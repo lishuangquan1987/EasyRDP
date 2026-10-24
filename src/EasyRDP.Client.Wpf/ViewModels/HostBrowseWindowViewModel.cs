@@ -130,8 +130,9 @@ namespace EasyRDP.Client.Wpf.ViewModels
 
         /// <summary>
         /// 解析地址栏 "[user@]host[:port]" 并请求连接。
-        /// 服务端要求非空凭据：地址栏无凭据且无已保存凭据时，弹编辑表单补全
-        /// （端口/用户名/密码），确认后保存并连接——解决"输入 IP 后没地方填凭据"。
+        /// 服务端有两种认证模式：口令模式（需要 USER/PASS）和审批模式（免密码，由服务端确认）。
+        /// 客户端无法预知模式，因此凭据为空时直接尝试连接：审批模式可直接进入，
+        /// 口令模式会收到明确提示（"This server requires a password"）。
         /// </summary>
         private void ConnectFromAddressBar()
         {
@@ -172,24 +173,8 @@ namespace EasyRDP.Client.Wpf.ViewModels
                     port = string.IsNullOrWhiteSpace(saved.Port) ? "2000" : saved.Port;
             }
 
-            // 凭据缺失：弹编辑表单补全。服务端握手强制校验非空凭据，
-            // 空凭据连接必然认证失败，与其失败后让用户困惑，不如先补全再连接。
-            if (string.IsNullOrEmpty(username) || string.IsNullOrEmpty(password))
-            {
-                var result = _dialogs.EditConnection(new RecentConnection
-                {
-                    Host = host,
-                    Port = port,
-                    Username = username,
-                    Password = password
-                });
-                if (result == null || string.IsNullOrWhiteSpace(result.Host))
-                    return; // 取消：不连接
-                SaveConnection(result);
-                ConnectRequested?.Invoke(ToConnection(result));
-                return;
-            }
-
+            // 直接连接：凭据为空可能是服务端审批模式（免密码），
+            // 口令模式下服务端会返回 AuthChallenge，客户端据此提示需要密码。
             ConnectRequested?.Invoke(new RecentConnection
             {
                 Host = host,
@@ -220,7 +205,8 @@ namespace EasyRDP.Client.Wpf.ViewModels
                 Host = result.Host.Trim(),
                 Port = string.IsNullOrWhiteSpace(result.Port) ? "2000" : result.Port.Trim(),
                 Username = result.Username,
-                Password = result.Password
+                Password = result.Password,
+                SavePassword = result.SavePassword
             };
         }
 
@@ -245,6 +231,7 @@ namespace EasyRDP.Client.Wpf.ViewModels
             item.Port = string.IsNullOrWhiteSpace(result.Port) ? "2000" : result.Port.Trim();
             item.Username = string.IsNullOrWhiteSpace(result.Username) ? null : result.Username.Trim();
             item.Password = string.IsNullOrEmpty(result.Password) ? null : result.Password;
+            item.SavePassword = result.SavePassword;
             item.LastConnectedUtc = DateTime.UtcNow;
             _store.Save(list);
             ReloadConnections();

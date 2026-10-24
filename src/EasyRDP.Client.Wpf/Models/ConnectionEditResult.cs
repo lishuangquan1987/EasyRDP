@@ -19,5 +19,8 @@ namespace EasyRDP.Client.Wpf.Models
 
         /// <summary>登录密码（可空）。</summary>
         public string? Password { get; set; }
+
+        /// <summary>是否在本机记住密码（false 时密码仅本次连接使用，不写入磁盘）。</summary>
+        public bool SavePassword { get; set; } = true;
     }
 }

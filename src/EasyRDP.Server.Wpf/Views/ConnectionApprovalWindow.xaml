@@ -1,0 +1,54 @@
+<Window x:Class="EasyRDP.Server.Wpf.Views.ConnectionApprovalWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Connection Request" Width="440" Height="280"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="NoResize" WindowStyle="ToolWindow" ShowInTaskbar="False"
+        Background="White">
+    <Grid Margin="18">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0" Text="A remote computer wants to control this desktop"
+                   FontSize="15" FontWeight="SemiBold" Foreground="#1F2A33" Margin="0,0,0,14"/>
+
+        <Grid Grid.Row="1" Margin="0,0,0,10">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="96"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <TextBlock Grid.Row="0" Grid.Column="0" Text="Remote address" Foreground="#5A6B78" Margin="0,0,0,6"/>
+            <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding RemoteEndPoint}" FontWeight="SemiBold" Margin="0,0,0,6"/>
+
+            <TextBlock Grid.Row="1" Grid.Column="0" Text="Username" Foreground="#5A6B78" Margin="0,0,0,6"/>
+            <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding Username}" FontWeight="SemiBold" Margin="0,0,0,6"/>
+
+            <TextBlock Grid.Row="2" Grid.Column="0" Text="Protocol" Foreground="#5A6B78"/>
+            <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding ProtocolVersion}" FontWeight="SemiBold"/>
+        </Grid>
+
+        <TextBlock Grid.Row="2" Text="Only allow this if you are expecting a connection."
+                   Foreground="#8A5A00" TextWrapping="Wrap" Margin="0,0,0,6"/>
+
+        <TextBlock Grid.Row="3" Text="{Binding CountdownText}" Foreground="#5A6B78"
+                   VerticalAlignment="Bottom" Margin="0,0,0,6"/>
+
+        <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button Content="Deny" Width="92" Height="30" Margin="0,0,8,0" IsCancel="True"
+                    Command="{Binding DenyCommand}"/>
+            <Button Content="Allow" Width="92" Height="30" IsDefault="True"
+                    Command="{Binding AllowCommand}"/>
+        </StackPanel>
+    </Grid>
+</Window>

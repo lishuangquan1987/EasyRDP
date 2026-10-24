@@ -22,8 +22,11 @@ namespace EasyRDP.Client.Wpf.ViewModels
         /// <summary>登录用户名（可空）。</summary>
         public string Username { get; set; }
 
-        /// <summary>登录密码（可空）。</summary>
+        /// <summary>登录密码（可空；服务端为审批模式时可留空）。</summary>
         public string Password { get; set; }
+
+        /// <summary>是否在本机记住密码（取消勾选时密码只用于本次连接，不写入磁盘）。</summary>
+        public bool RememberPassword { get; set; }
 
         /// <summary>确定：请求以成功结果关闭对话框。</summary>
         public RelayCommand OkCommand { get; }
@@ -39,6 +42,7 @@ namespace EasyRDP.Client.Wpf.ViewModels
             Port = string.IsNullOrWhiteSpace(current?.Port) ? "2000" : current.Port;
             Username = current?.Username ?? "";
             Password = current?.Password ?? "";
+            RememberPassword = current?.SavePassword ?? true;
 
             OkCommand = new RelayCommand(() => CloseRequested?.Invoke(true));
         }
@@ -52,7 +56,8 @@ namespace EasyRDP.Client.Wpf.ViewModels
                 DisplayName = string.IsNullOrWhiteSpace(DisplayName) ? null : DisplayName.Trim(),
                 Port = string.IsNullOrWhiteSpace(Port) ? "2000" : Port.Trim(),
                 Username = string.IsNullOrWhiteSpace(Username) ? null : Username.Trim(),
-                Password = string.IsNullOrEmpty(Password) ? null : Password
+                Password = string.IsNullOrEmpty(Password) ? null : Password,
+                SavePassword = RememberPassword
             };
         }
     }

@@ -75,12 +75,22 @@ namespace EasyRDP.Core.Protocol
             return type == (byte)MessageType.HandshakeReq
                 || type == (byte)MessageType.HandshakeRes
                 || type == (byte)MessageType.Keepalive
+                || type == (byte)MessageType.AuthChallenge
                 || type == (byte)MessageType.InputEvent
                 || type == (byte)MessageType.CursorUpdate
                 || type == (byte)MessageType.ClipboardSync
+                || type == (byte)MessageType.HandshakeProof
                 || type == (byte)MessageType.ClipFormatList
                 || type == (byte)MessageType.ClipFileContentsReq
                 || type == (byte)MessageType.ClipFileContentsRes
+                || type == (byte)MessageType.ChannelOpenReq
+                || type == (byte)MessageType.ChannelOpenRes
+                || type == (byte)MessageType.FileTransferOffer
+                || type == (byte)MessageType.FileTransferStart
+                || type == (byte)MessageType.FileTransferData
+                || type == (byte)MessageType.FileTransferEnd
+                || type == (byte)MessageType.FileTransferCancel
+                || type == (byte)MessageType.FileTransferAck
                 || type == (byte)MessageType.ImageClipboardStart
                 || type == (byte)MessageType.ImageClipboardData
                 || type == (byte)MessageType.ImageClipboardEnd

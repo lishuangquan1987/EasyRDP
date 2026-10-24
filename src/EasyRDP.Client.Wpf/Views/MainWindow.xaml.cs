@@ -881,10 +881,10 @@ public partial class MainWindow : Window
             _vm.Host = host.Trim();
         if (!string.IsNullOrWhiteSpace(port))
             _vm.Port = port.Trim();
-        if (!string.IsNullOrWhiteSpace(username))
-            _vm.Username = username.Trim();
-        if (!string.IsNullOrWhiteSpace(password))
-            _vm.Password = password;
+        // 用户名/密码按条目原样覆盖（包括空值）：审批模式就是空密码连接，
+        // 若沿用启动时从已保存配置自动填入的旧密码，会以错误凭据发起认证。
+        _vm.Username = username ?? "";
+        _vm.Password = password ?? "";
         if (_vm.ConnectCommand.CanExecute(null))
             _vm.ConnectCommand.Execute(null);
     }

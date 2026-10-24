@@ -12,6 +12,7 @@ using EasyRDP.Client.Wpf.Services;
 using AlyClient.CSharpSDK;
 using EasyRDP.Core.Protocol;
 using EasyRDP.Core.Rendering;
+using EasyRDP.Core.Security;
 using EasyRDP.Core.Transport;
 using EasyRDP.Shared;
 using NLog;
@@ -32,6 +33,8 @@ namespace EasyRDP.Client.Wpf.ViewModels
         private const int ConnectTimeoutMs = 5000;
         /// <summary>握手超时（毫秒）。</summary>
         private const int HandshakeTimeoutMs = 10000;
+        /// <summary>审批模式等待上限（毫秒）：服务端操作员有 60s 决定，客户端留 15s 余量。</summary>
+        private const int ApprovalTimeoutMs = 75000;
 
         private readonly Dispatcher _dispatcher;
 
@@ -922,15 +925,23 @@ namespace EasyRDP.Client.Wpf.ViewModels
             _transport = connectedTransport;
             Logger.Info("TCP connected to {0}:{1}, sending handshake", host, port);
 
-            // 先订阅 MessageReceived，再 Start 接收、再发送握手 — 避免竞态导致 HandshakeRes 丢失
+            // 先订阅 MessageReceived，再 Start 接收、再发送握手 — 避免竞态导致 HandshakeRes 丢失。
+            // v5 握手可能收到两种响应：AuthChallenge（口令模式）或 HandshakeRes（审批模式直接返回）。
             MessageReceivedEventArgs? handshakeResponse = null;
-            var waitHandle = new ManualResetEventSlim(false);
+            MessageReceivedEventArgs? authChallengeResponse = null;
+            var handshakeSignal = new ManualResetEventSlim(false);
+            var challengeSignal = new ManualResetEventSlim(false);
             EventHandler<MessageReceivedEventArgs> onHandshakeMsg = (s, args) =>
             {
-                if (args.MessageType == (byte)MessageType.HandshakeRes)
+                if (args.MessageType == (byte)MessageType.AuthChallenge)
+                {
+                    authChallengeResponse = args;
+                    challengeSignal.Set();
+                }
+                else if (args.MessageType == (byte)MessageType.HandshakeRes)
                 {
                     handshakeResponse = args;
-                    waitHandle.Set();
+                    handshakeSignal.Set();
                 }
             };
             _transport.MessageReceived += onHandshakeMsg;
@@ -958,29 +969,90 @@ namespace EasyRDP.Client.Wpf.ViewModels
                 });
             };
 
-            // 订阅就绪后发送握手请求
+            // 订阅就绪后发送握手请求（v5：不携带密码，只带版本/能力/用户名/客户端随机数）
             var handshakeReq = new HandshakeReq
             {
                 Version = Constants.ProtocolVersion,
                 Capabilities = DecoderFactory.GetAvailableCodecs(),
                 Username = _username ?? "",
-                Password = _password ?? ""
+                ClientNonce = AuthCrypto.RandomBytes(16)
             };
             byte[] reqPayload = handshakeReq.Pack();
             // 订阅就绪后启动接收，再发送握手请求
             _transport.Start();
             _transport.Send(Framing.BuildMessage((byte)MessageType.HandshakeReq, reqPayload));
-            Logger.Debug("HandshakeReq sent, waiting for response...");
-            bool gotResponse = await Task.Run(() => waitHandle.Wait(HandshakeTimeoutMs));
+            Logger.Debug("HandshakeReq sent, waiting for challenge or response...");
+
+            // 第一阶段：等 AuthChallenge（口令模式）或 HandshakeRes（审批模式）。
+            // 审批模式下服务端要等操作员确认（最长 60s），因此 3s 后切换提示并继续等。
+            int signaled = await Task.Run(() => WaitHandle.WaitAny(
+                new WaitHandle[] { challengeSignal.WaitHandle, handshakeSignal.WaitHandle }, 3000));
+            if (signaled == WaitHandle.WaitTimeout)
+            {
+                StatusText = "Waiting for the server to accept the connection…";
+                Logger.Info("No handshake reply yet — server may be awaiting operator approval");
+                signaled = await Task.Run(() => WaitHandle.WaitAny(
+                    new WaitHandle[] { challengeSignal.WaitHandle, handshakeSignal.WaitHandle },
+                    ApprovalTimeoutMs));
+            }
+
+            bool gotChallenge = signaled == 0;
+            bool gotResponse = signaled == 1;
+
+            if (gotChallenge && authChallengeResponse != null)
+            {
+                var challenge = AuthChallengeMessage.Unpack(authChallengeResponse.Data);
+                Logger.Info("AuthChallenge received, computing proof (iterations={0})", challenge.Iterations);
+
+                if (string.IsNullOrEmpty(_password))
+                {
+                    // 服务端要求口令但用户没填：直接给出可操作提示（发送空口令证明没有意义）
+                    _transport.MessageReceived -= onHandshakeMsg;
+                    SetBusy(false, "Password required");
+                    _notifier.ShowError(
+                        "This server requires a password.\nEnter the password configured on the server and try again.",
+                        "Authentication Required");
+                    _streamSession?.Stop();
+                    _transport.Disconnect();
+                    return;
+                }
+
+                // 口令不上网：PBKDF2 派生密钥 + 对两个随机数做 HMAC-SHA256
+                byte[] key = AuthCrypto.DeriveKey(_password, challenge.Salt, challenge.Iterations);
+                byte[] proof = AuthCrypto.ComputeProof(key, challenge.ServerNonce, handshakeReq.ClientNonce, handshakeReq.Username);
+                var proofMsg = new HandshakeProofMessage
+                {
+                    Version = Constants.ProtocolVersion,
+                    Proof = proof
+                };
+                StatusText = "Authenticating…";
+                _transport.Send(Framing.BuildMessage((byte)MessageType.HandshakeProof, proofMsg.Pack()));
+                Logger.Debug("HandshakeProof sent, waiting for response...");
+
+                bool proofAnswered = await Task.Run(() => handshakeSignal.Wait(HandshakeTimeoutMs));
+                if (!proofAnswered)
+                {
+                    _transport.MessageReceived -= onHandshakeMsg;
+                    Logger.Warn("Handshake proof timeout after {0}ms", HandshakeTimeoutMs);
+                    SetBusy(false, "Handshake timeout");
+                    _notifier.ShowError(
+                        string.Format("Handshake with {0}:{1} timed out while authenticating.", host, port),
+                        "Handshake Timeout");
+                    _streamSession?.Stop();
+                    _transport.Disconnect();
+                    return;
+                }
+                gotResponse = true;
+            }
+
             _transport.MessageReceived -= onHandshakeMsg;
 
             if (!gotResponse || handshakeResponse == null)
             {
-                Logger.Warn("Handshake timeout after {0}ms", HandshakeTimeoutMs);
+                Logger.Warn("Handshake timeout (challenge={0}, response={1})", gotChallenge, gotResponse);
                 SetBusy(false, "Handshake timeout");
                 _notifier.ShowError(
-                    string.Format("Handshake with {0}:{1} timed out (no response within {2} seconds).\nPlease verify the server version and credentials.",
-                        host, port, HandshakeTimeoutMs / 1000),
+                    string.Format("Handshake with {0}:{1} timed out.\nPlease verify the server version and credentials.", host, port),
                     "Handshake Timeout");
                 _streamSession?.Stop();
                 _transport.Disconnect();
@@ -994,10 +1066,26 @@ namespace EasyRDP.Client.Wpf.ViewModels
             {
                 Logger.Warn("Handshake rejected: {0}", handshakeRes.Result);
                 SetBusy(false, "Handshake failed: " + handshakeRes.Result);
-                // 认证失败给出可操作的提示（服务端要求非空凭据，地址栏直连最易踩坑）
-                string reason = handshakeRes.Result == HandshakeResult.AuthFailed
-                    ? "invalid username or password (must match the USER / PASS configured on the server)"
-                    : handshakeRes.Result.ToString();
+                // 认证/版本/审批失败给出可操作的提示（地址栏直连最易踩坑）
+                string reason;
+                switch (handshakeRes.Result)
+                {
+                    case HandshakeResult.AuthFailed:
+                        reason = "invalid username or password (must match the USER / PASS configured on the server)";
+                        break;
+                    case HandshakeResult.Denied:
+                        reason = "the server operator denied this connection";
+                        break;
+                    case HandshakeResult.VersionMismatch:
+                        reason = "protocol version mismatch (update the client and server to the same build)";
+                        break;
+                    case HandshakeResult.ServerBusy:
+                        reason = "the server is busy (too many active sessions)";
+                        break;
+                    default:
+                        reason = handshakeRes.Result.ToString();
+                        break;
+                }
                 _notifier.ShowError(
                     string.Format("Server {0}:{1} rejected the connection: {2}", host, port, reason),
                     "Connection Failed");

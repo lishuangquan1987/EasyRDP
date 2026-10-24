@@ -98,6 +98,13 @@ namespace EasyRDP.Core.Protocol
                 _writer.Write(v);
         }
 
+        /// <summary>写入固定长度原始字节（无长度前缀）。</summary>
+        public void WriteRaw(byte[] v)
+        {
+            if (v != null && v.Length > 0)
+                _writer.Write(v);
+        }
+
         // —— 读方法 ——
 
         /// <summary>Reads a single byte.</summary>
@@ -143,6 +150,17 @@ namespace EasyRDP.Core.Protocol
             if (len > Constants.MaxSafePayloadSize)
                 return null;
             return _reader.ReadBytes(len);
+        }
+
+        /// <summary>读取固定长度原始字节（无长度前缀）。数据不足时返回空数组，由调用方校验长度。</summary>
+        public byte[] ReadRaw(int length)
+        {
+            if (length <= 0)
+                return new byte[0];
+            byte[] buffer = _reader.ReadBytes(length);
+            if (buffer == null || buffer.Length != length)
+                return new byte[0];
+            return buffer;
         }
     }
 }

@@ -50,6 +50,12 @@ namespace EasyRDP.Server.Wpf.ViewModels
         private bool _autoStart;
         // 启动即监听：默认开启，打开程序即开始接受连接
         private bool _autoListen = true;
+        // 连接认证：默认口令模式（与历史版本一致）；审批模式免密码
+        private ServerAuthMode _authMode = ServerAuthMode.Password;
+        // PBKDF2 盐（Base64）：首次运行生成后固定，保证相同口令派生出相同密钥
+        private string _authSalt = "";
+        // 运行中的认证配置对象（TransportHost 持有同一引用，UI 改动即时生效）
+        private ServerAuthConfig _authConfig;
 
         // 设置持久化：%AppData%\EasyRDP\server\settings.json
         private readonly ServerSettingsStore _settingsStore = new ServerSettingsStore();
@@ -114,18 +120,56 @@ namespace EasyRDP.Server.Wpf.ViewModels
             }
         }
 
-        /// <summary>服务端认证用户名。启动时读取，运行中修改不影响已建立会话。</summary>
+        /// <summary>服务端认证用户名。</summary>
         public string Username
         {
             get { return _username; }
-            set { _username = value ?? ""; OnPropertyChanged(nameof(Username)); }
+            set
+            {
+                _username = value ?? "";
+                OnPropertyChanged(nameof(Username));
+                if (_authConfig != null) _authConfig.Username = _username;
+            }
         }
 
-        /// <summary>服务端认证密码。明文存储，v1 足够；后续可改为加密。</summary>
+        /// <summary>服务端认证密码（内存明文，落盘时由 ServerSettingsStore 做 DPAPI 加密）。</summary>
         public string Password
         {
             get { return _password; }
-            set { _password = value ?? ""; OnPropertyChanged(nameof(Password)); }
+            set
+            {
+                _password = value ?? "";
+                OnPropertyChanged(nameof(Password));
+                if (_authConfig != null) _authConfig.Password = _password;
+            }
+        }
+
+        /// <summary>
+        /// 连接认证模式：
+        /// - Password：客户端输入 USER/PASS，服务端校验挑战响应（默认）
+        /// - Approve：客户端免密码，连接时由本机操作员 Allow/Deny
+        /// 运行中切换立即生效（仅影响之后的握手）。
+        /// </summary>
+        public ServerAuthMode AuthMode
+        {
+            get { return _authMode; }
+            set
+            {
+                if (_authMode == value) return;
+                _authMode = value;
+                OnPropertyChanged(nameof(AuthMode));
+                OnPropertyChanged(nameof(IsPasswordMode));
+                if (_authConfig != null) _authConfig.Mode = value;
+                AddLog(value == ServerAuthMode.Approve
+                    ? "Auth mode: approval required (no password)"
+                    : "Auth mode: password");
+            }
+        }
+
+        /// <summary>是否口令认证模式（XAML 用于禁用 PASS 输入框）。</summary>
+        public bool IsPasswordMode
+        {
+            get { return _authMode == ServerAuthMode.Password; }
         }
 
         /// <summary>
@@ -218,6 +262,17 @@ namespace EasyRDP.Server.Wpf.ViewModels
             Password = settings.Password ?? "";
             ChangeDetectionMode = settings.ChangeDetectionMode;
             AutoListen = settings.AutoListen;
+            _authMode = settings.AuthMode;
+            _authSalt = settings.AuthSalt ?? "";
+            // 首次运行生成并立即落盘 PBKDF2 盐：盐固定后同一口令派生密钥稳定，
+            // 也便于将来做口令预计算防护（盐不保密，明文存储即可）。
+            if (string.IsNullOrEmpty(_authSalt))
+            {
+                _authSalt = Convert.ToBase64String(EasyRDP.Core.Security.AuthCrypto.RandomBytes(16));
+                settings.AuthSalt = _authSalt;
+                if (!_settingsStore.Save(settings))
+                    Logger.Warn("Persist auth salt failed; using in-memory salt for this run");
+            }
             // 自启状态以注册表为准：用户可能在任务管理器中已禁用启动项
             _autoStart = AutoStartManager.IsEnabled();
 
@@ -458,10 +513,11 @@ namespace EasyRDP.Server.Wpf.ViewModels
             if (!int.TryParse(PortText, out int port))
                 port = 2000;
 
-            // 校验凭据非空
+            // 校验凭据：审批模式无需密码（由操作员确认）；口令模式必须配置非空凭据
             string username = Username ?? "";
             string password = Password ?? "";
-            if (string.IsNullOrEmpty(username) || string.IsNullOrEmpty(password))
+            if (_authMode == ServerAuthMode.Password
+                && (string.IsNullOrEmpty(username) || string.IsNullOrEmpty(password)))
             {
                 if (silent)
                 {
@@ -470,7 +526,7 @@ namespace EasyRDP.Server.Wpf.ViewModels
                 }
                 else
                 {
-                    _notifier.ShowWarning("Username and password must not be empty.", "Invalid credentials");
+                    _notifier.ShowWarning("Username and password must not be empty in password mode.", "Invalid credentials");
                 }
                 return;
             }
@@ -493,13 +549,18 @@ namespace EasyRDP.Server.Wpf.ViewModels
                 _transportAcceptor = new TcpTransportAcceptor();
                 _transportAcceptor.OnLog = (msg) => _dispatcher.Invoke(() => AddLog(msg));
 
-                // 构造凭据表：UI 配置的用户名/密码
-                var credentials = new System.Collections.Generic.Dictionary<string, string>
+                // v5 认证配置：挑战-响应口令模式 / 免密码审批模式。
+                // 保留对象引用，运行中修改 USER/PASS/AUTH 立即对后续握手生效。
+                _authConfig = new ServerAuthConfig
                 {
-                    { username, password }
+                    Mode = _authMode,
+                    Username = username,
+                    Password = password,
+                    Salt = DecodeAuthSalt()
                 };
 
-                _transportHost = new TransportHost(_captureService, _transportAcceptor, inputSim, cursorCapturer, clipboard, credentials);
+                _transportHost = new TransportHost(_captureService, _transportAcceptor, inputSim, cursorCapturer, clipboard, _authConfig);
+                _transportHost.ApprovalRequested += OnApprovalRequested;
                 // 注入当前帧变化检测模式（运行时 UI 修改会通过属性 setter 同步更新）
                 _transportHost.ChangeDetectionMode = _changeDetectionMode;
                 _transportHost.SessionAttached += OnSessionAttached;
@@ -530,20 +591,71 @@ namespace EasyRDP.Server.Wpf.ViewModels
             }
         }
 
-        /// <summary>
-        /// 启动即监听（窗口 Loaded 后调用一次）。
-        /// 未启用自动监听、已在运行或凭据未配置时直接返回，不产生任何弹框。
-        /// </summary>
+        /// <summary>启动即监听（窗口 Loaded 后调用一次）。</summary>
         public void TryAutoListen()
         {
             if (!_autoListen || IsRunning) return;
-            if (string.IsNullOrEmpty(Username) || string.IsNullOrEmpty(Password))
+            // 口令模式必须有凭据才能监听；审批模式可无凭据直接监听
+            if (_authMode == ServerAuthMode.Password
+                && (string.IsNullOrEmpty(Username) || string.IsNullOrEmpty(Password)))
             {
                 Logger.Info("Auto listen skipped: username/password not configured");
                 AddLog("Auto listen skipped: configure USER / PASS first");
                 return;
             }
             StartServerInternal(true);
+        }
+
+        /// <summary>把 Base64 盐解码为字节；配置损坏时回退为空（服务端将使用随机盐）。</summary>
+        private byte[] DecodeAuthSalt()
+        {
+            try
+            {
+                if (!string.IsNullOrEmpty(_authSalt))
+                    return Convert.FromBase64String(_authSalt);
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn(ex, "Decode auth salt failed; using random salt");
+            }
+            return new byte[0];
+        }
+
+        /// <summary>
+        /// 免密码审批：由传输线程同步调用。调度到 UI 线程弹窗，用户选择后返回；
+        /// 弹窗内部 60s 倒计时超时按拒绝处理。
+        /// </summary>
+        private bool OnApprovalRequested(ConnectionApprovalRequest request)
+        {
+            try
+            {
+                return (bool)_dispatcher.Invoke(new Func<bool>(() => ShowApprovalDialog(request)));
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn(ex, "Approval dialog failed for session {0}", request != null ? request.SessionId : 0);
+                return false;
+            }
+        }
+
+        /// <summary>显示连接审批窗口（窗口隐藏/最小化时先恢复，保证操作员能看到）。</summary>
+        private bool ShowApprovalDialog(ConnectionApprovalRequest request)
+        {
+            Window owner = Application.Current != null ? Application.Current.MainWindow : null;
+            if (owner != null)
+            {
+                if (!owner.IsVisible) owner.Show();
+                if (owner.WindowState == WindowState.Minimized) owner.WindowState = WindowState.Normal;
+                owner.Activate();
+            }
+
+            var dialog = new EasyRDP.Server.Wpf.Views.ConnectionApprovalWindow(request);
+            if (owner != null && !ReferenceEquals(owner, dialog)) dialog.Owner = owner;
+            bool approved = dialog.ShowDialog() == true;
+            AddLog(approved
+                ? "Connection approved: " + (request != null ? request.RemoteEndPoint : "")
+                : "Connection denied: " + (request != null ? request.RemoteEndPoint : ""));
+            return approved;
         }
 
         // ====== Stop 逻辑 ======
@@ -554,11 +666,13 @@ namespace EasyRDP.Server.Wpf.ViewModels
 
             if (_transportHost != null)
             {
+                _transportHost.ApprovalRequested -= OnApprovalRequested;
                 _transportHost.Stop();
                 _transportHost.SessionAttached -= OnSessionAttached;
                 _transportHost.SessionDetached -= OnSessionDetached;
             }
             _transportHost = null;
+            _authConfig = null;
             _transportAcceptor?.Dispose();
             _transportAcceptor = null;
             _captureService?.Stop();
@@ -573,7 +687,7 @@ namespace EasyRDP.Server.Wpf.ViewModels
             AddLog("Server stopped");
         }
 
-        /// <summary>把当前端口/用户名/密码保存到本地配置文件。</summary>
+        /// <summary>把当前端口/凭据/检测模式/认证设置保存到本地配置文件。</summary>
         public void SaveSettings()
         {
             bool ok = _settingsStore.Save(new ServerSettings
@@ -583,7 +697,9 @@ namespace EasyRDP.Server.Wpf.ViewModels
                 Password = Password ?? "",
                 ChangeDetectionMode = _changeDetectionMode,
                 AutoStart = _autoStart,
-                AutoListen = _autoListen
+                AutoListen = _autoListen,
+                AuthMode = _authMode,
+                AuthSalt = _authSalt
             });
             AddLog(ok ? "Settings saved" : "Settings save failed");
         }

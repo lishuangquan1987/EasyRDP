@@ -3,6 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:sys="clr-namespace:System;assembly=mscorlib"
         xmlns:proto="clr-namespace:EasyRDP.Core.Protocol;assembly=EasyRDP.Core"
+        xmlns:models="clr-namespace:EasyRDP.Server.Wpf.Models"
         xmlns:behaviors="clr-namespace:EasyRDP.Shared"
         Title="EasyRDP Server" Height="720" Width="940"
         MinHeight="560" MinWidth="800"
@@ -15,6 +16,14 @@
                             ObjectType="{x:Type sys:Enum}">
             <ObjectDataProvider.MethodParameters>
                 <x:Type TypeName="proto:ChangeDetectionMode"/>
+            </ObjectDataProvider.MethodParameters>
+        </ObjectDataProvider>
+        <!-- 认证模式枚举值：Password=口令认证，Approve=免密码人工审批 -->
+        <ObjectDataProvider x:Key="AuthModeValues"
+                            MethodName="GetValues"
+                            ObjectType="{x:Type sys:Enum}">
+            <ObjectDataProvider.MethodParameters>
+                <x:Type TypeName="models:ServerAuthMode"/>
             </ObjectDataProvider.MethodParameters>
         </ObjectDataProvider>
     </Window.Resources>
@@ -62,8 +71,9 @@
                              Style="{StaticResource LightTextBoxStyle}" Width="110"/>
                 </StackPanel>
 
-                <!-- Password -->
-                <StackPanel Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,12,0">
+                <!-- Password（审批模式下不需要口令，禁用输入框） -->
+                <StackPanel Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,12,0"
+                            IsEnabled="{Binding IsPasswordMode}">
                     <TextBlock Text="PASS" Style="{StaticResource ToolbarLabelStyle}" Margin="0,0,6,0"/>
                     <PasswordBox Style="{StaticResource LightPasswordBoxStyle}" Width="120"
                                  behaviors:PasswordBoxBehavior.BindPassword="True"
@@ -79,6 +89,18 @@
                               ItemsSource="{Binding Source={StaticResource ChangeDetectionModeValues}}"
                               SelectedItem="{Binding ChangeDetectionMode}"
                               ToolTip="帧变化检测模式：FullFrameMemcmp=原始全帧比对，BlockHashDirtyRect=块哈希小变化跳过编码。切换在下次会话接入时生效"/>
+                </StackPanel>
+
+                <!-- 认证模式：Password（挑战-响应口令）/ Approve（免密码，连接时人工确认） -->
+                <StackPanel Grid.Column="5" Orientation="Horizontal" VerticalAlignment="Center"
+                            HorizontalAlignment="Left" Margin="0,0,12,0">
+                    <TextBlock Text="AUTH" Style="{StaticResource ToolbarLabelStyle}" Margin="0,0,6,0"/>
+                    <ComboBox Width="110"
+                              Style="{StaticResource ToolbarComboBoxStyle}"
+                              IsReadOnly="True"
+                              ItemsSource="{Binding Source={StaticResource AuthModeValues}}"
+                              SelectedItem="{Binding AuthMode}"
+                              ToolTip="连接认证模式：Password=客户端输入 USER/PASS（挑战-响应，口令不上网）；Approve=客户端免密码，连接时本机弹窗确认。运行中切换立即生效"/>
                 </StackPanel>
 
                 <!-- 主操作按钮 -->

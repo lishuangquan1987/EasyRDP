@@ -25,8 +25,14 @@ namespace EasyRDP.Server.Wpf.Models
         /// <summary>是否随 Windows 登录自动启动（HKCU Run 项，注册表为准）。</summary>
         public bool AutoStart { get; set; }
 
-        /// <summary>程序启动后是否立即开始监听（凭据为空时静默跳过）。</summary>
+        /// <summary>程序启动后是否立即开始监听（Approve 模式下无需凭据；Password 模式凭据为空时静默跳过）。</summary>
         public bool AutoListen { get; set; }
+
+        /// <summary>连接认证模式（口令认证 / 人工审批）。</summary>
+        public ServerAuthMode AuthMode { get; set; }
+
+        /// <summary>PBKDF2 盐（Base64，16 字节）。首次运行生成后固定，用于挑战-响应派生。</summary>
+        public string AuthSalt { get; set; }
 
         public ServerSettings()
         {
@@ -38,6 +44,9 @@ namespace EasyRDP.Server.Wpf.Models
             // 自启需要显式开启（会写注册表）；监听默认开启，打开程序即可接受连接
             AutoStart = false;
             AutoListen = true;
+            // 默认口令认证：与历史版本行为一致；审批模式需显式切换
+            AuthMode = ServerAuthMode.Password;
+            AuthSalt = "";
         }
     }
 }

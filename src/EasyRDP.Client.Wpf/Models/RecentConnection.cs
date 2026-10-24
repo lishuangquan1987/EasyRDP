@@ -24,8 +24,11 @@ namespace EasyRDP.Client.Wpf.Models
         /// <summary>登录用户名（可空，表示无凭据）。</summary>
         public string? Username { get; set; }
 
-        /// <summary>登录密码（可空，表示无凭据；本地明文存储，同 ServerProfile 策略）。</summary>
+        /// <summary>登录密码（可空，表示无凭据或服务端为审批模式；落盘前由 RecentConnectionStore 做 DPAPI 加密）。</summary>
         public string? Password { get; set; }
+
+        /// <summary>是否在本机记住密码（false 时 RecentConnectionStore 不持久化 Password）。</summary>
+        public bool SavePassword { get; set; } = true;
 
         /// <summary>显示名称（可空，为空时 UI 回退到 Host）。</summary>
         public string? DisplayName { get; set; }

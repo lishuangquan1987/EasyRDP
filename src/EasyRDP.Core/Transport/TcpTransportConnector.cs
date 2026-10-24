@@ -36,6 +36,15 @@ namespace EasyRDP.Core.Transport
                     Logger.Warn("Connection timeout to {0} after {1}ms", endpoint, timeoutMs);
                     Log("Connection timeout to " + endpoint);
                     try { client.Close(); } catch { }
+                    // 关闭客户端会中止挂起的连接，异步操作随后以异常完成。
+                    // 必须在后台调用一次 EndConnect「观察」该异常，否则 .NET (Core/8+)
+                    // 会把它当作未观察的 Task 异常在终结器线程重抛，触发进程级 FATAL 日志。
+                    System.Threading.ThreadPool.QueueUserWorkItem(state =>
+                    {
+                        try { client.EndConnect(result); }
+                        catch { }
+                        try { client.Close(); } catch { }
+                    });
                     return null;
                 }
                 client.EndConnect(result);

@@ -95,10 +95,10 @@ namespace EasyRDP.Server.Wpf.Services
             }
         }
 
-        /// <summary>序列化为 JSON 对象（端口/用户名/密码 + 变化检测模式 + 自启/自动监听）。</summary>
+        /// <summary>序列化为 JSON 对象（端口/用户名/密码 + 变化检测模式 + 自启/自动监听 + 认证模式/盐）。</summary>
         private static string SerializeJson(ServerSettings s, string encryptedPassword)
         {
-            var sb = new StringBuilder(192);
+            var sb = new StringBuilder(256);
             sb.Append('{');
             sb.Append("\"Port\":\"").Append(Escape(s.Port)).Append("\",");
             sb.Append("\"Username\":\"").Append(Escape(s.Username)).Append("\",");
@@ -106,7 +106,9 @@ namespace EasyRDP.Server.Wpf.Services
             // 整型枚举以数字形式序列化，老版本读取时会被忽略（解析时仅识别已知键）
             sb.Append("\"ChangeDetectionMode\":").Append((int)s.ChangeDetectionMode).Append(',');
             sb.Append("\"AutoStart\":").Append(s.AutoStart ? "true" : "false").Append(',');
-            sb.Append("\"AutoListen\":").Append(s.AutoListen ? "true" : "false");
+            sb.Append("\"AutoListen\":").Append(s.AutoListen ? "true" : "false").Append(',');
+            sb.Append("\"AuthMode\":").Append((int)s.AuthMode).Append(',');
+            sb.Append("\"AuthSalt\":\"").Append(Escape(s.AuthSalt ?? "")).Append('"');
             sb.Append('}');
             return sb.ToString();
         }
@@ -155,6 +157,7 @@ namespace EasyRDP.Server.Wpf.Services
                         if (key == "Port") s.Port = token;
                         else if (key == "Username") s.Username = token;
                         else if (key == "Password") s.Password = SecretProtector.Unprotect(token) ?? "";
+                        else if (key == "AuthSalt") s.AuthSalt = token;
                         key = null;
                         expectValue = false;
                     }
@@ -187,6 +190,12 @@ namespace EasyRDP.Server.Wpf.Services
                             // 枚举值范围校验：未知值回退到默认（FullFrameMemcmp）
                             if (num >= 0 && num <= (int)ChangeDetectionMode.BlockHashDirtyRect)
                                 s.ChangeDetectionMode = (ChangeDetectionMode)num;
+                        }
+                        else if (key == "AuthMode")
+                        {
+                            // 未知值回退到默认口令认证（更安全，不会误开免密码）
+                            if (num == (int)ServerAuthMode.Password || num == (int)ServerAuthMode.Approve)
+                                s.AuthMode = (ServerAuthMode)num;
                         }
                     }
                     key = null;

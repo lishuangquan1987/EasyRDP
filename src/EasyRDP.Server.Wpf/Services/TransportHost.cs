@@ -5,13 +5,32 @@ using System.Threading;
 using EasyDesk.Core;
 using EasyDesk.Core.Models;
 using EasyRDP.Core.Protocol;
+using EasyRDP.Core.Security;
 using EasyRDP.Core.Services;
 using EasyRDP.Core.Session;
 using EasyRDP.Core.Transport;
+using EasyRDP.Server.Wpf.Models;
 using NLog;
 
 namespace EasyRDP.Server.Wpf.Services
 {
+    /// <summary>
+    /// 服务端连接审批请求：由传输线程发出，UI 层负责弹窗并把结果同步返回。
+    /// </summary>
+    public class ConnectionApprovalRequest
+    {
+        /// <summary>待审批的会话 ID。</summary>
+        public uint SessionId;
+        /// <summary>客户端自报用户名（可能为空）。</summary>
+        public string Username;
+        /// <summary>客户端远端地址。</summary>
+        public string RemoteEndPoint;
+        /// <summary>客户端协议版本。</summary>
+        public byte ClientVersion;
+        /// <summary>审批超时（秒），超时按拒绝处理。</summary>
+        public int TimeoutSeconds;
+    }
+
     /// <summary>
     /// 服务端传输主机。管理所有 Session 生命周期、握手、心跳、并发控制。
     /// </summary>
@@ -24,6 +43,12 @@ namespace EasyRDP.Server.Wpf.Services
 
         /// <summary>会话 detached 事件（UI 绑定用）。</summary>
         public event Action<uint> SessionDetached;
+
+        /// <summary>
+        /// 免密码审批模式下请求操作员确认。处理程序在传输接收线程上同步执行，
+        /// 必须向 UI 线程调度并阻塞等待用户选择（内部超时后返回 false）。
+        /// </summary>
+        public event Func<ConnectionApprovalRequest, bool> ApprovalRequested;
 
         private readonly ICaptureService _captureService;
         private readonly ITransportAcceptor _transportAcceptor;
@@ -158,8 +183,28 @@ namespace EasyRDP.Server.Wpf.Services
         private readonly System.Collections.Concurrent.ConcurrentQueue<byte[]> _serverImageSetQueue
             = new System.Collections.Concurrent.ConcurrentQueue<byte[]>();
 
-        // Authentication credentials: username → password (plaintext, sufficient for v1)
-        private readonly Dictionary<string, string> _credentials;
+        // 认证配置（v5）：挑战-响应 / 人工审批。运行期只读。
+        private readonly ServerAuthConfig _auth;
+        // 握手进行中的会话状态（收到 HandshakeReq 后、认证完成前）
+        private readonly Dictionary<uint, PendingAuth> _pendingAuths = new Dictionary<uint, PendingAuth>();
+        // 免密码审批等待上限：超时按拒绝处理，避免无人值守时连接一直挂着
+        private const int ApprovalTimeoutSeconds = 60;
+        // 审计日志（连接/断开/认证/审批）
+        private readonly AuditLogger _audit = new AuditLogger();
+
+        /// <summary>握手进行中的认证状态。</summary>
+        private class PendingAuth
+        {
+            public byte Version;
+            public CodecCapabilities Capabilities;
+            public byte Flags;
+            public string Username;
+            public byte[] ClientNonce;
+            public byte[] ServerNonce;
+            /// <summary>本次挑战实际使用的盐（服务端未配置持久化盐时为随机值）。</summary>
+            public byte[] Salt;
+            public string RemoteEndPoint;
+        }
 
         // 帧变化检测模式：由 MainWindowViewModel 在 Start 前从 ServerSettings 注入，
         // 运行时可更新（volatile 保证新会话建立时读到最新值，已有会话不受影响）。
@@ -197,14 +242,16 @@ namespace EasyRDP.Server.Wpf.Services
             IInputSimulator inputSimulator,
             ICursorCapturer cursorCapturer,
             IClipboardService clipboardService,
-            Dictionary<string, string> credentials)
+            ServerAuthConfig auth)
         {
             _captureService = captureService;
             _transportAcceptor = transportAcceptor;
             _inputSimulator = inputSimulator;
             _cursorTracker = new CursorTracker(cursorCapturer);
             _clipboardService = clipboardService;
-            _credentials = credentials ?? new Dictionary<string, string>();
+            _auth = auth ?? new ServerAuthConfig();
+            if (_auth.Salt == null || _auth.Salt.Length == 0)
+                Logger.Warn("Auth salt is empty; using a random salt per challenge");
 
             _transportAcceptor.ClientConnected += OnClientConnected;
 
@@ -295,6 +342,7 @@ namespace EasyRDP.Server.Wpf.Services
             _clipboardChangeSignal.Set();
 
             // Stop all sessions
+            List<SessionInfo> stoppedSessions = new List<SessionInfo>();
             lock (_lock)
             {
                 foreach (var kv in _sessions)
@@ -306,11 +354,25 @@ namespace EasyRDP.Server.Wpf.Services
                         kv.Value.Input?.Dispose();
                     }
                     catch { }
+                    stoppedSessions.Add(kv.Value);
                 }
                 _sessions.Clear();
+                _pendingAuths.Clear();
+                _activeCount = 0;
                 _transports.Clear();
                 _lastActivity.Clear();
                 _remoteEndpoints.Clear();
+            }
+            // 审计写在锁外：文件 I/O 不应阻塞其他线程
+            foreach (var info in stoppedSessions)
+            {
+                try
+                {
+                    _audit.LogDisconnect(0, info.Username, info.RemoteEndPoint,
+                        "reason=server-stop | codec=" + info.Codec + " | res=" + info.Resolution,
+                        DateTime.UtcNow - info.ConnectedAtUtc);
+                }
+                catch { }
             }
 
             // 清理所有 per-session 延迟渲染状态
@@ -986,7 +1048,7 @@ namespace EasyRDP.Server.Wpf.Services
         public void KickSession(uint sessionId)
         {
             Logger.Info("Session {0} kicked by UI", sessionId);
-            DisconnectSession(sessionId);
+            DisconnectSession(sessionId, "kicked");
         }
 
         private void OnClientConnected(object sender, TransportAcceptedEventArgs e)
@@ -1029,6 +1091,10 @@ namespace EasyRDP.Server.Wpf.Services
             if (e.MessageType == (byte)MessageType.HandshakeReq)
             {
                 HandleHandshake(sessionId, e);
+            }
+            else if (e.MessageType == (byte)MessageType.HandshakeProof)
+            {
+                HandleHandshakeProof(sessionId, e);
             }
             else
             {
@@ -1351,56 +1417,253 @@ namespace EasyRDP.Server.Wpf.Services
             }
         }
 
+        /// <summary>
+        /// 握手第一段（v5）：解析客户端 Hello，按认证模式下发挑战或进入人工审批。
+        /// 口令本身从不上网——口令模式走 AuthChallenge → HandshakeProof 两步挑战-响应。
+        /// </summary>
         private void HandleHandshake(uint sessionId, MessageReceivedEventArgs e)
         {
-            var req = HandshakeReq.Unpack(e.Data);
-            Logger.Info("Handshake request from sessionId={0}: version={1} username={2}",
-                sessionId, req.Version, req.Username);
-
-            HandshakeRes res;
-            if (req.Version != Constants.ProtocolVersion)
+            // 先读版本字节再解包：v4 及更早的 payload 布局不同，直接 Unpack 会读到错位长度甚至抛异常
+            if (e.Data == null || e.Data.Length < 3)
             {
-                Logger.Warn("Version mismatch: client={0} server={1}", req.Version, Constants.ProtocolVersion);
-                res = new HandshakeRes { Result = HandshakeResult.VersionMismatch };
-                SendResponse(sessionId, res);
-                DisconnectSession(sessionId);
+                RejectHandshake(sessionId, HandshakeResult.VersionMismatch, "", "malformed handshake");
+                return;
+            }
+            byte clientVersion = e.Data[0];
+            if (clientVersion != Constants.ProtocolVersion)
+            {
+                Logger.Warn("Version mismatch: client={0} server={1}", clientVersion, Constants.ProtocolVersion);
+                RejectHandshake(sessionId, HandshakeResult.VersionMismatch, "", "version " + clientVersion);
                 return;
             }
 
-            // Check concurrency limit
+            HandshakeReq req;
+            try
+            {
+                req = HandshakeReq.Unpack(e.Data);
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn(ex, "Handshake unpack failed for sessionId={0}", sessionId);
+                RejectHandshake(sessionId, HandshakeResult.InternalError, "", "bad handshake payload");
+                return;
+            }
+
+            string remote = GetRemoteEndpoint(sessionId);
+            Logger.Info("Handshake request from sessionId={0}: version={1} username={2} remote={3}",
+                sessionId, req.Version, req.Username, remote);
+
+            if (req.ClientNonce == null || req.ClientNonce.Length != 16)
+            {
+                RejectHandshake(sessionId, HandshakeResult.AuthFailed, req.Username, "missing client nonce");
+                return;
+            }
+
+            // 并发上限：只统计已建立的会话（文件通道/握手中的连接不占名额）
+            bool busy;
+            lock (_lock) { busy = _activeCount >= _maxSessions; }
+            if (busy)
+            {
+                Logger.Warn("Server busy: activeCount={0} maxSessions={1}", _activeCount, _maxSessions);
+                RejectHandshake(sessionId, HandshakeResult.ServerBusy, req.Username, "server busy");
+                return;
+            }
+
+            var pending = new PendingAuth
+            {
+                Version = req.Version,
+                Capabilities = req.Capabilities,
+                Flags = req.Flags,
+                Username = req.Username ?? "",
+                ClientNonce = req.ClientNonce,
+                RemoteEndPoint = remote
+            };
+            lock (_lock) { _pendingAuths[sessionId] = pending; }
+
+            if (_auth.Mode == ServerAuthMode.Approve)
+            {
+                HandleApproval(sessionId, pending);
+            }
+            else
+            {
+                // 口令认证：下发随机挑战。盐固定（持久化）可防跨连接预计算；
+                // 未配置盐时退化为每次随机（仍然安全，只是服务端配置缺失）。
+                pending.ServerNonce = AuthCrypto.RandomBytes(16);
+                pending.Salt = (_auth.Salt != null && _auth.Salt.Length > 0)
+                    ? _auth.Salt
+                    : AuthCrypto.RandomBytes(16);
+                var challenge = new AuthChallengeMessage
+                {
+                    ServerNonce = pending.ServerNonce,
+                    Salt = pending.Salt,
+                    Iterations = AuthCrypto.DefaultIterations
+                };
+                SendMessage(sessionId, (byte)MessageType.AuthChallenge, challenge.Pack());
+                Logger.Debug("AuthChallenge sent to session {0}", sessionId);
+            }
+        }
+
+        /// <summary>
+        /// 握手第二段：校验客户端 HMAC 证明。常量时间比较，失败计数写入审计。
+        /// </summary>
+        private void HandleHandshakeProof(uint sessionId, MessageReceivedEventArgs e)
+        {
+            PendingAuth pending;
             lock (_lock)
             {
-                if (_activeCount >= _maxSessions)
+                if (!_pendingAuths.TryGetValue(sessionId, out pending))
                 {
-                    Logger.Warn("Server busy: activeCount={0} maxSessions={1}", _activeCount, _maxSessions);
-                    res = new HandshakeRes { Result = HandshakeResult.ServerBusy };
-                    SendResponse(sessionId, res);
-                    DisconnectSession(sessionId);
+                    Logger.Warn("HandshakeProof without pending handshake: session={0}", sessionId);
+                    DisconnectSession(sessionId, "unexpected-proof");
                     return;
                 }
             }
 
-            // 简单认证：硬编码凭据表（后续应改为配置文件或外部凭据存储）
-            if (!ValidateCredentials(req.Username, req.Password))
+            HandshakeProofMessage proof;
+            try
             {
-                Logger.Warn("Auth failed for username='{0}'", req.Username);
-                res = new HandshakeRes { Result = HandshakeResult.AuthFailed };
-                SendResponse(sessionId, res);
-                DisconnectSession(sessionId);
+                proof = HandshakeProofMessage.Unpack(e.Data);
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn(ex, "HandshakeProof unpack failed for session {0}", sessionId);
+                lock (_lock) { _pendingAuths.Remove(sessionId); }
+                RejectHandshake(sessionId, HandshakeResult.AuthFailed, pending.Username, "bad proof payload");
                 return;
             }
 
+            bool ok = proof.Version == Constants.ProtocolVersion
+                && proof.Proof != null && proof.Proof.Length == 32
+                && string.Equals(pending.Username, _auth.Username ?? "", StringComparison.Ordinal);
+
+            if (ok)
+            {
+                // 口令模式必须配置了口令，否则拒绝（避免空口令被当作有效凭据）
+                if (string.IsNullOrEmpty(_auth.Password))
+                {
+                    ok = false;
+                }
+                else
+                {
+                    byte[] key = AuthCrypto.DeriveKey(_auth.Password, pending.Salt, AuthCrypto.DefaultIterations);
+                    byte[] expected = AuthCrypto.ComputeProof(key, pending.ServerNonce, pending.ClientNonce, pending.Username);
+                    ok = AuthCrypto.FixedTimeEquals(expected, proof.Proof);
+                }
+            }
+
+            lock (_lock) { _pendingAuths.Remove(sessionId); }
+
+            if (!ok)
+            {
+                Logger.Warn("Auth failed for username='{0}' remote={1}", pending.Username, pending.RemoteEndPoint);
+                RejectHandshake(sessionId, HandshakeResult.AuthFailed, pending.Username, "invalid credentials");
+                return;
+            }
+
+            FinishHandshake(sessionId, pending);
+        }
+
+        /// <summary>
+        /// 免密码审批：向 UI 发起确认请求并阻塞等待结果（UI 侧 60s 超时按拒绝处理）。
+        /// </summary>
+        private void HandleApproval(uint sessionId, PendingAuth pending)
+        {
+            bool approved = false;
+            var handler = ApprovalRequested;
+            if (handler == null)
+            {
+                Logger.Warn("Approve mode but no approval handler registered; denying session {0}", sessionId);
+            }
+            else
+            {
+                var request = new ConnectionApprovalRequest
+                {
+                    SessionId = sessionId,
+                    Username = pending.Username,
+                    RemoteEndPoint = pending.RemoteEndPoint,
+                    ClientVersion = pending.Version,
+                    TimeoutSeconds = ApprovalTimeoutSeconds
+                };
+                try
+                {
+                    approved = handler(request);
+                }
+                catch (Exception ex)
+                {
+                    Logger.Warn(ex, "Approval handler threw for session {0}", sessionId);
+                    approved = false;
+                }
+            }
+
+            lock (_lock) { _pendingAuths.Remove(sessionId); }
+            _audit.Log(approved ? "APPROVED" : "DENIED", sessionId, pending.Username, pending.RemoteEndPoint,
+                approved ? "mode=approve" : "mode=approve | reason=rejected-or-timeout");
+
+            if (!approved)
+            {
+                HandshakeRes denied = new HandshakeRes { Result = HandshakeResult.Denied };
+                SendResponse(sessionId, denied);
+                DisconnectSession(sessionId, "approval-denied");
+                return;
+            }
+
+            FinishHandshake(sessionId, pending);
+        }
+
+        /// <summary>拒绝握手：回发结果、写审计、断开连接。</summary>
+        private void RejectHandshake(uint sessionId, HandshakeResult result, string username, string reason)
+        {
+            string remote = GetRemoteEndpoint(sessionId);
+            Logger.Warn("Handshake rejected: result={0} user='{1}' remote={2} reason={3}",
+                result, username, remote, reason);
+            _audit.Log(result == HandshakeResult.AuthFailed || result == HandshakeResult.Denied ? "AUTH_FAIL" : "REJECT",
+                sessionId, username, remote, "result=" + result + " | " + reason);
+            HandshakeRes res = new HandshakeRes { Result = result };
+            SendResponse(sessionId, res);
+            DisconnectSession(sessionId, "handshake-" + result);
+        }
+
+        /// <summary>读取会话的远端地址（不存在时返回 "?"）。</summary>
+        private string GetRemoteEndpoint(uint sessionId)
+        {
+            lock (_lock)
+            {
+                string remote;
+                if (_remoteEndpoints.TryGetValue(sessionId, out remote))
+                    return remote;
+            }
+            return "?";
+        }
+
+        /// <summary>
+        /// 认证通过后建立会话：协商编码、启动视频流、回发 HandshakeRes（含文件通道 token）。
+        /// </summary>
+        private void FinishHandshake(uint sessionId, PendingAuth pending)
+        {
+            // 审批可能耗时数十秒；期间客户端可能已断开（transport 已被移除）。
+            // 此时不能再建会话，否则会留下一个永远收不到数据的"幽灵会话"。
+            lock (_lock)
+            {
+                ITransport aliveTransport;
+                if (!_transports.TryGetValue(sessionId, out aliveTransport) || !aliveTransport.IsConnected)
+                {
+                    Logger.Info("Handshake aborted: connection already closed (session {0})", sessionId);
+                    return;
+                }
+            }
+
+            HandshakeRes res;
             // Negotiate codec
             var serverCaps = EncoderFactory.GetAvailableCodecs();
-            var negotiated = CodecNegotiator.Negotiate(req.Capabilities, serverCaps);
+            var negotiated = CodecNegotiator.Negotiate(pending.Capabilities, serverCaps);
             if (!negotiated.HasValue)
             {
                 // H.264 是唯一编码方式（设计文档 D1 禁止回退原始像素）。
                 // 无公共编码器（含服务端无编码器）直接拒绝，避免客户端拿到 Success 后黑屏。
-                Logger.Warn("No common codec: clientCaps={0} serverCaps={1}", req.Capabilities, serverCaps);
+                Logger.Warn("No common codec: clientCaps={0} serverCaps={1}", pending.Capabilities, serverCaps);
                 res = new HandshakeRes { Result = HandshakeResult.NoCommonCodec };
                 SendResponse(sessionId, res);
-                DisconnectSession(sessionId);
+                DisconnectSession(sessionId, "no-common-codec");
                 return;
             }
 
@@ -1427,19 +1690,30 @@ namespace EasyRDP.Server.Wpf.Services
                     // 线程池调度，避免与编码线程自我 Join 死锁
                     System.Threading.ThreadPool.QueueUserWorkItem(state =>
                     {
-                        try { DisconnectSession(sessionId); }
+                        try { DisconnectSession(sessionId, "stream-fatal"); }
                         catch (Exception ex) { Logger.Warn(ex, "Fatal-error disconnect failed"); }
                     });
                 };
 
                 var inputSession = new ServerInputSession(_inputSimulator);
+                // 文件通道鉴权 token：随 HandshakeRes 下发给客户端，
+                // 客户端用独立 TCP 连接 + 该 token 打开文件通道（不占会话名额）。
+                byte[] sessionToken = AuthCrypto.RandomBytes(16);
+                string codecName = negotiated.Value.ToString();
+                string resolution = bounds.Width + "x" + bounds.Height;
 
                 lock (_lock)
                 {
                     _sessions[sessionId] = new SessionInfo
                     {
                         Stream = streamSession,
-                        Input = inputSession
+                        Input = inputSession,
+                        Username = pending.Username,
+                        RemoteEndPoint = pending.RemoteEndPoint,
+                        ConnectedAtUtc = DateTime.UtcNow,
+                        Codec = codecName,
+                        Resolution = resolution,
+                        SessionToken = sessionToken
                     };
                     _activeCount++;
                 }
@@ -1463,26 +1737,21 @@ namespace EasyRDP.Server.Wpf.Services
                     ScreenWidth = streamSession.EncodeWidth,
                     ScreenHeight = streamSession.EncodeHeight,
                     ContentWidth = bounds.Width,
-                    ContentHeight = bounds.Height
+                    ContentHeight = bounds.Height,
+                    SessionToken = sessionToken
                 };
                 SendResponse(sessionId, res);
-                Logger.Info("Handshake success: sessionId={0} codec={1} resolution={2}x{3}",
-                    sessionId, negotiated.Value, bounds.Width, bounds.Height);
+                Logger.Info("Handshake success: sessionId={0} codec={1} resolution={2}x{3} user={4}",
+                    sessionId, negotiated.Value, bounds.Width, bounds.Height, pending.Username);
                 Logger.Info("Session {0} stream started with codec {1}", sessionId, negotiated.Value);
+                _audit.Log("CONNECT", sessionId, pending.Username, pending.RemoteEndPoint,
+                    "codec=" + codecName + " | res=" + resolution);
 
                 // Fire session attached event
                 var handler = SessionAttached;
                 if (handler != null)
                 {
-                    string remote;
-                    lock (_lock)
-                    {
-                        if (!_remoteEndpoints.TryGetValue(sessionId, out remote))
-                            remote = "?";
-                    }
-                    string codec = negotiated.Value.ToString();
-                    string resolution = bounds.Width + "x" + bounds.Height;
-                    handler(sessionId, remote, codec, resolution);
+                    handler(sessionId, pending.RemoteEndPoint, codecName, resolution);
                 }
             }
             catch (Exception ex)
@@ -1491,7 +1760,7 @@ namespace EasyRDP.Server.Wpf.Services
                 Logger.Error(ex, "Handshake session startup failed for sessionId={0}", sessionId);
                 res = new HandshakeRes { Result = HandshakeResult.InternalError };
                 SendResponse(sessionId, res);
-                DisconnectSession(sessionId);
+                DisconnectSession(sessionId, "session-start-failed");
             }
         }
 
@@ -1527,15 +1796,16 @@ namespace EasyRDP.Server.Wpf.Services
 
         private void OnTransportDisconnected(uint sessionId)
         {
-            DisconnectSession(sessionId);
+            DisconnectSession(sessionId, "transport-closed");
 
             var handler = SessionDetached;
             if (handler != null) handler(sessionId);
         }
 
-        private void DisconnectSession(uint sessionId)
+        /// <summary>断开指定会话。<paramref name="reason"/> 仅用于日志与审计区分断开原因。</summary>
+        private void DisconnectSession(uint sessionId, string reason = "client-disconnect")
         {
-            Logger.Info("Disconnecting session {0}", sessionId);
+            Logger.Info("Disconnecting session {0} (reason={1})", sessionId, reason);
             SessionInfo info = null;
             ITransport transport = null;
             bool hasSession;
@@ -1552,6 +1822,7 @@ namespace EasyRDP.Server.Wpf.Services
                 _transports.Remove(sessionId);
                 _lastActivity.Remove(sessionId);
                 _remoteEndpoints.Remove(sessionId);
+                _pendingAuths.Remove(sessionId);
             }
 
             if (!hasSession)
@@ -1606,6 +1877,16 @@ namespace EasyRDP.Server.Wpf.Services
                 try { transport.Disconnect(); } catch { }
             }
             Logger.Info("Session {0} disconnected", sessionId);
+            try
+            {
+                _audit.LogDisconnect(sessionId, info.Username, info.RemoteEndPoint,
+                    "reason=" + reason + " | codec=" + info.Codec + " | res=" + info.Resolution,
+                    DateTime.UtcNow - info.ConnectedAtUtc);
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn(ex, "Audit disconnect log failed");
+            }
 
             // 无会话后停止捕获与光标追踪（服务端保持监听，等待下一客户端）
             StopCaptureIfIdle();
@@ -1699,7 +1980,7 @@ namespace EasyRDP.Server.Wpf.Services
                 foreach (var sid in timedOut)
                 {
                     Logger.Warn("Session {0} heartbeat timeout — disconnecting", sid);
-                    DisconnectSession(sid);
+                    DisconnectSession(sid, "heartbeat-timeout");
                 }
             }
         }
@@ -1787,21 +2068,6 @@ namespace EasyRDP.Server.Wpf.Services
                 }
             }
         }
-
-        /// <summary>
-        /// 验证凭据。读取 UI 配置的凭据表（_credentials）。
-        /// 若 _credentials 为空，默认拒绝所有连接。
-        /// </summary>
-        private bool ValidateCredentials(string username, string password)
-        {
-            if (string.IsNullOrEmpty(username) || string.IsNullOrEmpty(password))
-                return false;
-            string stored;
-            if (_credentials.TryGetValue(username, out stored))
-                return stored == password;
-            return false;
-        }
-
 
     }
 }
