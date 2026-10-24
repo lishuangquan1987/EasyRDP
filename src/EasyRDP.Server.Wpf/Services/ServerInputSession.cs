@@ -21,12 +21,24 @@ namespace EasyRDP.Server.Wpf.Services
         // 最近一次客户端请求的鼠标位置（点击诊断用：点击落点 = 光标所在位置）
         private int _lastRequestedX;
         private int _lastRequestedY;
+        // 采集显示器相对主屏的原点偏移：客户端坐标是"选中显示器局部坐标"，
+        // EasyDesk 的绝对鼠标映射会加主屏原点，因此这里先补偿 (显示器原点 - 主屏原点)。
+        private volatile int _displayOffsetX;
+        private volatile int _displayOffsetY;
 
         public ServerInputSession(IInputSimulator inputSimulator)
         {
             if (inputSimulator == null)
                 throw new ArgumentNullException("inputSimulator");
             _inputSimulator = inputSimulator;
+        }
+
+        /// <summary>更新采集显示器相对主屏的坐标偏移（切换显示器/热插拔时由 TransportHost 调用）。</summary>
+        public void SetDisplayOffset(int offsetX, int offsetY)
+        {
+            _displayOffsetX = offsetX;
+            _displayOffsetY = offsetY;
+            Logger.Info("Input display offset set to ({0},{1})", offsetX, offsetY);
         }
 
         public bool HandleInput(InputEventMessage msg)
@@ -49,19 +61,22 @@ namespace EasyRDP.Server.Wpf.Services
                         _inputSimulator.SendKeyUp((VirtualKeyCode)msg.KeyCode);
                         return true;
                     case InputEventType.MouseMove:
-                        _lastRequestedX = msg.X;
-                        _lastRequestedY = msg.Y;
+                        // 客户端坐标是选中显示器的局部坐标；加偏移换算到"主屏坐标系"，
+                        // EasyDesk 随后再加主屏原点得到虚拟桌面绝对坐标。
+                        _lastRequestedX = msg.X + _displayOffsetX;
+                        _lastRequestedY = msg.Y + _displayOffsetY;
                         if ((_mouseMoveLogCounter++ % 20) == 0)
-                            Logger.Debug("MouseMove requested=({0},{1})", msg.X, msg.Y);
-                        _inputSimulator.SendMouseMove(msg.X, msg.Y, true);
+                            Logger.Debug("MouseMove requested=({0},{1}) offset=({2},{3})",
+                                msg.X, msg.Y, _displayOffsetX, _displayOffsetY);
+                        _inputSimulator.SendMouseMove(_lastRequestedX, _lastRequestedY, true);
                         return true;
                     case InputEventType.MouseDown:
                         // 客户端在 MouseDown 中携带了映射坐标 (X,Y)。
                         // 先移动光标到该坐标再点击：光标可能因编码负载滞后于客户端鼠标位置，
                         // 若不校正，点击会落在旧光标位置（"点击无效果"假象）。
                         // X=Y=0 表示旧版客户端不携带坐标，回退到 lastRequested。
-                        int downX = msg.X != 0 || msg.Y != 0 ? msg.X : _lastRequestedX;
-                        int downY = msg.X != 0 || msg.Y != 0 ? msg.Y : _lastRequestedY;
+                        int downX = msg.X != 0 || msg.Y != 0 ? msg.X + _displayOffsetX : _lastRequestedX;
+                        int downY = msg.X != 0 || msg.Y != 0 ? msg.Y + _displayOffsetY : _lastRequestedY;
                         Logger.Debug("MouseDown button={0} at ({1},{2}) lastRequested=({3},{4})",
                             msg.KeyCode, downX, downY, _lastRequestedX, _lastRequestedY);
                         if (msg.X != 0 || msg.Y != 0)
@@ -69,8 +84,8 @@ namespace EasyRDP.Server.Wpf.Services
                         _inputSimulator.SendMouseButton((MouseButton)msg.KeyCode, true);
                         return true;
                     case InputEventType.MouseUp:
-                        int upX = msg.X != 0 || msg.Y != 0 ? msg.X : _lastRequestedX;
-                        int upY = msg.X != 0 || msg.Y != 0 ? msg.Y : _lastRequestedY;
+                        int upX = msg.X != 0 || msg.Y != 0 ? msg.X + _displayOffsetX : _lastRequestedX;
+                        int upY = msg.X != 0 || msg.Y != 0 ? msg.Y + _displayOffsetY : _lastRequestedY;
                         Logger.Debug("MouseUp button={0} at ({1},{2}) lastRequested=({3},{4})",
                             msg.KeyCode, upX, upY, _lastRequestedX, _lastRequestedY);
                         if (msg.X != 0 || msg.Y != 0)

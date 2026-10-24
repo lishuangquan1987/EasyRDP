@@ -41,6 +41,12 @@ namespace EasyRDP.Server.Wpf.Services
         // 捕获宽度变化信号：编码线程设置后，捕获线程在下一轮迭代立即重算目标分辨率
         // （避免等待每 600 帧一次的 bounds 周期刷新，降档延迟最多约一个截屏周期 ~16ms）。
         private volatile bool _captureWidthDirty;
+        // 采集显示器：0=主屏，1..n=按枚举顺序的副屏（与 EasyDesk CaptureOptions.TargetDisplay 一致）
+        private volatile int _captureDisplay;
+        // 显示器切换信号：捕获线程下一轮立即重算边界并通知会话（重建编码器 + 关键帧）
+        private volatile bool _captureDisplayDirty;
+        // 选中的显示器边界变化（切换/热插拔/分辨率变化），参数为新的边界
+        public event Action<DesktopBounds> DisplayBoundsChanged;
         // 生命周期锁：Start/Stop 在并发会话接入/断开下必须串行（防止检查-执行竞态产生双线程）
         private readonly object _lifecycleLock = new object();
 
@@ -172,6 +178,62 @@ namespace EasyRDP.Server.Wpf.Services
             return _capturer.GetPrimaryScreen();
         }
 
+        /// <summary>当前采集的显示器编号（0=主屏，1..n=副屏）。</summary>
+        public int CaptureDisplay { get { return _captureDisplay; } }
+
+        /// <summary>
+        /// 切换采集显示器。运行中切换由捕获线程在下一轮迭代生效：
+        /// 重新计算边界 → 触发 DisplayBoundsChanged → 会话重建编码器并发关键帧。
+        /// </summary>
+        public void SetCaptureDisplay(int displayIndex)
+        {
+            if (displayIndex < 0) displayIndex = 0;
+            if (_captureDisplay == displayIndex) return;
+            _captureDisplay = displayIndex;
+            _captureDisplayDirty = true;
+            Logger.Info("CaptureService: capture display set to {0}", displayIndex);
+        }
+
+        /// <summary>
+        /// 解析当前选中显示器的边界（虚拟桌面坐标）。
+        /// 索引语义与 EasyDesk 一致：0=主屏（按 IsPrimary 查找），1..n=副屏（按枚举顺序）。
+        /// </summary>
+        public DesktopBounds GetCaptureBounds()
+        {
+            DesktopBounds[] screens = _capturer.GetAllScreens();
+            int wanted = _captureDisplay;
+            if (wanted <= 0)
+            {
+                foreach (DesktopBounds s in screens)
+                {
+                    if (s.IsPrimary) return s;
+                }
+                if (screens.Length > 0) return screens[0];
+                throw new InvalidOperationException("No display found");
+            }
+
+            int secondarySeen = 0;
+            foreach (DesktopBounds s in screens)
+            {
+                if (s.IsPrimary) continue;
+                if (secondarySeen == wanted - 1) return s;
+                secondarySeen++;
+            }
+            throw new ArgumentOutOfRangeException("displayIndex",
+                string.Format("Display index {0} out of range ({1} secondary displays)", wanted, secondarySeen));
+        }
+
+        /// <summary>
+        /// 解析当前采集区域（供持有 ICaptureService 的调用方使用）：
+        /// CaptureService 实现返回选中显示器，其他实现回退主屏。
+        /// </summary>
+        public static DesktopBounds ResolveBounds(ICaptureService captureService)
+        {
+            CaptureService concrete = captureService as CaptureService;
+            if (concrete != null) return concrete.GetCaptureBounds();
+            return captureService.GetPrimaryScreen();
+        }
+
         /// <summary>Disposes the service by stopping the capture thread.</summary>
         public void Dispose()
         {
@@ -182,11 +244,9 @@ namespace EasyRDP.Server.Wpf.Services
         {
             int captureCount = 0;
             int errorCount = 0;
-            // 只捕获主屏：会话握手尺寸/编码器尺寸/鼠标坐标空间均以主屏为准，
-            // 捕获整个虚拟桌面会导致帧尺寸超过会话预分配缓冲（全部丢帧=黑屏），
-            // 且多显示器时鼠标坐标与画面内容错位。IncludeCursor=false：
-            // DXGI/BitBlt 捕获均不含光标，光标由 CursorTracker 叠加层单独同步。
-            var options = new CaptureOptions { IncludeCursor = false, TargetDisplay = 0 };
+            // 采集选中的显示器（默认主屏）：会话握手尺寸/编码器尺寸/鼠标坐标空间均以该屏为准。
+            // IncludeCursor=false：DXGI/BitBlt 捕获均不含光标，光标由 CursorTracker 叠加层单独同步。
+            var options = new CaptureOptions { IncludeCursor = false, TargetDisplay = _captureDisplay };
 
             // 计算目标捕获分辨率：屏幕尺寸超限时等比例缩小（宽高取偶数满足 I420）。
             // 直接按目标分辨率 StretchBlt，编码线程不再做托管软件缩放。
@@ -196,11 +256,16 @@ namespace EasyRDP.Server.Wpf.Services
             {
                 try
                 {
-                    DesktopBounds primary = _capturer.GetPrimaryScreen();
-                    screenX = primary.X;
-                    screenY = primary.Y;
-                    screenW = primary.Width;
-                    screenH = primary.Height;
+                    DesktopBounds display = GetCaptureBounds();
+                    bool boundsChanged = display.X != screenX || display.Y != screenY
+                        || display.Width != screenW || display.Height != screenH;
+                    screenX = display.X;
+                    screenY = display.Y;
+                    screenW = display.Width;
+                    screenH = display.Height;
+                    // 下发路径的 TargetDisplay 与当前选择保持一致（CaptureScreen 兜底分支使用）
+                    options.TargetDisplay = _captureDisplay;
+
                     int newW = screenW;
                     int newH = screenH;
                     if (CaptureMaxWidth > 0 && newW > CaptureMaxWidth)
@@ -211,10 +276,22 @@ namespace EasyRDP.Server.Wpf.Services
                     newW = (newW + 1) & ~1;
                     newH = (newH + 1) & ~1;
                     if (newW != targetW || newH != targetH)
-                        Logger.Info("CaptureLoop: target resolution {0}x{1} (screen {2}x{3})",
-                            newW, newH, screenW, screenH);
+                        Logger.Info("CaptureLoop: target resolution {0}x{1} (display {2} {3}x{4} at {5},{6})",
+                            newW, newH, _captureDisplay, screenW, screenH, screenX, screenY);
                     targetW = newW;
                     targetH = newH;
+
+                    if (boundsChanged)
+                    {
+                        Logger.Info("CaptureLoop: display bounds changed → display={0} {1}x{2} at ({3},{4})",
+                            _captureDisplay, screenW, screenH, screenX, screenY);
+                        var changedHandler = DisplayBoundsChanged;
+                        if (changedHandler != null)
+                        {
+                            try { changedHandler(display); }
+                            catch (Exception ex) { Logger.Warn(ex, "DisplayBoundsChanged handler failed"); }
+                        }
+                    }
                     return true;
                 }
                 catch (Exception ex)
@@ -225,7 +302,28 @@ namespace EasyRDP.Server.Wpf.Services
                     return false;
                 }
             };
-            refreshCaptureBounds();
+            // 首次刷新不广播（初始边界由会话自己读取），避免启动瞬间重复触发重建
+            try
+            {
+                DesktopBounds initial = GetCaptureBounds();
+                screenX = initial.X;
+                screenY = initial.Y;
+                screenW = initial.Width;
+                screenH = initial.Height;
+                int nw = screenW;
+                int nh = screenH;
+                if (CaptureMaxWidth > 0 && nw > CaptureMaxWidth)
+                {
+                    nh = Math.Max(1, (int)((long)nh * CaptureMaxWidth / nw));
+                    nw = CaptureMaxWidth;
+                }
+                targetW = (nw + 1) & ~1;
+                targetH = (nh + 1) & ~1;
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn(ex, "CaptureLoop: initial capture bounds failed");
+            }
             // 约每 10 秒（60fps × 600 次）重新读取屏幕边界，应对运行中分辨率切换/显示器热插拔
             int boundsRefreshCounter = 0;
 
@@ -233,11 +331,19 @@ namespace EasyRDP.Server.Wpf.Services
             {
                 try
                 {
-                    // D11 降/升档时立即重算目标分辨率（不等 600 帧周期刷新），
-                    // 使 StretchBlt 降采样尽快生效，避免编码线程继续做托管缩放。
+                    // D11 降/升档或显示器切换时立即重算目标分辨率（不等 600 帧周期刷新），
+                    // 使 StretchBlt 降采样/换屏尽快生效。
                     if (_captureWidthDirty)
                     {
                         _captureWidthDirty = false;
+                        refreshCaptureBounds();
+                        boundsRefreshCounter = 0;
+                    }
+                    if (_captureDisplayDirty)
+                    {
+                        _captureDisplayDirty = false;
+                        // 换屏后旧缩略图参考帧无效（分辨率可能相同，但内容完全不同）
+                        _thumbReady = false;
                         refreshCaptureBounds();
                         boundsRefreshCounter = 0;
                     }

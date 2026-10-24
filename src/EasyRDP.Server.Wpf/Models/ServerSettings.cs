@@ -34,6 +34,9 @@ namespace EasyRDP.Server.Wpf.Models
         /// <summary>PBKDF2 盐（Base64，16 字节）。首次运行生成后固定，用于挑战-响应派生。</summary>
         public string AuthSalt { get; set; }
 
+        /// <summary>采集显示器索引（0=主屏，1..n=副屏，与 EasyDesk TargetDisplay 一致）。</summary>
+        public int CaptureDisplay { get; set; }
+
         public ServerSettings()
         {
             Port = "2000";
@@ -47,6 +50,8 @@ namespace EasyRDP.Server.Wpf.Models
             // 默认口令认证：与历史版本行为一致；审批模式需显式切换
             AuthMode = ServerAuthMode.Password;
             AuthSalt = "";
+            // 默认采集主屏（与历史行为一致）
+            CaptureDisplay = 0;
         }
     }
 }

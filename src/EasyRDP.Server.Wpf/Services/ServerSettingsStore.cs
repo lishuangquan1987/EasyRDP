@@ -108,7 +108,8 @@ namespace EasyRDP.Server.Wpf.Services
             sb.Append("\"AutoStart\":").Append(s.AutoStart ? "true" : "false").Append(',');
             sb.Append("\"AutoListen\":").Append(s.AutoListen ? "true" : "false").Append(',');
             sb.Append("\"AuthMode\":").Append((int)s.AuthMode).Append(',');
-            sb.Append("\"AuthSalt\":\"").Append(Escape(s.AuthSalt ?? "")).Append('"');
+            sb.Append("\"AuthSalt\":\"").Append(Escape(s.AuthSalt ?? "")).Append("\",");
+            sb.Append("\"CaptureDisplay\":").Append(s.CaptureDisplay);
             sb.Append('}');
             return sb.ToString();
         }
@@ -196,6 +197,12 @@ namespace EasyRDP.Server.Wpf.Services
                             // 未知值回退到默认口令认证（更安全，不会误开免密码）
                             if (num == (int)ServerAuthMode.Password || num == (int)ServerAuthMode.Approve)
                                 s.AuthMode = (ServerAuthMode)num;
+                        }
+                        else if (key == "CaptureDisplay")
+                        {
+                            // 负数无意义（-1=虚拟桌面暂不支持）：回退主屏
+                            if (num >= 0 && num < 32)
+                                s.CaptureDisplay = num;
                         }
                     }
                     key = null;

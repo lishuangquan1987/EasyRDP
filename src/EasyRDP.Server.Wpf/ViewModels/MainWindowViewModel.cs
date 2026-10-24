@@ -56,6 +56,9 @@ namespace EasyRDP.Server.Wpf.ViewModels
         private string _authSalt = "";
         // 运行中的认证配置对象（TransportHost 持有同一引用，UI 改动即时生效）
         private ServerAuthConfig _authConfig;
+        // 采集显示器索引（0=主屏，1..n=副屏）
+        private int _captureDisplayIndex;
+        private DisplayItem _selectedDisplay;
 
         // 设置持久化：%AppData%\EasyRDP\server\settings.json
         private readonly ServerSettingsStore _settingsStore = new ServerSettingsStore();
@@ -172,6 +175,96 @@ namespace EasyRDP.Server.Wpf.ViewModels
             get { return _authMode == ServerAuthMode.Password; }
         }
 
+        /// <summary>可采集的显示器列表（索引 0=主屏，1..n=副屏）。</summary>
+        public ObservableCollection<DisplayItem> Displays { get; } =
+            new ObservableCollection<DisplayItem>();
+
+        /// <summary>
+        /// 当前采集目标显示器。运行中切换立即生效：捕获线程换边界 →
+        /// 会话重建编码器并发关键帧 → 输入坐标原点同步偏移。
+        /// </summary>
+        public DisplayItem SelectedDisplay
+        {
+            get { return _selectedDisplay; }
+            set
+            {
+                if (value == null || ReferenceEquals(_selectedDisplay, value)) return;
+                _selectedDisplay = value;
+                _captureDisplayIndex = value.Index;
+                OnPropertyChanged(nameof(SelectedDisplay));
+                // 运行中：由 TransportHost 统一驱动（内部同时刷新鼠标偏移）
+                if (_transportHost != null) _transportHost.SetCaptureDisplay(value.Index);
+                AddLog("Capture display: " + value.DisplayText);
+            }
+        }
+
+        /// <summary>
+        /// 枚举本机显示器刷新下拉列表，并尽量保留用户此前的选择。
+        /// 主屏固定排在索引 0，副屏按 EnumDisplayMonitors 顺序排 1..n，
+        /// 语义与 CaptureService.GetCaptureBounds 完全一致。
+        /// </summary>
+        private void RefreshDisplays()
+        {
+            try
+            {
+                EasyDesk.Core.IScreenCapturer capturer = new WindowsDesktopFactory().CreateScreenCapturer();
+                EasyDesk.Core.Models.DesktopBounds[] screens = capturer.GetAllScreens();
+                if (screens == null || screens.Length == 0) return;
+
+                int desired = _captureDisplayIndex;
+                Displays.Clear();
+
+                // 先主屏，再副屏；单显示器机器上只有一项，界面仍可用不出错
+                EasyDesk.Core.Models.DesktopBounds primary = null;
+                int secondaryCount = 0;
+                foreach (EasyDesk.Core.Models.DesktopBounds s in screens)
+                {
+                    if (s.IsPrimary) { primary = s; break; }
+                }
+                if (primary == null) primary = screens[0];
+                Displays.Add(NewDisplayItem(0, primary, true));
+
+                int nextIndex = 1;
+                foreach (EasyDesk.Core.Models.DesktopBounds s in screens)
+                {
+                    if (ReferenceEquals(s, primary)) continue;
+                    Displays.Add(NewDisplayItem(nextIndex++, s, false));
+                    secondaryCount++;
+                }
+
+                if (desired > secondaryCount) desired = 0;
+                if (desired < 0) desired = 0;
+                _captureDisplayIndex = desired;
+
+                DisplayItem match = null;
+                foreach (DisplayItem d in Displays)
+                {
+                    if (d.Index == desired) { match = d; break; }
+                }
+                // 直接赋字段：刷新列表不算"用户切换"，不应下发给运行中的会话
+                _selectedDisplay = match;
+                OnPropertyChanged(nameof(SelectedDisplay));
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn(ex, "RefreshDisplays failed");
+            }
+        }
+
+        /// <summary>构造一个显示器下拉项。</summary>
+        private static DisplayItem NewDisplayItem(int index, EasyDesk.Core.Models.DesktopBounds bounds, bool isPrimary)
+        {
+            string text = "Display " + (index + 1) + " · " + bounds.Width + "×" + bounds.Height
+                + (isPrimary ? " (Primary)" : " (" + bounds.X + "," + bounds.Y + ")");
+            DisplayItem item = new DisplayItem();
+            item.Index = index;
+            item.DisplayText = text;
+            item.Width = bounds.Width;
+            item.Height = bounds.Height;
+            item.IsPrimary = isPrimary;
+            return item;
+        }
+
         /// <summary>
         /// 帧变化检测模式。UI 可切换：
         /// - FullFrameMemcmp（原始方式，全帧 memcmp）
@@ -264,6 +357,8 @@ namespace EasyRDP.Server.Wpf.ViewModels
             AutoListen = settings.AutoListen;
             _authMode = settings.AuthMode;
             _authSalt = settings.AuthSalt ?? "";
+            _captureDisplayIndex = settings.CaptureDisplay;
+            RefreshDisplays();
             // 首次运行生成并立即落盘 PBKDF2 盐：盐固定后同一口令派生密钥稳定，
             // 也便于将来做口令预计算防护（盐不保密，明文存储即可）。
             if (string.IsNullOrEmpty(_authSalt))
@@ -543,6 +638,9 @@ namespace EasyRDP.Server.Wpf.ViewModels
                 var clipboard = factory.CreateClipboardService();
 
                 _captureService = new CaptureService(capturer);
+                // 应用已选采集显示器（停机期间的选择、或停机期间插拔显示器后的索引回退，在启动时生效）
+                RefreshDisplays();
+                _captureService.SetCaptureDisplay(_captureDisplayIndex);
                 // 捕获与光标追踪由 TransportHost 在首个客户端会话接入时惰性启动、
                 // 最后一个会话断开时停止：无客户端时不截屏，避免资源浪费与本机光标异常。
 
@@ -699,7 +797,8 @@ namespace EasyRDP.Server.Wpf.ViewModels
                 AutoStart = _autoStart,
                 AutoListen = _autoListen,
                 AuthMode = _authMode,
-                AuthSalt = _authSalt
+                AuthSalt = _authSalt,
+                CaptureDisplay = _captureDisplayIndex
             });
             AddLog(ok ? "Settings saved" : "Settings save failed");
         }

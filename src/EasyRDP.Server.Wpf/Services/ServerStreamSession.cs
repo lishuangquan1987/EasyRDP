@@ -183,6 +183,8 @@ namespace EasyRDP.Server.Wpf.Services
         // 而 ZRLE 参考帧基于服务端原始像素 → 切回后的 ZRLE 增量帧基线不一致 → 花屏。
         // 强制一帧全量后客户端重建完整画面，基线重新对齐。
         private volatile bool _forceZrleKeyNext;
+        // 运行中切换采集显示器：下一帧需当作"内容分辨率变化"处理（更新 Content* 并强制关键帧）。
+        private volatile bool _displayBoundsChanged;
 
         // D14 残留花屏防护：ZRLE 增量编码依赖服务端参考帧与客户端解码缓冲严格同步。
         // 发送队列丢帧后服务端参考帧已推进、客户端未收到该帧 → 基线漂移 → 后续增量帧
@@ -349,8 +351,8 @@ namespace EasyRDP.Server.Wpf.Services
             // Stop() 会提前返回，若不在此释放会造成原生句柄泄漏）
             try
             {
-                // Get screen dimensions
-                var bounds = _captureService.GetPrimaryScreen();
+                // Get screen dimensions（选中的显示器，默认主屏）
+                var bounds = CaptureService.ResolveBounds(_captureService);
                 _contentW = bounds.Width;
                 _contentH = bounds.Height;
                 // 初始档位启发式：单核弱机（XP 虚拟机典型：Environment.ProcessorCount=1）
@@ -409,6 +411,11 @@ namespace EasyRDP.Server.Wpf.Services
 
             // Subscribe to capture events
             _captureService.FrameCaptured += OnFrameCaptured;
+            // 显示器切换：需要立即更新内容坐标（鼠标映射）并强制关键帧，
+            // 不能等 CheckContentResolutionChanged 的 600 帧周期（ZRLE 流控下可达数十秒）。
+            var captureImplForDisplay = _captureService as CaptureService;
+            if (captureImplForDisplay != null)
+                captureImplForDisplay.DisplayBoundsChanged += OnCaptureDisplayChanged;
 
             // Start cursor tracking
             if (_cursorTracker != null)
@@ -442,9 +449,10 @@ namespace EasyRDP.Server.Wpf.Services
 
             // 2. Unsubscribe from capture events so no new frames enter _frameQueue
             _captureService.FrameCaptured -= OnFrameCaptured;
-
-            // 恢复捕获间隔（Start 时流控模式降为 100ms），避免影响后续 H264 会话的 60fps 需求
             var captureImpl = _captureService as CaptureService;
+            if (captureImpl != null)
+                captureImpl.DisplayBoundsChanged -= OnCaptureDisplayChanged;
+            // 恢复捕获间隔（Start 时流控模式降为 100ms），避免影响后续 H264 会话的 60fps 需求
             if (captureImpl != null)
             {
                 captureImpl.FrameIntervalMs = 16;
@@ -742,7 +750,10 @@ namespace EasyRDP.Server.Wpf.Services
                 // 内容分辨率 = 物理屏幕尺寸（鼠标坐标空间），会话期间通常固定。
                 // 捕获帧尺寸现在可能已被 D11 降采样（StretchBlt 一步截屏+缩放），
                 // 不能再用 frame.Width/Height 判断内容变化，改为周期重查物理屏幕尺寸。
-                bool resolutionChanged = CheckContentResolutionChanged();
+                // 运行中切换显示器：立即当作内容变化处理（不等 600 帧周期）。
+                bool displaySwitched = _displayBoundsChanged;
+                if (displaySwitched) _displayBoundsChanged = false;
+                bool resolutionChanged = displaySwitched || CheckContentResolutionChanged();
 
                 // 编码分辨率 = 捕获帧尺寸（CaptureService 已按 D11 档位 StretchBlt 降采样，
                 // 帧尺寸即目标编码尺寸，无需再托管缩放）。向上取偶保证 I420 布局安全。
@@ -1499,6 +1510,21 @@ namespace EasyRDP.Server.Wpf.Services
         }
 
         /// <summary>
+        /// 采集显示器切换/边界变化（捕获线程回调）：
+        /// 立即更新内容坐标（客户端鼠标映射依据）并请求关键帧，避免等 600 帧周期。
+        /// </summary>
+        private void OnCaptureDisplayChanged(EasyDesk.Core.Models.DesktopBounds bounds)
+        {
+            if (bounds == null) return;
+            Logger.Info("Session {0}: capture display changed → {1}x{2} at ({3},{4})",
+                _sessionId, bounds.Width, bounds.Height, bounds.X, bounds.Y);
+            _contentW = bounds.Width;
+            _contentH = bounds.Height;
+            _displayBoundsChanged = true;
+            _keyframeRequested = true;
+        }
+
+        /// <summary>
         /// 周期重查物理屏幕尺寸，检测显示器分辨率切换（内容坐标空间变化）。
         /// 捕获帧尺寸已不能用于此判断——它可能被 D11 降采样（StretchBlt）改变。
         /// 每 600 帧重查一次（GetSystemMetrics 开销极小），有变化时返回 true，
@@ -1510,7 +1536,7 @@ namespace EasyRDP.Server.Wpf.Services
                 return false;
             try
             {
-                var bounds = _captureService.GetPrimaryScreen();
+                var bounds = CaptureService.ResolveBounds(_captureService);
                 if (bounds.Width != _contentW || bounds.Height != _contentH)
                 {
                     Logger.Info("Session {0}: content changed {1}x{2} -> {3}x{4}",
@@ -1522,7 +1548,7 @@ namespace EasyRDP.Server.Wpf.Services
             }
             catch (Exception ex)
             {
-                Logger.Warn(ex, "Session {0}: GetPrimaryScreen failed during content resolution check",
+                Logger.Warn(ex, "Session {0}: resolve capture bounds failed during content resolution check",
                     _sessionId);
             }
             return false;

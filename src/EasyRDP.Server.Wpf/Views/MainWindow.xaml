@@ -37,42 +37,31 @@
 
         <!-- ====== 顶部工具栏（深色）：品牌 + 服务配置 ====== -->
         <Border Grid.Row="0" Background="{StaticResource ToolbarDarkBrush}" Padding="14,10">
-            <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="Auto"/>
-                    <ColumnDefinition Width="Auto"/>
-                    <ColumnDefinition Width="Auto"/>
-                    <ColumnDefinition Width="Auto"/>
-                    <ColumnDefinition Width="Auto"/>
-                    <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="Auto"/>
-                    <ColumnDefinition Width="Auto"/>
-                    <ColumnDefinition Width="Auto"/>
-                </Grid.ColumnDefinitions>
-
+            <!-- WrapPanel：分组总宽超过窗口时换行显示，避免 AUTH 下拉与 Start/Stop 被右边缘裁掉 -->
+            <WrapPanel Orientation="Horizontal">
                 <!-- 品牌 -->
-                <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,20,0">
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0,4,20,4">
                     <TextBlock Text="&#x25CF;" Foreground="{StaticResource StatusOkBrush}" FontSize="12"
                                VerticalAlignment="Center" Margin="0,0,8,0"/>
                     <TextBlock Text="EasyRDP Server" Style="{StaticResource BrandTextStyle}"/>
                 </StackPanel>
 
                 <!-- Port -->
-                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,12,0">
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0,4,12,4">
                     <TextBlock Text="PORT" Style="{StaticResource ToolbarLabelStyle}" Margin="0,0,6,0"/>
                     <TextBox Text="{Binding PortText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                              Style="{StaticResource LightTextBoxStyle}" Width="72"/>
                 </StackPanel>
 
                 <!-- Username -->
-                <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,12,0">
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0,4,12,4">
                     <TextBlock Text="USER" Style="{StaticResource ToolbarLabelStyle}" Margin="0,0,6,0"/>
                     <TextBox Text="{Binding Username, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                              Style="{StaticResource LightTextBoxStyle}" Width="110"/>
                 </StackPanel>
 
                 <!-- Password（审批模式下不需要口令，禁用输入框） -->
-                <StackPanel Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,12,0"
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0,4,12,4"
                             IsEnabled="{Binding IsPasswordMode}">
                     <TextBlock Text="PASS" Style="{StaticResource ToolbarLabelStyle}" Margin="0,0,6,0"/>
                     <PasswordBox Style="{StaticResource LightPasswordBoxStyle}" Width="120"
@@ -81,7 +70,7 @@
                 </StackPanel>
 
                 <!-- 帧变化检测模式：FullFrameMemcmp（原始 memcmp）/ BlockHashDirtyRect（块哈希） -->
-                <StackPanel Grid.Column="4" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,12,0">
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0,4,12,4">
                     <TextBlock Text="DETECT" Style="{StaticResource ToolbarLabelStyle}" Margin="0,0,6,0"/>
                     <ComboBox Width="170"
                               Style="{StaticResource ToolbarComboBoxStyle}"
@@ -92,8 +81,7 @@
                 </StackPanel>
 
                 <!-- 认证模式：Password（挑战-响应口令）/ Approve（免密码，连接时人工确认） -->
-                <StackPanel Grid.Column="5" Orientation="Horizontal" VerticalAlignment="Center"
-                            HorizontalAlignment="Left" Margin="0,0,12,0">
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0,4,12,4">
                     <TextBlock Text="AUTH" Style="{StaticResource ToolbarLabelStyle}" Margin="0,0,6,0"/>
                     <ComboBox Width="110"
                               Style="{StaticResource ToolbarComboBoxStyle}"
@@ -104,7 +92,7 @@
                 </StackPanel>
 
                 <!-- 主操作按钮 -->
-                <StackPanel Grid.Column="6" Orientation="Horizontal" VerticalAlignment="Center">
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0,4,0,4">
                     <Button Content="Save Settings" Style="{StaticResource ToolbarButtonStyle}" Height="30" Padding="12,0"
                             Command="{Binding SaveSettingsCommand}" Margin="0,0,6,0"
                             ToolTip="保存端口/用户名/密码/检测模式到本地配置文件"/>
@@ -113,19 +101,15 @@
                     <Button Content="Stop" Style="{StaticResource DangerButtonStyle}"
                             Command="{Binding StopCommand}"/>
                 </StackPanel>
-            </Grid>
+            </WrapPanel>
         </Border>
 
         <!-- ====== 信息条（浅色）：服务状态 ====== -->
         <Border Grid.Row="1" Background="#F4F6F8"
                 BorderBrush="#DDE3E8" BorderThickness="0,0,0,1" Padding="14,6">
-            <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="Auto"/>
-                </Grid.ColumnDefinitions>
-
-                <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+            <!-- WrapPanel：状态/显示器/启动开关三组在窄窗口下换行显示 -->
+            <WrapPanel Orientation="Horizontal">
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0,2,20,2">
                     <TextBlock x:Name="StatusDot" Text="&#x25CF;" FontSize="11"
                                Foreground="{StaticResource StatusIdleBrush}" VerticalAlignment="Center" Margin="0,0,8,0"/>
                     <TextBlock Text="Status: " Style="{StaticResource ActionLabelStyle}"/>
@@ -147,8 +131,17 @@
                             ToolTip="点击确认下载/应用新版本"/>
                 </StackPanel>
 
+                <!-- 采集显示器：0=主屏，其余按系统枚举顺序；运行中切换立即重建编码器并发关键帧 -->
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0,2,16,2">
+                    <TextBlock Text="Display: " Style="{StaticResource ActionLabelStyle}" VerticalAlignment="Center"/>
+                    <ComboBox Width="220" Style="{StaticResource ToolbarComboBoxStyle}" IsReadOnly="True"
+                              ItemsSource="{Binding Displays}" DisplayMemberPath="DisplayText"
+                              SelectedItem="{Binding SelectedDisplay, Mode=TwoWay}"
+                              ToolTip="采集目标显示器：0=主屏，其余按系统枚举顺序。运行中切换立即生效（重建编码器 + 发送关键帧 + 鼠标坐标原点同步偏移）"/>
+                </StackPanel>
+
                 <!-- 启动行为开关：开机自启（写 HKCU Run）+ 启动即监听 -->
-                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0,2,0,2">
                     <CheckBox Content="Start with Windows"
                               IsChecked="{Binding AutoStart, Mode=TwoWay}"
                               Foreground="{StaticResource TextPrimaryBrush}" FontSize="12"
@@ -160,7 +153,7 @@
                               VerticalAlignment="Center"
                               ToolTip="程序启动后立即开始监听；用户名/密码为空时跳过，填写后点 Start 即可"/>
                 </StackPanel>
-            </Grid>
+            </WrapPanel>
         </Border>
 
         <!-- ====== 中间：会话列表 ====== -->

@@ -236,6 +236,60 @@ namespace EasyRDP.Server.Wpf.Services
             set { _changeDetectionMode = value; }
         }
 
+        /// <summary>
+        /// 运行中切换采集显示器（0=主屏，1..n=副屏）。捕获线程下一轮生效，
+        /// 会话会收到 DisplayBoundsChanged 并重建编码器/发关键帧。
+        /// </summary>
+        public void SetCaptureDisplay(int displayIndex)
+        {
+            CaptureService capture = _captureService as CaptureService;
+            if (capture == null)
+            {
+                Logger.Warn("SetCaptureDisplay ignored: capture service is not CaptureService");
+                return;
+            }
+            capture.SetCaptureDisplay(displayIndex);
+            UpdateInputDisplayOffset();
+        }
+
+        /// <summary>采集显示器边界变化回调：刷新所有会话的鼠标坐标偏移。</summary>
+        private void OnCaptureDisplayBoundsChanged(EasyDesk.Core.Models.DesktopBounds bounds)
+        {
+            UpdateInputDisplayOffset();
+        }
+
+        /// <summary>按当前采集显示器重新计算并下发输入坐标偏移。</summary>
+        private void UpdateInputDisplayOffset()
+        {
+            List<ServerInputSession> inputs = new List<ServerInputSession>();
+            lock (_lock)
+            {
+                foreach (var kv in _sessions)
+                {
+                    if (kv.Value.Input != null)
+                        inputs.Add(kv.Value.Input);
+                }
+            }
+            foreach (var input in inputs)
+                ApplyInputDisplayOffset(input);
+        }
+
+        /// <summary>计算 (显示器原点 - 主屏原点) 并设置到输入会话。</summary>
+        private void ApplyInputDisplayOffset(ServerInputSession input)
+        {
+            if (input == null) return;
+            try
+            {
+                EasyDesk.Core.Models.DesktopBounds display = CaptureService.ResolveBounds(_captureService);
+                EasyDesk.Core.Models.DesktopBounds primary = _captureService.GetPrimaryScreen();
+                input.SetDisplayOffset(display.X - primary.X, display.Y - primary.Y);
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn(ex, "Compute input display offset failed");
+            }
+        }
+
         public TransportHost(
             ICaptureService captureService,
             ITransportAcceptor transportAcceptor,
@@ -268,6 +322,11 @@ namespace EasyRDP.Server.Wpf.Services
         {
             Logger.Info("TransportHost starting on endpoint {0}", endpoint);
             _running = true;
+            // 显示器切换/热插拔：更新所有会话的鼠标坐标偏移（帧尺寸与 Content* 由会话自行处理）
+            CaptureService capture = _captureService as CaptureService;
+            if (capture != null)
+                capture.DisplayBoundsChanged += OnCaptureDisplayBoundsChanged;
+
             _transportAcceptor.Start(endpoint);
 
             _heartbeatThread = new Thread(HeartbeatLoop);
@@ -340,6 +399,10 @@ namespace EasyRDP.Server.Wpf.Services
             // 唤醒剪贴板线程使其退出
             _clipboardSignal.Set();
             _clipboardChangeSignal.Set();
+
+            CaptureService captureImpl = _captureService as CaptureService;
+            if (captureImpl != null)
+                captureImpl.DisplayBoundsChanged -= OnCaptureDisplayBoundsChanged;
 
             // Stop all sessions
             List<SessionInfo> stoppedSessions = new List<SessionInfo>();
@@ -1669,7 +1732,7 @@ namespace EasyRDP.Server.Wpf.Services
 
             try
             {
-                var bounds = _captureService.GetPrimaryScreen();
+                var bounds = CaptureService.ResolveBounds(_captureService);
 
                 // Create sessions first (don't send Success until Start() passes)
                 // 按 ServerSettings.ChangeDetectionMode 创建帧变化检测器注入会话。
@@ -1696,6 +1759,8 @@ namespace EasyRDP.Server.Wpf.Services
                 };
 
                 var inputSession = new ServerInputSession(_inputSimulator);
+                // 客户端鼠标坐标以采集显示器为基准，换算到虚拟桌面需要该屏原点偏移
+                ApplyInputDisplayOffset(inputSession);
                 // 文件通道鉴权 token：随 HandshakeRes 下发给客户端，
                 // 客户端用独立 TCP 连接 + 该 token 打开文件通道（不占会话名额）。
                 byte[] sessionToken = AuthCrypto.RandomBytes(16);
@@ -1908,13 +1973,13 @@ namespace EasyRDP.Server.Wpf.Services
             int screenW = 0, screenH = 0;
             try
             {
-                EasyDesk.Core.Models.DesktopBounds primary = _captureService.GetPrimaryScreen();
-                screenW = primary.Width;
-                screenH = primary.Height;
+                EasyDesk.Core.Models.DesktopBounds bounds = CaptureService.ResolveBounds(_captureService);
+                screenW = bounds.Width;
+                screenH = bounds.Height;
             }
             catch (Exception ex)
             {
-                Logger.Warn(ex, "GetPrimaryScreen failed for diagnostics");
+                Logger.Warn(ex, "Resolve capture bounds failed for diagnostics");
             }
 
             CodecCapabilities caps = EncoderFactory.GetAvailableCodecs();
