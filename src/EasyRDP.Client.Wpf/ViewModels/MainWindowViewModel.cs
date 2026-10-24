@@ -32,12 +32,6 @@ namespace EasyRDP.Client.Wpf.ViewModels
         private const int ConnectTimeoutMs = 5000;
         /// <summary>握手超时（毫秒）。</summary>
         private const int HandshakeTimeoutMs = 10000;
-        /// <summary>测试帧宽度。</summary>
-        private const int TestFrameWidth = 640;
-        /// <summary>测试帧高度。</summary>
-        private const int TestFrameHeight = 480;
-        /// <summary>测试矩形大小。</summary>
-        private const int TestBoxSize = 80;
 
         private readonly Dispatcher _dispatcher;
 
@@ -50,7 +44,6 @@ namespace EasyRDP.Client.Wpf.ViewModels
         private volatile bool _running;
         private volatile bool _disconnecting; // 防止 Disconnect → Disconnected 事件 → Stop 重入循环
         private DispatcherTimer? _fpsTimer;
-        private int _testFrameSeq;
 
         // 属性字段
         private string _host = "";
@@ -134,8 +127,7 @@ namespace EasyRDP.Client.Wpf.ViewModels
             _dispatcher = Application.Current?.Dispatcher ?? Dispatcher.CurrentDispatcher;
             // 连接失败/握手失败/流错误等用弹框提示（连接不成功不能只靠状态栏文字，用户看不到）
             _notifier = new WpfUserNotifier();
-            ConnectCommand = new RelayCommand(async () => await ConnectAsync(), () => !_running);
-            StartTestCommand = new RelayCommand(StartRenderTest, () => !_running);
+            ConnectCommand = new RelayCommand(async () => await ConnectSafelyAsync(), () => !_running);
             StopCommand = new RelayCommand(Stop, () => _running);
             FullscreenCommand = new RelayCommand(ToggleFullscreen);
             LockCommand = new RelayCommand(SendLockKey);
@@ -631,7 +623,6 @@ namespace EasyRDP.Client.Wpf.ViewModels
         }
 
         public RelayCommand ConnectCommand { get; }
-        public RelayCommand StartTestCommand { get; }
         public RelayCommand StopCommand { get; }
         public RelayCommand FullscreenCommand { get; }
         public RelayCommand LockCommand { get; }
@@ -682,9 +673,9 @@ namespace EasyRDP.Client.Wpf.ViewModels
             {
                 switch (_zoomMode)
                 {
-                    case ZoomMode.Actual: return "缩放:原始";
-                    case ZoomMode.Stretch: return "缩放:拉伸";
-                    default: return "缩放:适应";
+                    case ZoomMode.Actual: return "Zoom: 1:1";
+                    case ZoomMode.Stretch: return "Zoom: Stretch";
+                    default: return "Zoom: Fit";
                 }
             }
         }
@@ -816,9 +807,6 @@ namespace EasyRDP.Client.Wpf.ViewModels
                 r.ThumbnailSource = ThumbnailCache.LoadThumbnail(r.Host);
                 RecentConnections.Add(r);
             }
-            // 没有任何记录时给一个示例占位（连接过 Profiles 后消失）
-            if (RecentConnections.Count == 0)
-                RecentConnections.Add(new RecentConnection { Host = "172.25.2.5", DisplayName = "Example" });
         }
 
         /// <summary>
@@ -867,6 +855,35 @@ namespace EasyRDP.Client.Wpf.ViewModels
 
         // ====== Connect 逻辑 ======
 
+        /// <summary>
+        /// ConnectCommand 入口：兜底 ConnectAsync 的未处理异常。
+        /// 命令绑定的是 async 委托，异常若逸出会成为未观察异常并终止进程；
+        /// 连接过程涉及网络、协议解析与原生解码器，必须给用户明确失败反馈。
+        /// </summary>
+        private async Task ConnectSafelyAsync()
+        {
+            try
+            {
+                await ConnectAsync();
+            }
+            catch (Exception ex)
+            {
+                Logger.Error(ex, "Connect failed with unhandled exception");
+                _notifier.ShowError("Unexpected error while connecting:\n" + ex.Message, "Connection Error");
+                // 握手后、会话启动前失败会遗留传输/流会话对象，必须清理；
+                // 尚未创建任何连接对象时只需复位忙碌状态。
+                if (_transport != null || _streamSession != null)
+                {
+                    _disconnecting = false;
+                    Stop();
+                }
+                else
+                {
+                    SetBusy(false, "Connection failed");
+                }
+            }
+        }
+
         private async Task ConnectAsync()
         {
             if (_running) return;
@@ -898,8 +915,8 @@ namespace EasyRDP.Client.Wpf.ViewModels
                 SetBusy(false, "Connection failed");
                 // 连接不成功必须有明确弹框反馈（只改状态栏文字用户看不到）
                 _notifier.ShowError(
-                    string.Format("无法连接服务器 {0}:{1}。\n请检查：\n· 服务端是否已启动（点击 Start）\n· IP / 端口是否正确\n· 网络是否可达", host, port),
-                    "连接失败");
+                    string.Format("Unable to connect to {0}:{1}.\nPlease check:\n· the server is running (click Start)\n· the IP address and port are correct\n· the network is reachable", host, port),
+                    "Connection Failed");
                 return;
             }
             _transport = connectedTransport;
@@ -936,7 +953,7 @@ namespace EasyRDP.Client.Wpf.ViewModels
                     if (_disconnecting) return;
                     SetBusy(false, "Stream error: " + message);
                     // 连接中/已连接后流错误也要弹框告知，不能静默断开
-                    _notifier.ShowError("连接中断：" + message, "连接错误");
+                    _notifier.ShowError("Connection lost: " + message, "Connection Error");
                     Stop();
                 });
             };
@@ -962,9 +979,9 @@ namespace EasyRDP.Client.Wpf.ViewModels
                 Logger.Warn("Handshake timeout after {0}ms", HandshakeTimeoutMs);
                 SetBusy(false, "Handshake timeout");
                 _notifier.ShowError(
-                    string.Format("连接 {0}:{1} 后握手超时（{2} 秒内未收到服务端响应）。\n请确认服务端版本兼容、用户名/密码正确。",
+                    string.Format("Handshake with {0}:{1} timed out (no response within {2} seconds).\nPlease verify the server version and credentials.",
                         host, port, HandshakeTimeoutMs / 1000),
-                    "握手超时");
+                    "Handshake Timeout");
                 _streamSession?.Stop();
                 _transport.Disconnect();
                 return;
@@ -979,11 +996,11 @@ namespace EasyRDP.Client.Wpf.ViewModels
                 SetBusy(false, "Handshake failed: " + handshakeRes.Result);
                 // 认证失败给出可操作的提示（服务端要求非空凭据，地址栏直连最易踩坑）
                 string reason = handshakeRes.Result == HandshakeResult.AuthFailed
-                    ? "用户名或密码错误（须与服务端启动时配置的 USER / PASS 一致）"
+                    ? "invalid username or password (must match the USER / PASS configured on the server)"
                     : handshakeRes.Result.ToString();
                 _notifier.ShowError(
-                    string.Format("服务器 {0}:{1} 拒绝了连接：{2}", host, port, reason),
-                    "连接失败");
+                    string.Format("Server {0}:{1} rejected the connection: {2}", host, port, reason),
+                    "Connection Failed");
                 _streamSession?.Stop();
                 _transport.Disconnect();
                 return;
@@ -1211,8 +1228,8 @@ namespace EasyRDP.Client.Wpf.ViewModels
             _rttText = session.LastRttMs >= 0 ? session.LastRttMs + " ms" : "—";
             _lossRateText = string.Format("{0:P1}", session.PacketLossRate);
 
-            // 连接详情：编解码器（CodecName 如 "ZRLE"，补 "软编·软解" 说明）
-            _codecDetailText = CodecName + " / 软编·软解";
+            // 连接详情：编解码器（CodecName 如 "ZRLE"；本端仅解码，统一标注软件解码）
+            _codecDetailText = CodecName + " / software decode";
 
             // 远端系统信息（DiagnosticInfo 到达后填充）
             var diag = ServerDiagnosticInfo;
@@ -1493,7 +1510,7 @@ namespace EasyRDP.Client.Wpf.ViewModels
                 IsClipboardTransferring = true;
                 double percent = (double)downloaded * 100.0 / total;
                 ClipboardProgressValue = percent;
-                ClipboardProgressText = string.Format("传输中: {0:F1}% ({1} / {2})",
+                ClipboardProgressText = string.Format("Transferring: {0:F1}% ({1} / {2})",
                     percent, FormatBytes(downloaded), FormatBytes(total));
             }));
         }
@@ -1756,89 +1773,6 @@ namespace EasyRDP.Client.Wpf.ViewModels
                 hash = (hash << 3) ^ data[i];
             }
             return hash.ToString("X");
-        }
-
-        // ====== Render Test 逻辑 ======
-
-        private void StartRenderTest()
-        {
-            if (_running) return;
-            SetBusy(true, "Running render test...");
-
-            _renderTarget = new WpfRenderTarget();
-            _renderTarget.BitmapChanged += b => RenderBitmap = b;
-            _frameBuffer = new FrameBuffer();
-            _testFrameSeq = 0;
-            _running = true;
-
-            _renderTarget.Resize(TestFrameWidth, TestFrameHeight);
-            RenderBitmap = _renderTarget.Bitmap;
-
-            Task.Run(() => RenderTestLoop());
-        }
-
-        private void RenderTestLoop()
-        {
-            int w = TestFrameWidth, h = TestFrameHeight;
-            int frameSize = w * h * 4;
-            int boxX = 0, boxY = 0;
-            int boxDx = 3, boxDy = 2;
-
-            while (_running)
-            {
-                byte[]? writeSlot = _frameBuffer!.BorrowWriteBuffer(frameSize);
-                if (writeSlot == null) { Thread.Sleep(1); continue; }
-
-                // 渐变背景
-                for (int y = 0; y < h; y++)
-                {
-                    for (int x = 0; x < w; x++)
-                    {
-                        int off = (y * w + x) * 4;
-                        writeSlot[off] = (byte)(x % 256);
-                        writeSlot[off + 1] = (byte)(y % 256);
-                        writeSlot[off + 2] = 128;
-                        writeSlot[off + 3] = 255;
-                    }
-                }
-
-                // 移动矩形
-                boxX += boxDx; boxY += boxDy;
-                if (boxX < 0 || boxX + TestBoxSize > w) boxDx = -boxDx;
-                if (boxY < 0 || boxY + TestBoxSize > h) boxDy = -boxDy;
-
-                byte r = (byte)((_testFrameSeq * 5) % 256);
-                byte g = (byte)((_testFrameSeq * 7 + 85) % 256);
-                byte b = (byte)((_testFrameSeq * 11 + 170) % 256);
-
-                for (int y = Math.Max(0, boxY); y < Math.Min(h, boxY + TestBoxSize); y++)
-                {
-                    for (int x = Math.Max(0, boxX); x < Math.Min(w, boxX + TestBoxSize); x++)
-                    {
-                        int off = (y * w + x) * 4;
-                        writeSlot[off] = b;
-                        writeSlot[off + 1] = g;
-                        writeSlot[off + 2] = r;
-                        writeSlot[off + 3] = 255;
-                    }
-                }
-
-                _frameBuffer.CommitFrame(w, h);
-
-                if (_frameBuffer.TryBorrowReadFrame(out ReadFrameRef frame))
-                {
-                    try
-                    {
-                        _dispatcher.Invoke(() => _renderTarget?.RenderFrame(frame.Pixels, frame.Width, frame.Height));
-                    }
-                    finally { _frameBuffer.ReleaseReadFrame(); }
-                }
-
-                _testFrameSeq++;
-                Thread.Sleep(16);
-            }
-
-            _dispatcher.Invoke(() => _frameBuffer?.Reset());
         }
 
         // ====== Stop 逻辑 ======
@@ -2115,7 +2049,6 @@ namespace EasyRDP.Client.Wpf.ViewModels
         private void UpdateCommandState()
         {
             ConnectCommand.RaiseCanExecuteChanged();
-            StartTestCommand.RaiseCanExecuteChanged();
             StopCommand.RaiseCanExecuteChanged();
         }
 

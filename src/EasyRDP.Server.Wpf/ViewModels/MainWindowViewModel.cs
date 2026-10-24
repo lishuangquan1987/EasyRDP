@@ -46,6 +46,10 @@ namespace EasyRDP.Server.Wpf.ViewModels
         // 帧变化检测模式：默认原始方式（FullFrameMemcmp），保持与历史版本一致的行为。
         // UI 可切换到 BlockHashDirtyRect（32×32 块哈希，小变化跳过编码）。
         private ChangeDetectionMode _changeDetectionMode = ChangeDetectionMode.FullFrameMemcmp;
+        // 开机自启：以注册表实际状态为准（构造函数中读取）
+        private bool _autoStart;
+        // 启动即监听：默认开启，打开程序即开始接受连接
+        private bool _autoListen = true;
 
         // 设置持久化：%AppData%\EasyRDP\server\settings.json
         private readonly ServerSettingsStore _settingsStore = new ServerSettingsStore();
@@ -144,6 +148,47 @@ namespace EasyRDP.Server.Wpf.ViewModels
             }
         }
 
+        /// <summary>
+        /// 是否随 Windows 登录自动启动。赋值立即写注册表（HKCU Run），
+        /// 写入失败时保持原值并刷新界面，避免出现"勾上了但实际没生效"的假象。
+        /// </summary>
+        public bool AutoStart
+        {
+            get { return _autoStart; }
+            set
+            {
+                if (_autoStart == value) return;
+                bool actual = AutoStartManager.SetEnabled(value);
+                if (actual != value)
+                {
+                    _notifier.ShowWarning(
+                        "Failed to update the Windows startup entry. Please check registry permissions.",
+                        "Auto Start");
+                    // 字段未变，仍需通知界面回滚复选框
+                    OnPropertyChanged(nameof(AutoStart));
+                    return;
+                }
+                _autoStart = actual;
+                OnPropertyChanged(nameof(AutoStart));
+                AddLog(actual ? "Auto start enabled" : "Auto start disabled");
+            }
+        }
+
+        /// <summary>
+        /// 程序启动后是否立即开始监听。关闭后需手动点击 Start。
+        /// 开启但凭据为空时静默跳过（只写日志），避免开机时弹框打断用户。
+        /// </summary>
+        public bool AutoListen
+        {
+            get { return _autoListen; }
+            set
+            {
+                if (_autoListen == value) return;
+                _autoListen = value;
+                OnPropertyChanged(nameof(AutoListen));
+            }
+        }
+
         // ====== 命令 ======
 
         public RelayCommand StartCommand { get; }
@@ -172,6 +217,9 @@ namespace EasyRDP.Server.Wpf.ViewModels
             Username = settings.Username ?? "";
             Password = settings.Password ?? "";
             ChangeDetectionMode = settings.ChangeDetectionMode;
+            AutoListen = settings.AutoListen;
+            // 自启状态以注册表为准：用户可能在任务管理器中已禁用启动项
+            _autoStart = AutoStartManager.IsEnabled();
 
             // 启动 aly 自动更新后台检查（检查 → 下载 → 应用）
             InitializeUpdateClient();
@@ -391,7 +439,19 @@ namespace EasyRDP.Server.Wpf.ViewModels
 
         // ====== Start 逻辑 ======
 
+        /// <summary>启动按钮入口：失败时通过弹框反馈。</summary>
         private void StartServer()
+        {
+            StartServerInternal(false);
+        }
+
+        /// <summary>
+        /// 启动服务并开始监听。
+        /// </summary>
+        /// <param name="silent">
+        /// true=自动监听场景：凭据缺失或启动失败只写日志，不弹框（开机自启时不应打断用户）。
+        /// </param>
+        private void StartServerInternal(bool silent)
         {
             if (_transportHost != null) return;
 
@@ -403,7 +463,15 @@ namespace EasyRDP.Server.Wpf.ViewModels
             string password = Password ?? "";
             if (string.IsNullOrEmpty(username) || string.IsNullOrEmpty(password))
             {
-                _notifier.ShowWarning("Username and password must not be empty.", "Invalid credentials");
+                if (silent)
+                {
+                    Logger.Info("Auto listen skipped: username/password not configured");
+                    AddLog("Auto listen skipped: configure USER / PASS first");
+                }
+                else
+                {
+                    _notifier.ShowWarning("Username and password must not be empty.", "Invalid credentials");
+                }
                 return;
             }
 
@@ -450,8 +518,32 @@ namespace EasyRDP.Server.Wpf.ViewModels
             }
             catch (Exception ex)
             {
-                _notifier.ShowError("Failed to start: " + ex.Message, "Error");
+                Logger.Warn(ex, "Start server failed");
+                if (silent)
+                {
+                    AddLog("Auto listen failed: " + ex.Message);
+                }
+                else
+                {
+                    _notifier.ShowError("Failed to start: " + ex.Message, "Error");
+                }
             }
+        }
+
+        /// <summary>
+        /// 启动即监听（窗口 Loaded 后调用一次）。
+        /// 未启用自动监听、已在运行或凭据未配置时直接返回，不产生任何弹框。
+        /// </summary>
+        public void TryAutoListen()
+        {
+            if (!_autoListen || IsRunning) return;
+            if (string.IsNullOrEmpty(Username) || string.IsNullOrEmpty(Password))
+            {
+                Logger.Info("Auto listen skipped: username/password not configured");
+                AddLog("Auto listen skipped: configure USER / PASS first");
+                return;
+            }
+            StartServerInternal(true);
         }
 
         // ====== Stop 逻辑 ======
@@ -489,7 +581,9 @@ namespace EasyRDP.Server.Wpf.ViewModels
                 Port = PortText ?? "2000",
                 Username = Username ?? "",
                 Password = Password ?? "",
-                ChangeDetectionMode = _changeDetectionMode
+                ChangeDetectionMode = _changeDetectionMode,
+                AutoStart = _autoStart,
+                AutoListen = _autoListen
             });
             AddLog(ok ? "Settings saved" : "Settings save failed");
         }

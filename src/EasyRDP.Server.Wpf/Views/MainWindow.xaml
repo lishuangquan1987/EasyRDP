@@ -97,27 +97,48 @@
         <!-- ====== 信息条（浅色）：服务状态 ====== -->
         <Border Grid.Row="1" Background="#F4F6F8"
                 BorderBrush="#DDE3E8" BorderThickness="0,0,0,1" Padding="14,6">
-            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                <TextBlock x:Name="StatusDot" Text="&#x25CF;" FontSize="11"
-                           Foreground="{StaticResource StatusIdleBrush}" VerticalAlignment="Center" Margin="0,0,8,0"/>
-                <TextBlock Text="Status: " Style="{StaticResource ActionLabelStyle}"/>
-                <TextBlock Text="{Binding StatusText}" Style="{StaticResource ActionValueStyle}" Margin="0,0,24,0"/>
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
 
-                <TextBlock Text="Port: " Style="{StaticResource ActionLabelStyle}"/>
-                <TextBlock Text="{Binding DisplayPort}" Style="{StaticResource ActionValueStyle}" Margin="0,0,24,0"/>
+                <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+                    <TextBlock x:Name="StatusDot" Text="&#x25CF;" FontSize="11"
+                               Foreground="{StaticResource StatusIdleBrush}" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                    <TextBlock Text="Status: " Style="{StaticResource ActionLabelStyle}"/>
+                    <TextBlock Text="{Binding StatusText}" Style="{StaticResource ActionValueStyle}" Margin="0,0,24,0"/>
 
-                <TextBlock Text="Sessions: " Style="{StaticResource ActionLabelStyle}"/>
-                <TextBlock Text="{Binding SessionCount}" Style="{StaticResource ActionValueStyle}" Margin="0,0,24,0"/>
+                    <TextBlock Text="Port: " Style="{StaticResource ActionLabelStyle}"/>
+                    <TextBlock Text="{Binding DisplayPort}" Style="{StaticResource ActionValueStyle}" Margin="0,0,24,0"/>
 
-                <TextBlock Text="Uptime: " Style="{StaticResource ActionLabelStyle}"/>
-                <TextBlock Text="{Binding Uptime}" Style="{StaticResource ActionValueStyle}"/>
+                    <TextBlock Text="Sessions: " Style="{StaticResource ActionLabelStyle}"/>
+                    <TextBlock Text="{Binding SessionCount}" Style="{StaticResource ActionValueStyle}" Margin="0,0,24,0"/>
 
-                <!-- aly 自动更新：发现/下载/应用更新时显示状态，点击确认下载或应用 -->
-                <Button Content="{Binding AlyClientUpdateStr}" Style="{StaticResource LightButtonStyle}"
-                        Command="{Binding CheckUpdateCommand}" Margin="16,0,0,0"
-                        Visibility="{Binding IsUpdatePanelVisible, Converter={StaticResource BoolToVis}}"
-                        ToolTip="点击确认下载/应用新版本"/>
-            </StackPanel>
+                    <TextBlock Text="Uptime: " Style="{StaticResource ActionLabelStyle}"/>
+                    <TextBlock Text="{Binding Uptime}" Style="{StaticResource ActionValueStyle}"/>
+
+                    <!-- aly 自动更新：发现/下载/应用更新时显示状态，点击确认下载或应用 -->
+                    <Button Content="{Binding AlyClientUpdateStr}" Style="{StaticResource LightButtonStyle}"
+                            Command="{Binding CheckUpdateCommand}" Margin="16,0,0,0"
+                            Visibility="{Binding IsUpdatePanelVisible, Converter={StaticResource BoolToVis}}"
+                            ToolTip="点击确认下载/应用新版本"/>
+                </StackPanel>
+
+                <!-- 启动行为开关：开机自启（写 HKCU Run）+ 启动即监听 -->
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                    <CheckBox Content="Start with Windows"
+                              IsChecked="{Binding AutoStart, Mode=TwoWay}"
+                              Foreground="{StaticResource TextPrimaryBrush}" FontSize="12"
+                              VerticalAlignment="Center" Margin="0,0,16,0"
+                              ToolTip="随 Windows 登录自动启动（写入 HKCU\...\Run，仅当前用户，无需管理员权限）"/>
+                    <CheckBox Content="Listen on launch"
+                              IsChecked="{Binding AutoListen, Mode=TwoWay}"
+                              Foreground="{StaticResource TextPrimaryBrush}" FontSize="12"
+                              VerticalAlignment="Center"
+                              ToolTip="程序启动后立即开始监听；用户名/密码为空时跳过，填写后点 Start 即可"/>
+                </StackPanel>
+            </Grid>
         </Border>
 
         <!-- ====== 中间：会话列表 ====== -->

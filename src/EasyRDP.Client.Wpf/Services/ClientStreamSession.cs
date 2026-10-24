@@ -1,6 +1,7 @@
 #nullable disable
 using System;
 using System.Threading;
+using EasyRDP.Client.Wpf.Rendering;
 using EasyRDP.Core.Protocol;
 using EasyRDP.Core.Rendering;
 using EasyRDP.Core.Session;
@@ -41,6 +42,8 @@ namespace EasyRDP.Client.Wpf.Services
         // 已接收视频帧压缩数据总字节（诊断码率统计用，Interlocked 累加）
         private long _receivedBytes;
         private int _decodeFailures;
+        // 无法借到写槽导致帧未解码的次数（解码基线断裂，需请求全量帧）
+        private int _frameBufferDrops;
         // 握手竞态修复：服务端先启动视频流再发 HandshakeRes，客户端若在收到响应后才订阅
         // 数据事件，首帧/首个关键帧（seq=0）会丢失，解码器只能等下一个 IDR（最长约 1 秒黑屏）。
         // 因此在发送握手前就通过 BeginReceive 订阅，管线未就绪前把消息缓冲，InitPipeline 后回放。
@@ -51,28 +54,51 @@ namespace EasyRDP.Client.Wpf.Services
         private readonly System.Collections.Generic.List<MessageReceivedEventArgs> _pendingMessages
             = new System.Collections.Generic.List<MessageReceivedEventArgs>();
         private const int MaxPendingMessages = 1024;
-        private bool _pendingOverflowLogged;        // 管线（RenderTarget）就绪前到达的光标消息：服务端在 HandshakeRes 之前就已启动光标会话，
+        private bool _pendingOverflowLogged;
+        // 管线（RenderTarget）就绪前到达的光标消息：服务端在 HandshakeRes 之前就已启动光标会话，
         // 若直接丢弃，初始形状更新会在握手窗口丢失，之后只收到纯位置更新 → 客户端永远没有光标位图。
         private CursorUpdateMessage _pendingCursor;
         // 是否已记录过"首次收到含形状的光标更新"（诊断用，避免 60Hz 刷屏）
         private bool _cursorShapeLogged;
-        // 解码信箱：单槽"最新帧优先"。接收线程入队时覆盖未解码的旧帧，
-        // 解码线程始终处理最新帧 —— 积压上限固定为 1 帧，端到端延迟不会随解码慢而膨胀。
-        // （H264 允许丢帧，解码器等下一个关键帧即可恢复，实时语义：丢帧优于延迟。）
+        // 解码队列（接收线程入队、解码线程出队）。
+        // ZRLE 是帧间增量编码：每帧只传相对上一帧的变化瓦片，中间丢任何一帧都会让
+        // 后续增量叠到错误基线 —— 花屏会一直持续到下一个全量帧（约 1 分钟）。
+        // 因此 ZRLE 帧必须按序全部解码；积压到上限时清空队列并请求全量帧重建基线，
+        // 绝不能在增量链中间开口子。H264 可丢帧（参考链断了等 IDR 即可恢复），
+        // 丢帧时同样主动请求 IDR，缩短花屏窗口。
         private readonly object _decodeLock = new object();
-        private VideoFrameMessage _pendingDecodeFrame;
+        private readonly System.Collections.Generic.Queue<VideoFrameMessage> _decodeQueue
+            = new System.Collections.Generic.Queue<VideoFrameMessage>();
+        private const int MaxQueuedZrleFrames = 6;
+        private const int MaxQueuedH264Frames = 2;
         private int _decodeFrameDrops;
+        private long _decodeQueueOverflows;
+        // 服务端每个成功编码的帧 SequenceNumber 单调 +1。TCP 可靠传输下出现缺口
+        // 只可能是服务端发送队列或本端解码队列丢帧 —— 增量链/参考链已断，
+        // 必须立即请求全量帧，不能等周期性刷新。
+        private long _expectedSequenceNumber = -1;
+        private long _sequenceGaps;
+        // 重同步等待：序列缺口/队列溢出后，增量帧的基线已不可信（队列里被丢掉的帧
+        // 不会再解码），此时继续解码只会把错误像素提交给渲染层。因此在收到全量帧
+        // （ZRLE 全帧 / H264 IDR）前丢弃增量帧；超时后放弃等待，避免服务端不响应
+        // 全量请求时画面永久冻结（旧版本服务端）。
+        private bool _awaitingKeyframe;
+        private long _awaitingKeyframeSinceTicks;
+        private long _framesDroppedAwaitingKeyframe;
+        private const int KeyframeWaitTimeoutMs = 3000;
         // 解码脱同步恢复：连续解码失败时向服务端请求关键帧（IDR）。
         // 时间戳限速——out-of-sync 状态下每帧都失败，不能每帧都发请求（刷爆接收线程），
         // 仅在距上次请求超过冷却期时才再发，服务端收到即强制 IDR。
         private long _lastKeyframeRequestTicks;
         private const long KeyframeRequestCooldownMs = 500;
 
-        // D16 残留花屏防护：渲染层若因 UI 线程繁忙未能及时借走上一帧（CommitFrame 返回 false），
-        // 解码器内部 _frameBuffer 已推进、RenderTarget 的 WriteableBitmap 未更新 → 局部更新
-        // 会只覆盖新帧的脏矩形，其余区域保留更旧像素。下一帧提交时强制 full render（dirtyRects=null）
-        // 把解码器当前完整画面一次性写回 RenderTarget，消除漂移。
-        private volatile bool _forceFullRenderNext;
+        // D16 残留花屏防护：渲染层若因 UI 线程繁忙未能及时借走上一帧（CommitFrame 返回 false
+        // 或 WpfRenderTarget 内部丢帧），解码器内部参考帧已推进、RenderTarget 的 WriteableBitmap
+        // 未更新 → 局部更新会只覆盖新帧的脏矩形，其余区域保留更旧像素。
+        // 标志置位后下一帧强制整帧渲染（dirtyRects=null），把解码器当前完整画面一次性写回。
+        // 用 int + Interlocked：置位可能发生在解码线程与 UI 线程两侧，Exchange 消费标志
+        // 避免"读到 false 后又清除刚置位的新信号"。
+        private int _forceFullRenderNextFlag;
 
         // 最近一次 RTT 测量值（毫秒）。由接收线程在 Keepalive 回显到达时写入，
         // 诊断/流控线程读取；volatile 保证可见性。未测到为 -1。
@@ -124,7 +150,26 @@ namespace EasyRDP.Client.Wpf.Services
         public IRenderTarget RenderTarget
         {
             get { return _renderTarget; }
-            set { _renderTarget = value; }
+            set
+            {
+                var previous = _renderTarget as WpfRenderTarget;
+                if (previous != null)
+                    previous.FrameDropped -= OnRenderFrameDropped;
+                _renderTarget = value;
+                var current = value as WpfRenderTarget;
+                if (current != null)
+                    current.FrameDropped += OnRenderFrameDropped;
+            }
+        }
+
+        /// <summary>
+        /// 渲染层丢弃了一帧（UI 线程繁忙 / 尺寸切换 / 位图不匹配）。
+        /// 脏矩形渲染下丢失的像素不会被后续增量帧补上，必须让下一帧整帧重绘。
+        /// </summary>
+        private void OnRenderFrameDropped()
+        {
+            if (!_running) return;
+            Interlocked.Exchange(ref _forceFullRenderNextFlag, 1);
         }
 
         /// <summary>Raised when a non-recoverable error occurs during the stream session.</summary>
@@ -156,6 +201,14 @@ namespace EasyRDP.Client.Wpf.Services
             // 内容坐标空间初始化为握手分辨率（全分辨率下与物理屏幕一致，仅偶对齐 1px 差）
             _contentWidth = width;
             _contentHeight = height;
+            // 新会话：序列号基线未知（首帧建立），清掉上一会话残留的队列与等待状态
+            _expectedSequenceNumber = -1;
+            lock (_decodeLock)
+            {
+                _decodeQueue.Clear();
+                _awaitingKeyframe = false;
+                _framesDroppedAwaitingKeyframe = 0;
+            }
             if (_renderTarget != null)
                 _renderTarget.Resize(width, height);
             _pipelineReady = true;
@@ -239,8 +292,13 @@ namespace EasyRDP.Client.Wpf.Services
             _renderThread?.Join(3000);
             lock (_decodeLock)
             {
-                _pendingDecodeFrame = null;
+                _decodeQueue.Clear();
+                _awaitingKeyframe = false;
             }
+            // 退订渲染丢帧通知：避免会话停止后仍持有对已释放渲染目标的引用
+            var wpfTarget = _renderTarget as WpfRenderTarget;
+            if (wpfTarget != null)
+                wpfTarget.FrameDropped -= OnRenderFrameDropped;
 
             _decoder?.Dispose();
             _decoder = null;
@@ -356,8 +414,22 @@ namespace EasyRDP.Client.Wpf.Services
             RouteMessage(e);
         }
 
-        /// <summary>把一条完整消息路由到对应处理器。</summary>
+        /// <summary>把一条完整消息路由到对应处理器（单条损坏消息不影响接收线程）。</summary>
         private void RouteMessage(MessageReceivedEventArgs e)
+        {
+            try
+            {
+                RouteMessageCore(e);
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn(ex, "RouteMessage failed: type=0x{0:X2} len={1}",
+                    e.MessageType, e.Data != null ? e.Data.Length : 0);
+            }
+        }
+
+        /// <summary>消息路由实现。</summary>
+        private void RouteMessageCore(MessageReceivedEventArgs e)
         {
             if (e.MessageType == (byte)MessageType.VideoFrame)
             {
@@ -427,35 +499,118 @@ namespace EasyRDP.Client.Wpf.Services
         }
 
         /// <summary>
-        /// 视频帧入队（接收线程）。单槽覆盖式：只保留最新未解码帧，
-        /// 避免解码积压导致端到端延迟增长；待解码的关键帧不被普通帧覆盖，
-        /// 防止解码器因丢关键帧而等到下一个 IDR 才恢复。
+        /// 视频帧入队（接收线程）。ZRLE 按序全部解码（增量链不可中断），
+        /// H264 同样按序解码；一旦发生丢帧/积压，丢弃后续增量帧并等待全量帧重建基线。
         /// </summary>
         private void EnqueueVideoFrame(VideoFrameMessage msg)
         {
+            if (msg == null || msg.Data == null || msg.Data.Length == 0)
+                return;
+
+            bool needResync = false;
+            bool enqueue = true;
             lock (_decodeLock)
             {
-                // 覆盖规则：无待解码帧直接入槽；新帧是关键帧则必入；
-                // 否则仅在待解码帧不是关键帧时覆盖（保留关键帧，避免解码器等下一个 IDR）
-                bool replace = _pendingDecodeFrame == null
-                    || msg.IsKeyframe
-                    || !_pendingDecodeFrame.IsKeyframe;
-                if (!replace)
-                    return; // 待解码关键帧不因普通帧被覆盖，直接跳过新帧
-                if (_pendingDecodeFrame != null)
+                // 序列缺口：增量链/参考链已断，队列里的旧帧也失去意义
+                if (_expectedSequenceNumber >= 0 && msg.SequenceNumber != _expectedSequenceNumber)
                 {
-                    _decodeFrameDrops++;
-                    if (_decodeFrameDrops == 1 || _decodeFrameDrops % 60 == 0)
-                        Logger.Warn("Decode mailbox overwritten, stale frame dropped (total drops={0})", _decodeFrameDrops);
+                    _sequenceGaps++;
+                    if (_sequenceGaps == 1 || _sequenceGaps % 30 == 0)
+                        Logger.Warn("Video frame sequence gap: expected={0} got={1} codec={2} (total gaps={3})",
+                            _expectedSequenceNumber, msg.SequenceNumber, msg.Codec, _sequenceGaps);
+                    _decodeQueue.Clear();
+                    // 缺口后的这一帧若非全量帧，跳过它等待服务端重建基线
+                    if (!msg.IsKeyframe)
+                    {
+                        BeginAwaitingKeyframe();
+                        needResync = true;
+                    }
                 }
-                _pendingDecodeFrame = msg;
-                Monitor.Pulse(_decodeLock);
+                _expectedSequenceNumber = msg.SequenceNumber + 1;
+
+                if (_awaitingKeyframe)
+                {
+                    if (msg.IsKeyframe)
+                    {
+                        _awaitingKeyframe = false;
+                        if (_framesDroppedAwaitingKeyframe > 0)
+                        {
+                            Logger.Info("Full frame received after resync (seq={0}, codec={1}, dropped={2} frames)",
+                                msg.SequenceNumber, msg.Codec, _framesDroppedAwaitingKeyframe);
+                            _framesDroppedAwaitingKeyframe = 0;
+                        }
+                    }
+                    else
+                    {
+                        long waitedMs = (System.Diagnostics.Stopwatch.GetTimestamp() - _awaitingKeyframeSinceTicks)
+                            * 1000 / System.Diagnostics.Stopwatch.Frequency;
+                        if (waitedMs < KeyframeWaitTimeoutMs)
+                        {
+                            // 基线不可信：丢弃该增量帧，继续等全量帧
+                            _framesDroppedAwaitingKeyframe++;
+                            enqueue = false;
+                        }
+                        else
+                        {
+                            // 服务端迟迟未响应全量请求：放弃等待（画面冻结比局部错位更糟），
+                            // 恢复增量解码并再次请求全量帧
+                            _awaitingKeyframe = false;
+                            needResync = true;
+                            Logger.Warn("Keyframe wait timed out after {0}ms, resuming incremental decode (dropped={1} frames)",
+                                waitedMs, _framesDroppedAwaitingKeyframe);
+                        }
+                    }
+                }
+
+                if (enqueue)
+                {
+                    // 全量帧（ZRLE 全帧 / H264 IDR）自身可独立解码：更旧的增量帧全部作废
+                    if (msg.IsKeyframe && _decodeQueue.Count > 0)
+                        _decodeQueue.Clear();
+
+                    int limit = msg.Codec == CodecId.Zrle ? MaxQueuedZrleFrames : MaxQueuedH264Frames;
+                    if (_decodeQueue.Count >= limit)
+                    {
+                        _decodeQueueOverflows++;
+                        _decodeFrameDrops++;
+                        if (_decodeQueueOverflows == 1 || _decodeQueueOverflows % 30 == 0)
+                            Logger.Warn("Decode queue full ({0}), dropping backlog (codec={1}, total overflows={2} drops={3})",
+                                limit, msg.Codec, _decodeQueueOverflows, _decodeFrameDrops);
+                        // 积压到上限：整队作废。当前帧是增量帧时同样不能解码（基线已丢），
+                        // 转入等待全量帧；全量帧则保留（自身完整）。
+                        _decodeQueue.Clear();
+                        if (!msg.IsKeyframe)
+                        {
+                            BeginAwaitingKeyframe();
+                            _framesDroppedAwaitingKeyframe++;
+                            enqueue = false;
+                            needResync = true;
+                        }
+                    }
+
+                    if (enqueue)
+                    {
+                        _decodeQueue.Enqueue(msg);
+                        Monitor.Pulse(_decodeLock);
+                    }
+                }
             }
+            // 锁外发送：RequestDecoderKeyframe 走 transport.Send（内部有发送锁），
+            // 避免持解码锁等待网络/与接收线程互等
+            if (needResync)
+                RequestDecoderKeyframe();
+        }
+
+        /// <summary>进入"等待全量帧"状态（调用方必须持有 _decodeLock）。</summary>
+        private void BeginAwaitingKeyframe()
+        {
+            if (!_awaitingKeyframe)
+                _awaitingKeyframeSinceTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+            _awaitingKeyframe = true;
         }
 
         /// <summary>
-        /// 解码线程主循环：始终处理最新帧，保持接收线程对控制消息的低延迟响应。
-        /// 单消费者 + 顺序覆盖保证解码顺序单调递增。
+        /// 解码线程主循环：按接收顺序解码，保证 ZRLE 增量链完整。
         /// </summary>
         private void DecodeLoop()
         {
@@ -464,12 +619,11 @@ namespace EasyRDP.Client.Wpf.Services
                 VideoFrameMessage msg;
                 lock (_decodeLock)
                 {
-                    while (_pendingDecodeFrame == null && _running)
+                    while (_decodeQueue.Count == 0 && _running)
                         Monitor.Wait(_decodeLock, 100);
                     if (!_running) break;
-                    if (_pendingDecodeFrame == null) continue;
-                    msg = _pendingDecodeFrame;
-                    _pendingDecodeFrame = null;
+                    if (_decodeQueue.Count == 0) continue;
+                    msg = _decodeQueue.Dequeue();
                 }
 
                 try
@@ -478,8 +632,9 @@ namespace EasyRDP.Client.Wpf.Services
                 }
                 catch (Exception ex)
                 {
-                    // 单帧解码异常不应杀死解码线程
+                    // 单帧解码异常不应杀死解码线程；解码器状态可能已错乱，请求全量帧
                     Logger.Warn(ex, "ProcessVideoFrame failed on decode thread: seq={0}", msg.SequenceNumber);
+                    RequestDecoderKeyframe();
                 }
             }
         }
@@ -799,7 +954,17 @@ namespace EasyRDP.Client.Wpf.Services
 
             int frameSize = msg.Width * msg.Height * 4;
             byte[] writeSlot = _frameBuffer.BorrowWriteBuffer(frameSize);
-            if (writeSlot == null) return;
+            if (writeSlot == null)
+            {
+                // 双槽都被占用：本帧根本没有送进解码器。服务端参考帧已推进，
+                // 客户端解码基线停在上上帧 → 后续增量全部错位，必须请求全量帧重建。
+                _frameBufferDrops++;
+                if (_frameBufferDrops == 1 || _frameBufferDrops % 30 == 0)
+                    Logger.Warn("BorrowWriteBuffer unavailable, frame not decoded (seq={0}, total drops={1})",
+                        msg.SequenceNumber, _frameBufferDrops);
+                RequestDecoderKeyframe();
+                return;
+            }
 
             // D14：按帧头 Codec 选择解码器（会话内 ZRLE/H264 动态切换）。
             // H264 解码器懒创建：首次收到 H264 帧时创建并 Initialize。
@@ -885,17 +1050,19 @@ namespace EasyRDP.Client.Wpf.Services
             // 阶段二：ZRLE 帧提取脏矩形列表随帧提交（渲染层据此局部更新）。
             // ExtractRects 只解析区域头部（不解压数据），开销可忽略。
             // D14：按帧头 codec 判断——H264 帧（或非 Zrle 帧）保持 dirtyRects=null → 全帧渲染。
-            // D16：上一帧 CommitFrame 被丢弃后，解码器缓冲已推进但 RenderTarget 未更新，
-            // 必须放弃局部更新、用当前完整解码帧重写 RenderTarget，防止画面漂移花屏。
+            // D16：渲染层或提交环节丢过帧时，WriteableBitmap 与解码器已脱节，
+            // 本帧必须放弃局部更新、用当前完整解码帧重写 RenderTarget。
+            // 标志用 Exchange 消费：若消费后渲染层又丢帧，标志会重新置位留给下一帧。
+            bool forceFull = Interlocked.Exchange(ref _forceFullRenderNextFlag, 0) != 0;
             ScreenRect[] dirtyRects = null;
-            if (msg.Codec == CodecId.Zrle && msg.Data != null && !_forceFullRenderNext)
+            if (msg.Codec == CodecId.Zrle && msg.Data != null && !forceFull)
             {
                 dirtyRects = ZrleRegionCodec.ExtractRects(msg.Data);
                 if (_frameCount <= 10 || _frameCount % 100 == 0)
                 {
                     int rectCount = dirtyRects != null ? dirtyRects.Length : -1;
                     Logger.Info("ExtractRects: seq={0} frameCount={1} dataLen={2} rects={3} forceFull={4}",
-                        msg.SequenceNumber, _frameCount, msg.Data.Length, rectCount, _forceFullRenderNext);
+                        msg.SequenceNumber, _frameCount, msg.Data.Length, rectCount, forceFull);
                 }
             }
 
@@ -904,13 +1071,13 @@ namespace EasyRDP.Client.Wpf.Services
             {
                 if (_frameCount <= 10 || _frameCount % 100 == 0)
                     Logger.Warn("CommitFrame DROPPED (reader busy): seq={0} frameCount={1}", msg.SequenceNumber, _frameCount);
-                // D16：RenderTarget 未拿到本帧，下一帧必须全量渲染以恢复同步
-                _forceFullRenderNext = true;
+                // RenderTarget 未拿到本帧，下一帧必须全量渲染以恢复同步。
+                // 注意：解码器内部参考帧已推进，这里不能请求关键帧（链路本身没断）。
+                Interlocked.Exchange(ref _forceFullRenderNextFlag, 1);
             }
-            else if (_forceFullRenderNext)
+            else if (forceFull && _frameCount <= 10)
             {
-                // 本帧已按完整画面提交并交换到读槽，同步已恢复，清除标志
-                _forceFullRenderNext = false;
+                Logger.Info("Full-frame redraw committed: seq={0} frameCount={1}", msg.SequenceNumber, _frameCount);
             }
             Interlocked.Increment(ref _frameCount);
             Interlocked.Add(ref _receivedBytes, msg.Data != null ? msg.Data.Length : 0);

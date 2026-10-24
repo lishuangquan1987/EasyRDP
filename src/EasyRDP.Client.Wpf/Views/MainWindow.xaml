@@ -46,13 +46,13 @@
                               DisplayMemberPath="Name"
                               SelectedItem="{Binding SelectedProfile}"
                               Text="{Binding ProfileName, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                              ToolTip="选择已保存的服务器配置，或输入新名称后点 Save"/>
+                              ToolTip="Select a saved server profile, or type a new name and click Save"/>
                     <Button Content="Save" Style="{StaticResource ToolbarButtonStyle}" Height="28" Padding="8,0"
                             Command="{Binding SaveProfileCommand}" Margin="4,0,0,0"
-                            ToolTip="把当前连接字段保存为配置（同名覆盖）"/>
+                            ToolTip="Save the current connection fields as a profile (same name overwrites)"/>
                     <Button Content="Del" Style="{StaticResource ToolbarButtonStyle}" Height="28" Padding="8,0"
                             Command="{Binding DeleteProfileCommand}" Margin="2,0,0,0"
-                            ToolTip="删除当前选中的配置"/>
+                            ToolTip="Delete the selected profile"/>
                 </StackPanel>
 
                 <Separator Grid.Column="2" Style="{StaticResource ToolbarSeparatorStyle}"/>
@@ -62,7 +62,7 @@
                     <TextBlock Text="HOST" Style="{StaticResource ToolbarLabelStyle}" Margin="0,0,6,0"/>
                     <TextBox Text="{Binding Host, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                              Style="{StaticResource ToolbarTextBoxStyle}" Width="132"
-                             ToolTip="服务器地址（IP 或主机名）"/>
+                             ToolTip="Server address (IP or hostname)"/>
                 </StackPanel>
 
                 <!-- Port -->
@@ -70,7 +70,7 @@
                     <TextBlock Text="PORT" Style="{StaticResource ToolbarLabelStyle}" Margin="0,0,6,0"/>
                     <TextBox Text="{Binding Port, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                              Style="{StaticResource ToolbarTextBoxStyle}" Width="64"
-                             ToolTip="服务端监听端口（默认 2000）"/>
+                             ToolTip="Server listening port (default 2000)"/>
                 </StackPanel>
 
                 <!-- Username -->
@@ -78,7 +78,7 @@
                     <TextBlock Text="USER" Style="{StaticResource ToolbarLabelStyle}" Margin="0,0,6,0"/>
                     <TextBox Text="{Binding Username, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                              Style="{StaticResource ToolbarTextBoxStyle}" Width="96"
-                             ToolTip="服务端配置的登录用户名（必填）"/>
+                             ToolTip="Username configured on the server (required)"/>
                 </StackPanel>
 
                 <!-- Password -->
@@ -87,14 +87,14 @@
                     <PasswordBox Style="{StaticResource ToolbarPasswordBoxStyle}" Width="104"
                                  behaviors:PasswordBoxBehavior.BindPassword="True"
                                  behaviors:PasswordBoxBehavior.Password="{Binding Password, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                 ToolTip="服务端配置的登录密码（必填）"/>
+                                 ToolTip="Password configured on the server (required)"/>
                 </StackPanel>
 
                 <!-- 主操作按钮：连接/断开 -->
                 <StackPanel Grid.Column="8" Orientation="Horizontal" VerticalAlignment="Center">
                     <Button Content="Connect" Style="{StaticResource PrimaryButtonStyle}"
                             Command="{Binding ConnectCommand}" Margin="0,0,6,0"
-                            ToolTip="按上方 HOST/PORT/USER/PASS 建立连接"/>
+                            ToolTip="Connect using the HOST / PORT / USER / PASS above"/>
                     <Button Content="Disconnect" Style="{StaticResource DangerButtonStyle}"
                             Command="{Binding StopCommand}"/>
                 </StackPanel>
@@ -131,25 +131,22 @@
                     <Button Content="{Binding AlyClientUpdateStr}" Style="{StaticResource LightButtonStyle}"
                             Command="{Binding CheckUpdateCommand}" Margin="0,0,6,0"
                             Visibility="{Binding IsUpdatePanelVisible, Converter={StaticResource BoolToVis}}"
-                            ToolTip="点击确认下载/应用新版本"/>
+                            ToolTip="Confirm download / apply the new version"/>
                     <Button Content="Fullscreen" Style="{StaticResource LightButtonStyle}"
                             Command="{Binding FullscreenCommand}" Margin="0,0,6,0"
-                            ToolTip="切换全屏/窗口模式（F11）"/>
+                            ToolTip="Toggle fullscreen / windowed (F11)"/>
                     <Button Content="Lock" Style="{StaticResource LightButtonStyle}"
                             Command="{Binding LockCommand}" Margin="0,0,6,0"
-                            ToolTip="远程锁定（Win+L）；Ctrl+Alt+Del 属系统安全序列无法模拟"/>
+                            ToolTip="Lock the remote session (Win+L); Ctrl+Alt+Del is a secure attention sequence and cannot be simulated"/>
                     <Button Content="Alt+Tab" Style="{StaticResource LightButtonStyle}"
                             Command="{Binding AltTabCommand}" Margin="0,0,6,0"
-                            ToolTip="在远端发送 Alt+Tab 切换窗口"/>
+                            ToolTip="Send Alt+Tab to the remote machine"/>
                     <Button Content="Reset Keys" Style="{StaticResource LightButtonStyle}"
                             Command="{Binding ResetKeysCommand}" Margin="0,0,6,0"
-                            ToolTip="释放可能卡住的 Ctrl/Alt/Shift/Win 键"/>
-                    <Button Content="Local Test" Style="{StaticResource LightButtonStyle}"
-                            Command="{Binding StartTestCommand}"
-                            ToolTip="在本地运行渲染测试，验证管线是否正常"/>
+                            ToolTip="Release stuck Ctrl/Alt/Shift/Win keys"/>
                     <Button Content="Details" Style="{StaticResource LightButtonStyle}"
                             Command="{Binding ToggleDetailsCommand}" Margin="0,0,6,0"
-                            ToolTip="显示/隐藏连接详情面板（网络诊断 / 连接详情 / 系统性能）"/>
+                            ToolTip="Show / hide the connection details panel"/>
                 </StackPanel>
             </Grid>
         </Border>
@@ -197,14 +194,6 @@
                        Stretch="None" IsHitTestVisible="False"
                        RenderOptions.BitmapScalingMode="NearestNeighbor"
                        Visibility="Collapsed"/>
-
-                <!-- 点击位置标记（诊断）：点击后红点在按下位置显示 1.5 秒，
-                     便于肉眼核对"可见光标"与"实际落点"是否一致 -->
-                <Ellipse x:Name="ClickMarker"
-                         Width="10" Height="10"
-                         Fill="#E6FFFFFF" Stroke="#FFFF3B30" StrokeThickness="1.5"
-                         HorizontalAlignment="Left" VerticalAlignment="Top"
-                         IsHitTestVisible="False" Visibility="Collapsed"/>
                     </Grid>
                 </ScrollViewer>
 
@@ -217,27 +206,27 @@
                         Background="#CC101014" CornerRadius="6"
                         Visibility="Collapsed" IsHitTestVisible="True">
                     <StackPanel Orientation="Horizontal">
-                        <Button Content="断开" Style="{StaticResource ToolbarButtonStyle}"
+                        <Button Content="Disconnect" Style="{StaticResource ToolbarButtonStyle}"
                                 Command="{Binding StopCommand}" Margin="2,0" Padding="10,4"
-                                ToolTip="断开连接并关闭此窗口"/>
-                        <Button Content="全屏" Style="{StaticResource ToolbarButtonStyle}"
+                                ToolTip="Disconnect and close this window"/>
+                        <Button Content="Fullscreen" Style="{StaticResource ToolbarButtonStyle}"
                                 Command="{Binding FullscreenCommand}" Margin="2,0" Padding="10,4"
-                                ToolTip="切换全屏/窗口（F11）"/>
+                                ToolTip="Toggle fullscreen / windowed (F11)"/>
                         <Button Content="Lock" Style="{StaticResource ToolbarButtonStyle}"
                                 Command="{Binding LockCommand}" Margin="2,0" Padding="10,4"
-                                ToolTip="远程锁定（Win+L）"/>
+                                ToolTip="Lock the remote session (Win+L)"/>
                         <Button Content="Alt+Tab" Style="{StaticResource ToolbarButtonStyle}"
                                 Command="{Binding AltTabCommand}" Margin="2,0" Padding="10,4"
-                                ToolTip="远端发送 Alt+Tab"/>
+                                ToolTip="Send Alt+Tab to the remote machine"/>
                         <Button Content="Reset" Style="{StaticResource ToolbarButtonStyle}"
                                 Command="{Binding ResetKeysCommand}" Margin="2,0" Padding="10,4"
-                                ToolTip="释放卡住的修饰键"/>
+                                ToolTip="Release stuck modifier keys"/>
                         <Button Content="Details" Style="{StaticResource ToolbarButtonStyle}"
                                 Command="{Binding ToggleDetailsCommand}" Margin="2,0" Padding="10,4"
-                                ToolTip="连接详情面板"/>
+                                ToolTip="Toggle connection details"/>
                         <Button Content="{Binding ZoomModeText}" Style="{StaticResource ToolbarButtonStyle}"
                                 Command="{Binding CycleZoomCommand}" Margin="2,0" Padding="10,4"
-                                ToolTip="循环切换缩放模式：适应/原始/拉伸"/>
+                                ToolTip="Cycle zoom mode: Fit / 1:1 / Stretch"/>
                     </StackPanel>
                 </Border>
 
@@ -252,53 +241,53 @@
                         Visibility="{Binding IsDetailsPanelVisible, Converter={StaticResource BoolToVis}}">
                     <StackPanel>
                         <!-- ═══ 网络诊断 ═══ -->
-                        <TextBlock Text="网络诊断" Foreground="{StaticResource AccentBrush}"
+                        <TextBlock Text="Network" Foreground="{StaticResource AccentBrush}"
                                    FontSize="13" FontWeight="Bold" Margin="0,0,0,6"/>
                         <Grid Margin="0,0,0,10">
                             <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="80"/>
+                                <ColumnDefinition Width="88"/>
                                 <ColumnDefinition Width="*"/>
                             </Grid.ColumnDefinitions>
                             <Grid.RowDefinitions>
                                 <RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/>
                             </Grid.RowDefinitions>
-                            <TextBlock Grid.Row="0" Grid.Column="0" Text="连接时间" Foreground="#B0FFFFFF" FontSize="12"/>
+                            <TextBlock Grid.Row="0" Grid.Column="0" Text="Duration" Foreground="#B0FFFFFF" FontSize="12"/>
                             <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding ConnectionDurationText}" Foreground="White" FontSize="12"/>
-                            <TextBlock Grid.Row="1" Grid.Column="0" Text="速率" Foreground="#B0FFFFFF" FontSize="12"/>
+                            <TextBlock Grid.Row="1" Grid.Column="0" Text="Rate" Foreground="#B0FFFFFF" FontSize="12"/>
                             <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding ReceiveRateText}" Foreground="White" FontSize="12"/>
-                            <TextBlock Grid.Row="2" Grid.Column="0" Text="帧率" Foreground="#B0FFFFFF" FontSize="12"/>
+                            <TextBlock Grid.Row="2" Grid.Column="0" Text="Frame rate" Foreground="#B0FFFFFF" FontSize="12"/>
                             <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding FrameRateText}" Foreground="White" FontSize="12"/>
-                            <TextBlock Grid.Row="3" Grid.Column="0" Text="延时" Foreground="#B0FFFFFF" FontSize="12"/>
+                            <TextBlock Grid.Row="3" Grid.Column="0" Text="Latency" Foreground="#B0FFFFFF" FontSize="12"/>
                             <TextBlock Grid.Row="3" Grid.Column="1" Text="{Binding RttText}" Foreground="White" FontSize="12"/>
-                            <TextBlock Grid.Row="4" Grid.Column="0" Text="丢包" Foreground="#B0FFFFFF" FontSize="12"/>
+                            <TextBlock Grid.Row="4" Grid.Column="0" Text="Loss" Foreground="#B0FFFFFF" FontSize="12"/>
                             <TextBlock Grid.Row="4" Grid.Column="1" Text="{Binding LossRateText}" Foreground="White" FontSize="12"/>
                         </Grid>
 
                         <!-- ═══ 连接详情 ═══ -->
-                        <TextBlock Text="连接详情" Foreground="{StaticResource AccentBrush}"
+                        <TextBlock Text="Connection" Foreground="{StaticResource AccentBrush}"
                                    FontSize="13" FontWeight="Bold" Margin="0,0,0,6"/>
                         <Grid Margin="0,0,0,10">
                             <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="80"/>
+                                <ColumnDefinition Width="88"/>
                                 <ColumnDefinition Width="*"/>
                             </Grid.ColumnDefinitions>
                             <Grid.RowDefinitions>
                                 <RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/>
                             </Grid.RowDefinitions>
-                            <TextBlock Grid.Row="0" Grid.Column="0" Text="编解码器" Foreground="#B0FFFFFF" FontSize="12"/>
+                            <TextBlock Grid.Row="0" Grid.Column="0" Text="Codec" Foreground="#B0FFFFFF" FontSize="12"/>
                             <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding CodecDetailText}" Foreground="White" FontSize="12" TextWrapping="Wrap"/>
-                            <TextBlock Grid.Row="1" Grid.Column="0" Text="采集方式" Foreground="#B0FFFFFF" FontSize="12"/>
+                            <TextBlock Grid.Row="1" Grid.Column="0" Text="Capture" Foreground="#B0FFFFFF" FontSize="12"/>
                             <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding CaptureMethodText}" Foreground="White" FontSize="12"/>
-                            <TextBlock Grid.Row="2" Grid.Column="0" Text="色度采样" Foreground="#B0FFFFFF" FontSize="12"/>
+                            <TextBlock Grid.Row="2" Grid.Column="0" Text="Chroma" Foreground="#B0FFFFFF" FontSize="12"/>
                             <TextBlock Grid.Row="2" Grid.Column="1" Text="4:2:0 (I420)" Foreground="White" FontSize="12"/>
-                            <TextBlock Grid.Row="3" Grid.Column="0" Text="分辨率&amp;缩放" Foreground="#B0FFFFFF" FontSize="12"/>
+                            <TextBlock Grid.Row="3" Grid.Column="0" Text="Resolution" Foreground="#B0FFFFFF" FontSize="12"/>
                             <TextBlock Grid.Row="3" Grid.Column="1" Text="{Binding RemoteResolutionText}" Foreground="White" FontSize="12" TextWrapping="Wrap"/>
-                            <TextBlock Grid.Row="4" Grid.Column="0" Text="画面呈现" Foreground="#B0FFFFFF" FontSize="12"/>
-                            <TextBlock Grid.Row="4" Grid.Column="1" Text="自动缩放 (Uniform)" Foreground="White" FontSize="12"/>
+                            <TextBlock Grid.Row="4" Grid.Column="0" Text="Scaling" Foreground="#B0FFFFFF" FontSize="12"/>
+                            <TextBlock Grid.Row="4" Grid.Column="1" Text="Auto (Uniform)" Foreground="White" FontSize="12"/>
                         </Grid>
 
                         <!-- ═══ 系统性能 ═══ -->
-                        <TextBlock Text="系统性能" Foreground="{StaticResource AccentBrush}"
+                        <TextBlock Text="System" Foreground="{StaticResource AccentBrush}"
                                    FontSize="13" FontWeight="Bold" Margin="0,0,0,6"/>
                         <Grid>
                             <Grid.ColumnDefinitions>
@@ -318,20 +307,20 @@
                                 <TextBlock Text="{Binding LocalGpuText}" Foreground="White" FontSize="12" TextWrapping="Wrap" TextTrimming="CharacterEllipsis"/>
                                 <TextBlock Text="{Binding RemoteGpuText}" Foreground="#B0FFFFFF" FontSize="12" TextWrapping="Wrap" TextTrimming="CharacterEllipsis"/>
                             </StackPanel>
-                            <TextBlock Grid.Row="2" Grid.Column="0" Text="内存" Foreground="#B0FFFFFF" FontSize="12"/>
+                            <TextBlock Grid.Row="2" Grid.Column="0" Text="Memory" Foreground="#B0FFFFFF" FontSize="12"/>
                             <StackPanel Grid.Row="2" Grid.Column="1">
                                 <TextBlock Text="{Binding LocalMemoryText}" Foreground="White" FontSize="12"/>
                                 <TextBlock Text="{Binding RemoteMemoryText}" Foreground="#B0FFFFFF" FontSize="12"/>
                             </StackPanel>
-                            <TextBlock Grid.Row="3" Grid.Column="0" Text="系统" Foreground="#B0FFFFFF" FontSize="12"/>
+                            <TextBlock Grid.Row="3" Grid.Column="0" Text="OS" Foreground="#B0FFFFFF" FontSize="12"/>
                             <StackPanel Grid.Row="3" Grid.Column="1">
                                 <TextBlock Text="{Binding LocalOsText}" Foreground="White" FontSize="12"/>
                                 <TextBlock Text="{Binding RemoteOsText}" Foreground="#B0FFFFFF" FontSize="12"/>
                             </StackPanel>
-                            <TextBlock Grid.Row="4" Grid.Column="0" Text="主被控" Foreground="#B0FFFFFF" FontSize="12"/>
+                            <TextBlock Grid.Row="4" Grid.Column="0" Text="Endpoint" Foreground="#B0FFFFFF" FontSize="12"/>
                             <StackPanel Grid.Row="4" Grid.Column="1">
-                                <TextBlock Text="本机（本地）" Foreground="White" FontSize="12"/>
-                                <TextBlock Text="远端（远程）" Foreground="#B0FFFFFF" FontSize="12"/>
+                                <TextBlock Text="Local" Foreground="White" FontSize="12"/>
+                                <TextBlock Text="Remote" Foreground="#B0FFFFFF" FontSize="12"/>
                             </StackPanel>
                         </Grid>
                     </StackPanel>
@@ -350,9 +339,9 @@
                             </Style.Triggers>
                         </Style>
                     </StackPanel.Style>
-                    <TextBlock Text="未连接" FontSize="28" FontWeight="SemiBold" Foreground="#9AA7B0"
+                    <TextBlock Text="Not connected" FontSize="28" FontWeight="SemiBold" Foreground="#9AA7B0"
                                HorizontalAlignment="Center" Margin="0,0,0,10"/>
-                    <TextBlock Text="在上方输入 HOST / PORT / USER / PASS 后点击 Connect，或在浏览窗口选择/新建连接"
+                    <TextBlock Text="Enter HOST / PORT / USER / PASS above and click Connect, or pick a host in the browse window"
                                FontSize="14" Foreground="#AEBBC4" HorizontalAlignment="Center"/>
                 </StackPanel>
 
@@ -403,7 +392,7 @@
                         </Ellipse.RenderTransform>
                     </Ellipse>
                 </Grid>
-                <TextBlock Text="正在连接，获取远程画面…" FontSize="15" Foreground="#D0DAE2"
+                <TextBlock Text="Connecting, waiting for the first frame…" FontSize="15" Foreground="#D0DAE2"
                            HorizontalAlignment="Center" Margin="0,14,0,0"/>
             </StackPanel>
         </Grid>
@@ -412,8 +401,8 @@
         <Border x:Name="BottomBar" Grid.Row="3" Background="#F4F6F8"
                 BorderBrush="#DDE3E8" BorderThickness="0,1,0,0" Padding="14,5">
             <StackPanel Orientation="Horizontal">
-                <TextBlock Text="F11 / Esc 全屏切换" Style="{StaticResource ActionLabelStyle}" Margin="0,0,16,0"/>
-                <TextBlock Text="焦点在输入框时不转发键盘" Style="{StaticResource ActionLabelStyle}"/>
+                <TextBlock Text="F11 / Esc toggles fullscreen" Style="{StaticResource ActionLabelStyle}" Margin="0,0,16,0"/>
+                <TextBlock Text="Keyboard input is not forwarded while a text field has focus" Style="{StaticResource ActionLabelStyle}"/>
             </StackPanel>
         </Border>
     </Grid>

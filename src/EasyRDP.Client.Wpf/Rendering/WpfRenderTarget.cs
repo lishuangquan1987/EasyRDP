@@ -27,10 +27,14 @@ namespace EasyRDP.Client.Wpf.Rendering
         // 双缓冲拷贝槽：RenderFrame 先把像素从 FrameBuffer 读槽拷出再异步送 UI，
         // 避免 (a) 同步 Invoke 与 UI 线程 Stop/Join 死锁；(b) BeginInvoke 异步执行时
         // 写槽复用同一数组导致画面撕裂。最多缓存 2 帧，超出即丢旧帧（直播语义）。
+        // 槽位占用标记在 UI 回调真正执行完之后才释放：仅靠 _pendingCount 无法区分
+        // "A 的 UI 回调正在执行"与"下一个该用 B"，会导致刚排队的槽被新帧覆盖（撕裂）。
         private readonly object _renderLock = new object();
         private byte[]? _pendingCopyA;
         private byte[]? _pendingCopyB;
         private int _pendingCount;
+        private bool _slotABusy;
+        private bool _slotBBusy;
 
         // 渲染诊断计数器（Interlocked 操作，跨线程安全）
         private long _renderFrameCalls;           // RenderFrame 被调用总次数
@@ -65,6 +69,69 @@ namespace EasyRDP.Client.Wpf.Rendering
         /// "连接加载层"、显示远程桌面，避免连接后短暂黑屏。</summary>
         public event Action? FirstFramePresented;
         private bool _firstFramePresented;
+
+        /// <summary>
+        /// 一帧像素被丢弃（UI 线程积压 / 跨线程尺寸切换 / 位图不匹配）时触发。
+        /// 脏矩形局部渲染下，丢帧意味着这些像素不会再被后续增量帧补上，
+        /// 订阅方（ClientStreamSession）据此把下一帧标记为整帧重绘。
+        /// </summary>
+        public event Action? FrameDropped;
+
+        /// <summary>通知订阅方有一帧未能显示（回调异常不影响渲染线程）。</summary>
+        private void RaiseFrameDropped()
+        {
+            var handler = FrameDropped;
+            if (handler == null) return;
+            try { handler(); }
+            catch (Exception ex) { Log.Warn(ex, "FrameDropped handler threw"); }
+        }
+
+        /// <summary>
+        /// 借一个空闲拷贝槽并拷入像素。两个槽都在 UI 回调中时返回 null（由调用方丢帧）。
+        /// 必须在复制前标记占用，否则新帧会覆盖仍在排队的槽内容。
+        /// </summary>
+        private byte[]? AcquireSlot(byte[] source, out bool useA)
+        {
+            lock (_renderLock)
+            {
+                byte[]? slot;
+                if (!_slotABusy)
+                {
+                    useA = true;
+                    _slotABusy = true;
+                    slot = _pendingCopyA;
+                }
+                else if (!_slotBBusy)
+                {
+                    useA = false;
+                    _slotBBusy = true;
+                    slot = _pendingCopyB;
+                }
+                else
+                {
+                    useA = false;
+                    return null;
+                }
+                if (slot == null || slot.Length < source.Length)
+                    slot = new byte[source.Length];
+                if (useA) _pendingCopyA = slot;
+                else _pendingCopyB = slot;
+                Buffer.BlockCopy(source, 0, slot, 0, source.Length);
+                _pendingCount++;
+                return slot;
+            }
+        }
+
+        /// <summary>释放拷贝槽（UI 回调结束或 BeginInvoke 失败时调用）。</summary>
+        private void ReleaseSlot(bool useA)
+        {
+            lock (_renderLock)
+            {
+                if (useA) _slotABusy = false;
+                else _slotBBusy = false;
+                if (_pendingCount > 0) _pendingCount--;
+            }
+        }
 
         /// <summary>构造渲染目标。必须在 UI 线程调用，以便捕获正确的 Dispatcher。</summary>
         public WpfRenderTarget()
@@ -117,89 +184,88 @@ namespace EasyRDP.Client.Wpf.Rendering
                     // 分辨率切换罕见，短暂丢帧远好于同步 Invoke 造成 UI/渲染线程互相等待。
                     _uiDispatcher.BeginInvoke(new Action(() => DoResize(w, h)), DispatcherPriority.Render);
                     Log.Warn("RenderFrame(full) call#{0}: frame dropped (cross-thread resize)", callIdx);
+                    RaiseFrameDropped();
                     return;
                 }
             }
 
             // 拷贝像素到私有槽位（在 ReleaseReadFrame 之前完成，读槽内容仍然有效）
-            byte[] slot = null;
-            lock (_renderLock)
-            {
-                if (_pendingCount < 2)
-                {
-                    slot = _pendingCount == 0 ? _pendingCopyA : _pendingCopyB;
-                    if (slot == null || slot.Length < bgraPixels.Length)
-                        slot = new byte[bgraPixels.Length];
-                    Buffer.BlockCopy(bgraPixels, 0, slot, 0, bgraPixels.Length);
-                    _pendingCount++;
-                }
-            }
-            if (slot == null)
+            byte[] posted = AcquireSlot(bgraPixels, out bool useA);
+            if (posted == null)
             {
                 System.Threading.Interlocked.Increment(ref _renderDroppedPending);
                 if (System.Threading.Interlocked.Read(ref _renderDroppedPending) <= 3
                     || System.Threading.Interlocked.Read(ref _renderDroppedPending) % 100 == 0)
                     Log.Warn("RenderFrame(full) call#{0}: dropped (pending full={1})",
                         callIdx, _pendingCount);
+                RaiseFrameDropped();
                 return; // 双缓冲满：UI 线程繁忙，丢弃本帧（直播语义，不积压）
             }
 
-            byte[] posted = slot;
-            _uiDispatcher.BeginInvoke(new Action(() =>
+            try
             {
-                try
+                _uiDispatcher.BeginInvoke(new Action(() =>
                 {
-                    lock (_renderLock)
-                    {
-                        if (_pendingCount > 0)
-                            _pendingCount--;
-                    }
-                    if (_disposed)
-                    {
-                        Log.Debug("RenderFrame(full) UI callback: disposed, skip");
-                        return;
-                    }
-                    var bmp = _bitmap;
-                    if (bmp == null || w != _width || h != _height)
-                    {
-                        Log.Warn("RenderFrame(full) UI callback: bitmap mismatch bmp={0} cur={1}x{2} req={3}x{4}",
-                            bmp != null ? "ok" : "null", _width, _height, w, h);
-                        return;
-                    }
-                    System.Threading.Interlocked.Increment(ref _renderUiCallbackExecuted);
-                    long executed = System.Threading.Interlocked.Read(ref _renderUiCallbackExecuted);
-                    if (executed <= 5 || executed % 100 == 0)
-                        Log.Info("RenderFrame(full) UI callback#{0}: WritePixels w={1} h={2}", executed, w, h);
-                    bmp.Lock();
                     try
                     {
-                        int stride = w * 4;
-                        bmp.WritePixels(
-                            new Int32Rect(0, 0, w, h),
-                            posted,
-                            stride,
-                            0);
+                        if (_disposed)
+                        {
+                            Log.Debug("RenderFrame(full) UI callback: disposed, skip");
+                            return;
+                        }
+                        var bmp = _bitmap;
+                        if (bmp == null || w != _width || h != _height)
+                        {
+                            Log.Warn("RenderFrame(full) UI callback: bitmap mismatch bmp={0} cur={1}x{2} req={3}x{4}",
+                                bmp != null ? "ok" : "null", _width, _height, w, h);
+                            RaiseFrameDropped();
+                            return;
+                        }
+                        System.Threading.Interlocked.Increment(ref _renderUiCallbackExecuted);
+                        long executed = System.Threading.Interlocked.Read(ref _renderUiCallbackExecuted);
+                        if (executed <= 5 || executed % 100 == 0)
+                            Log.Info("RenderFrame(full) UI callback#{0}: WritePixels w={1} h={2}", executed, w, h);
+                        bmp.Lock();
+                        try
+                        {
+                            int stride = w * 4;
+                            bmp.WritePixels(
+                                new Int32Rect(0, 0, w, h),
+                                posted,
+                                stride,
+                                0);
+                        }
+                        finally
+                        {
+                            bmp.Unlock();
+                        }
+                        // 首帧像素写入成功：触发一次 FirstFramePresented（UI 线程），
+                        // ViewModel 据此隐藏连接加载层、显示远程桌面
+                        if (!_firstFramePresented)
+                        {
+                            _firstFramePresented = true;
+                            var ffh = FirstFramePresented;
+                            if (ffh != null) ffh();
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        System.Threading.Interlocked.Increment(ref _renderUiCallbackFailed);
+                        Log.Error(ex, "RenderFrame(full) UI callback EXCEPTION #{0}: {1}",
+                            System.Threading.Interlocked.Read(ref _renderUiCallbackFailed), ex.Message);
                     }
                     finally
                     {
-                        bmp.Unlock();
+                        // 槽位必须等 WritePixels 真正完成才释放，否则新帧会覆盖正在读的数组
+                        ReleaseSlot(useA);
                     }
-                    // 首帧像素写入成功：触发一次 FirstFramePresented（UI 线程），
-                    // ViewModel 据此隐藏连接加载层、显示远程桌面
-                    if (!_firstFramePresented)
-                    {
-                        _firstFramePresented = true;
-                        var ffh = FirstFramePresented;
-                        if (ffh != null) ffh();
-                    }
-                }
-                catch (Exception ex)
-                {
-                    System.Threading.Interlocked.Increment(ref _renderUiCallbackFailed);
-                    Log.Error(ex, "RenderFrame(full) UI callback EXCEPTION #{0}: {1}",
-                        System.Threading.Interlocked.Read(ref _renderUiCallbackFailed), ex.Message);
-                }
-            }), DispatcherPriority.Render);
+                }), DispatcherPriority.Render);
+            }
+            catch (Exception ex)
+            {
+                ReleaseSlot(useA);
+                Log.Warn(ex, "RenderFrame(full) BeginInvoke failed");
+            }
         }
 
         /// <summary>
@@ -283,107 +349,106 @@ namespace EasyRDP.Client.Wpf.Rendering
                     // 跨线程尺寸变更：异步创建新 bitmap，本帧丢弃（同全帧路径）
                     _uiDispatcher.BeginInvoke(new Action(() => DoResize(w, h)), DispatcherPriority.Render);
                     Log.Warn("RenderFrame(dirty) call#{0}: frame dropped (cross-thread resize)", callIdx);
+                    RaiseFrameDropped();
                     return;
                 }
             }
 
             // 拷贝像素到私有槽位（局部更新也需要完整源像素作 WritePixels 数据源）
-            byte[] slot = null;
-            lock (_renderLock)
-            {
-                if (_pendingCount < 2)
-                {
-                    slot = _pendingCount == 0 ? _pendingCopyA : _pendingCopyB;
-                    if (slot == null || slot.Length < bgraPixels.Length)
-                        slot = new byte[bgraPixels.Length];
-                    Buffer.BlockCopy(bgraPixels, 0, slot, 0, bgraPixels.Length);
-                    _pendingCount++;
-                }
-            }
-            if (slot == null)
+            byte[] posted = AcquireSlot(bgraPixels, out bool useA);
+            if (posted == null)
             {
                 System.Threading.Interlocked.Increment(ref _renderDroppedPending);
                 if (System.Threading.Interlocked.Read(ref _renderDroppedPending) <= 3
                     || System.Threading.Interlocked.Read(ref _renderDroppedPending) % 100 == 0)
                     Log.Warn("RenderFrame(dirty) call#{0}: dropped (pending full={1})",
                         callIdx, _pendingCount);
+                RaiseFrameDropped();
                 return; // 双缓冲满：UI 线程繁忙，丢弃本帧（直播语义）
             }
 
-            byte[] posted = slot;
             ScreenRect[] rects = dirtyRects;
-            _uiDispatcher.BeginInvoke(new Action(() =>
+            try
             {
-                try
+                _uiDispatcher.BeginInvoke(new Action(() =>
                 {
-                    lock (_renderLock)
-                    {
-                        if (_pendingCount > 0)
-                            _pendingCount--;
-                    }
-                    if (_disposed)
-                    {
-                        Log.Debug("RenderFrame(dirty) UI callback: disposed, skip");
-                        return;
-                    }
-                    var bmp = _bitmap;
-                    if (bmp == null || w != _width || h != _height)
-                    {
-                        Log.Warn("RenderFrame(dirty) UI callback: bitmap mismatch bmp={0} cur={1}x{2} req={3}x{4}",
-                            bmp != null ? "ok" : "null", _width, _height, w, h);
-                        return;
-                    }
-                    System.Threading.Interlocked.Increment(ref _renderUiCallbackExecuted);
-                    long executed = System.Threading.Interlocked.Read(ref _renderUiCallbackExecuted);
-                    if (executed <= 10 || executed % 100 == 0)
-                        Log.Info("RenderFrame(dirty) UI callback#{0}: rects={1} w={2} h={3}",
-                            executed, rects.Length, w, h);
-                    bmp.Lock();
                     try
                     {
-                        int stride = w * 4;
-                        for (int i = 0; i < rects.Length; i++)
+                        if (_disposed)
                         {
-                            ScreenRect rect = rects[i];
-                            // 脏矩形边界裁剪到帧范围（防御：编码器边缘瓦片可能越界）
-                            int x = rect.X < 0 ? 0 : rect.X;
-                            int y = rect.Y < 0 ? 0 : rect.Y;
-                            int rw = rect.Width;
-                            int rh = rect.Height;
-                            if (x + rw > w) rw = w - x;
-                            if (y + rh > h) rh = h - y;
-                            if (rw <= 0 || rh <= 0)
-                            {
-                                Log.Debug("RenderFrame(dirty) UI callback: rect[{0}] clipped to zero ({1},{2},{3},{4})",
-                                    i, x, y, rw, rh);
-                                continue;
-                            }
-                            bmp.WritePixels(
-                                new Int32Rect(x, y, rw, rh),
-                                posted,
-                                stride,
-                                y * stride + x * 4);
+                            Log.Debug("RenderFrame(dirty) UI callback: disposed, skip");
+                            return;
                         }
+                        var bmp = _bitmap;
+                        if (bmp == null || w != _width || h != _height)
+                        {
+                            Log.Warn("RenderFrame(dirty) UI callback: bitmap mismatch bmp={0} cur={1}x{2} req={3}x{4}",
+                                bmp != null ? "ok" : "null", _width, _height, w, h);
+                            RaiseFrameDropped();
+                            return;
+                        }
+                        System.Threading.Interlocked.Increment(ref _renderUiCallbackExecuted);
+                        long executed = System.Threading.Interlocked.Read(ref _renderUiCallbackExecuted);
+                        if (executed <= 10 || executed % 100 == 0)
+                            Log.Info("RenderFrame(dirty) UI callback#{0}: rects={1} w={2} h={3}",
+                                executed, rects.Length, w, h);
+                        bmp.Lock();
+                        try
+                        {
+                            int stride = w * 4;
+                            for (int i = 0; i < rects.Length; i++)
+                            {
+                                ScreenRect rect = rects[i];
+                                // 脏矩形边界裁剪到帧范围（防御：编码器边缘瓦片可能越界）
+                                int x = rect.X < 0 ? 0 : rect.X;
+                                int y = rect.Y < 0 ? 0 : rect.Y;
+                                int rw = rect.Width;
+                                int rh = rect.Height;
+                                if (x + rw > w) rw = w - x;
+                                if (y + rh > h) rh = h - y;
+                                if (rw <= 0 || rh <= 0)
+                                {
+                                    Log.Debug("RenderFrame(dirty) UI callback: rect[{0}] clipped to zero ({1},{2},{3},{4})",
+                                        i, x, y, rw, rh);
+                                    continue;
+                                }
+                                bmp.WritePixels(
+                                    new Int32Rect(x, y, rw, rh),
+                                    posted,
+                                    stride,
+                                    y * stride + x * 4);
+                            }
+                        }
+                        finally
+                        {
+                            bmp.Unlock();
+                        }
+                        // 首帧像素写入成功：触发一次 FirstFramePresented（UI 线程）
+                        if (!_firstFramePresented)
+                        {
+                            _firstFramePresented = true;
+                            var ffh = FirstFramePresented;
+                            if (ffh != null) ffh();
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        System.Threading.Interlocked.Increment(ref _renderUiCallbackFailed);
+                        Log.Error(ex, "RenderFrame(dirty) UI callback EXCEPTION #{0}: {1}",
+                            System.Threading.Interlocked.Read(ref _renderUiCallbackFailed), ex.Message);
                     }
                     finally
                     {
-                        bmp.Unlock();
+                        // 槽位必须等 WritePixels 真正完成才释放，否则新帧会覆盖正在读的数组
+                        ReleaseSlot(useA);
                     }
-                    // 首帧像素写入成功：触发一次 FirstFramePresented（UI 线程）
-                    if (!_firstFramePresented)
-                    {
-                        _firstFramePresented = true;
-                        var ffh = FirstFramePresented;
-                        if (ffh != null) ffh();
-                    }
-                }
-                catch (Exception ex)
-                {
-                    System.Threading.Interlocked.Increment(ref _renderUiCallbackFailed);
-                    Log.Error(ex, "RenderFrame(dirty) UI callback EXCEPTION #{0}: {1}",
-                        System.Threading.Interlocked.Read(ref _renderUiCallbackFailed), ex.Message);
-                }
-            }), DispatcherPriority.Render);
+                }), DispatcherPriority.Render);
+            }
+            catch (Exception ex)
+            {
+                ReleaseSlot(useA);
+                Log.Warn(ex, "RenderFrame(dirty) BeginInvoke failed");
+            }
         }
 
         /// <summary>更新光标信息。通过事件通知订阅者（MainWindow）。</summary>

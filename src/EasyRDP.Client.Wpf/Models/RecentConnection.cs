@@ -74,7 +74,7 @@ namespace EasyRDP.Client.Wpf.Models
         {
             get
             {
-                if (LastConnectedUtc == default(DateTime)) return "未知";
+                if (LastConnectedUtc == default(DateTime)) return "Never";
                 DateTime local = LastConnectedUtc.ToLocalTime();
                 if (local.Date == DateTime.Today) return local.ToString("HH:mm");
                 return local.ToString("MM-dd HH:mm");

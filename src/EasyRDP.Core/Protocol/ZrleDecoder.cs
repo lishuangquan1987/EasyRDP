@@ -68,7 +68,10 @@ namespace EasyRDP.Core.Protocol
                 var regions = ZrleRegionCodec.Unpack(data);
                 if (regions == null)
                     return new DecodeResult { Status = DecodeStatus.Failed };
-                ApplyRegions(regions);
+                // 任一区域无法应用即视为本帧损坏：返回 Failed，由上层请求全量帧重建。
+                // 静默跳过坏区域会让画面在丢失的瓦片上永久保留旧像素（花屏）。
+                if (!ApplyRegions(regions))
+                    return new DecodeResult { Status = DecodeStatus.Failed };
                 return new DecodeResult { Status = DecodeStatus.Ok, Pixels = _frameBuffer };
             }
             catch (Exception ex)
@@ -96,7 +99,9 @@ namespace EasyRDP.Core.Protocol
                 var regions = ZrleRegionCodec.Unpack(data);
                 if (regions == null)
                     return new DecodeResult { Status = DecodeStatus.Failed };
-                ApplyRegions(regions);
+                // 任一区域无法应用即视为本帧损坏（见 Decode(data) 同处说明）
+                if (!ApplyRegions(regions))
+                    return new DecodeResult { Status = DecodeStatus.Failed };
                 Buffer.BlockCopy(_frameBuffer, 0, outputBuffer, 0, _frameBuffer.Length);
                 return new DecodeResult { Status = DecodeStatus.Ok, Pixels = outputBuffer };
             }
@@ -130,19 +135,27 @@ namespace EasyRDP.Core.Protocol
         /// 顺序：先 CopyRect（源=上一帧的 _frameBuffer 内容），再 Raw/Deflate/FillRect。
         /// 原因：CopyRect 的源必须是"本帧应用前"的帧内容；若先应用其他区域，
         /// 源区域可能已被覆盖 → 读到本帧新数据 → 画面错误。
+        /// 返回 false 表示有区域数据损坏/越界，本帧不可信（调用方应丢弃并请求全量帧）。
         /// </summary>
-        private void ApplyRegions(ZrleRegion[] regions)
+        private bool ApplyRegions(ZrleRegion[] regions)
         {
+            bool ok = true;
             // 第一遍：CopyRect（从 _frameBuffer 读上一帧内容）
             for (int i = 0; i < regions.Length; i++)
             {
                 ZrleRegion region = regions[i];
                 if (region.Encoding == ZrleRegionEncoding.CopyRect)
                 {
-                    // 目标越界的 CopyRect：跳过本区域（防恶意/损坏数据引发越界崩溃）
+                    // 目标越界的 CopyRect：数据损坏，本帧不可信
                     if (!IsRegionInBounds(region))
+                    {
+                        Logger.Warn("ZRLE copy rect out of bounds: ({0},{1}) {2}x{3} frame={4}x{5}",
+                            region.X, region.Y, region.Width, region.Height, _width, _height);
+                        ok = false;
                         continue;
-                    ApplyCopyRect(region);
+                    }
+                    if (!ApplyCopyRect(region))
+                        ok = false;
                 }
             }
             // 第二遍：Raw / Deflate / FillRect
@@ -151,12 +164,19 @@ namespace EasyRDP.Core.Protocol
                 ZrleRegion region = regions[i];
                 if (region.Encoding != ZrleRegionEncoding.CopyRect)
                 {
-                    // 目标越界的区域：跳过本区域（其余区域不受影响）
+                    // 目标越界的区域：数据损坏，本帧不可信
                     if (!IsRegionInBounds(region))
+                    {
+                        Logger.Warn("ZRLE region out of bounds: ({0},{1}) {2}x{3} frame={4}x{5}",
+                            region.X, region.Y, region.Width, region.Height, _width, _height);
+                        ok = false;
                         continue;
-                    ApplyRegion(region);
+                    }
+                    if (!ApplyRegion(region))
+                        ok = false;
                 }
             }
+            return ok;
         }
 
         /// <summary>校验区域目标矩形是否完全落在帧内（防越界写）。</summary>
@@ -168,8 +188,8 @@ namespace EasyRDP.Core.Protocol
                 && region.Y + region.Height <= _height;
         }
 
-        /// <summary>将单个非 CopyRect 区域应用到帧缓冲。</summary>
-        private void ApplyRegion(ZrleRegion region)
+        /// <summary>将单个非 CopyRect 区域应用到帧缓冲。返回 false 表示区域数据损坏。</summary>
+        private bool ApplyRegion(ZrleRegion region)
         {
             int stride = _width * 4;
             int regionStride = region.Width * 4;
@@ -177,47 +197,58 @@ namespace EasyRDP.Core.Protocol
             switch (region.Encoding)
             {
                 case ZrleRegionEncoding.Raw:
+                    if (region.Data == null || region.DataLen < regionStride * region.Height)
+                    {
+                        Logger.Warn("ZRLE raw region too short: {0} < {1}",
+                            region.DataLen, regionStride * region.Height);
+                        return false;
+                    }
                     for (int y = 0; y < region.Height; y++)
                     {
                         Buffer.BlockCopy(region.Data, y * regionStride,
                             _frameBuffer, (region.Y + y) * stride + region.X * 4, regionStride);
                     }
-                    break;
+                    return true;
 
                 case ZrleRegionEncoding.Deflate:
                     // 解压到预分配缓冲（0 次堆分配），再逐行写入帧缓冲
                     int decompressedLen = DeflateDecompress(region.Data, region.DataLen, _decompressBuffer, 0);
                     if (decompressedLen < regionStride * region.Height)
                     {
-                        // 解压数据不足：数据损坏，跳过本区域（其余区域不受影响）
-                        Logger.Warn("ZRLE deflate region too short: {0} < {1}", decompressedLen, regionStride * region.Height);
-                        break;
+                        // 解压数据不足：本帧数据损坏，交由上层请求全量帧
+                        Logger.Warn("ZRLE deflate region too short: {0} < {1} ({2},{3} {4}x{5})",
+                            decompressedLen, regionStride * region.Height,
+                            region.X, region.Y, region.Width, region.Height);
+                        return false;
                     }
                     for (int y = 0; y < region.Height; y++)
                     {
                         Buffer.BlockCopy(_decompressBuffer, y * regionStride,
                             _frameBuffer, (region.Y + y) * stride + region.X * 4, regionStride);
                     }
-                    break;
+                    return true;
 
                 case ZrleRegionEncoding.FillRect:
-                    ApplyFillRect(region);
-                    break;
+                    return ApplyFillRect(region);
 
                 default:
-                    // 未知编码类型：忽略本区域（防御，不中断解码）
+                    // 未知编码类型：数据损坏，交由上层请求全量帧
                     Logger.Warn("ZRLE unknown region encoding: {0}", region.Encoding);
-                    break;
+                    return false;
             }
         }
 
-        /// <summary>应用 CopyRect 区域：从 _frameBuffer 的源位置复制到目标位置（重叠安全）。</summary>
-        private void ApplyCopyRect(ZrleRegion region)
+        /// <summary>应用 CopyRect 区域：从 _frameBuffer 的源位置复制到目标位置（重叠安全）。
+        /// 返回 false 表示源数据缺失/越界。</summary>
+        private bool ApplyCopyRect(ZrleRegion region)
         {
             int stride = _width * 4;
             int regionStride = region.Width * 4;
             if (region.Data == null || region.DataLen < 8)
-                return;
+            {
+                Logger.Warn("ZRLE copy rect data too short: {0}", region.DataLen);
+                return false;
+            }
             int srcX = BitConverter.ToInt32(region.Data, 0);
             int srcY = BitConverter.ToInt32(region.Data, 4);
 
@@ -226,7 +257,7 @@ namespace EasyRDP.Core.Protocol
             {
                 Logger.Warn("ZRLE copy rect source out of bounds: src=({0},{1}) dst=({2},{3}) size={4}x{5}",
                     srcX, srcY, region.X, region.Y, region.Width, region.Height);
-                return;
+                return false;
             }
 
             // 源和目标可能跨行重叠：源在目标上方时从后向前逐行复制，否则从前向后。
@@ -251,17 +282,25 @@ namespace EasyRDP.Core.Protocol
                     Buffer.BlockCopy(_frameBuffer, srcRow, _frameBuffer, dstRow, regionStride);
                 }
             }
+            return true;
         }
 
-        /// <summary>用 4 字节颜色填充矩形区域。</summary>
-        private void ApplyFillRect(ZrleRegion region)
+        /// <summary>用 4 字节颜色填充矩形区域。返回 false 表示数据损坏。</summary>
+        private bool ApplyFillRect(ZrleRegion region)
         {
             int stride = _width * 4;
             int regionStride = region.Width * 4;
             if (region.Data == null || region.DataLen < 4)
-                return;
+            {
+                Logger.Warn("ZRLE fill rect data too short: {0}", region.DataLen);
+                return false;
+            }
             if (regionStride > _fillRow.Length)
-                return;  // 宽度超预分配上限（理论上不可能，防御）
+            {
+                // 宽度超预分配上限（理论上不可能，数据异常）
+                Logger.Warn("ZRLE fill rect too wide: {0} > {1}", regionStride, _fillRow.Length);
+                return false;
+            }
 
             byte fillB = region.Data[0];
             byte fillG = region.Data[1];
@@ -279,6 +318,7 @@ namespace EasyRDP.Core.Protocol
                 int rowOffset = (region.Y + y) * stride + region.X * 4;
                 Buffer.BlockCopy(_fillRow, 0, _frameBuffer, rowOffset, regionStride);
             }
+            return true;
         }
 
         /// <summary>

@@ -19,6 +19,9 @@ namespace EasyRDP.Server.Wpf.Views
             InitializeComponent();
             _vm = new MainWindowViewModel(Dispatcher);
             DataContext = _vm;
+            // 启动即监听：窗口加载完成后触发一次（状态栏与日志控件已就绪，
+            // 自动监听失败的日志能正常显示，且不会在构造期弹框）。
+            Loaded += (s, e) => _vm.TryAutoListen();
         }
 
         /// <summary>窗口关闭前自动保存当前设置。</summary>

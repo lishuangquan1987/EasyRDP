@@ -22,7 +22,7 @@ namespace EasyRDP.Core.Protocol
     /// - 全屏变化：50-100ms（所有瓦片 Deflate 压缩）
     /// 
     /// v2 修正：
-    /// - IsKeyframe 始终返回 false（ZRLE 无帧间依赖）
+    /// - 增量帧 IsKeyframe=false（客户端不得把增量帧当独立可解码帧）
     /// - 忽略 forceKeyframe 参数（仅首帧全帧编码）
     /// - uint 步长比较替代逐字节
     /// - 预分配 tile 缓冲池避免 GC 压力
@@ -175,6 +175,8 @@ namespace EasyRDP.Core.Protocol
         /// 保护导致周期性延迟尖峰）。
         /// v4 修正：forceKeyframe=true 时强制全量编码（所有瓦片视为变化），
         /// 供混合编码切回/客户端请求时重建解码端基线（见类注释）。
+        /// v5 修正：全量帧返回 IsKeyframe=true（增量帧仍为 false），供客户端在
+        /// 序列缺口时识别并等待可独立解码的全量帧。
         /// </summary>
         public EncodedFrame Encode(byte[] pixels, bool forceKeyframe)
         {
@@ -322,9 +324,11 @@ namespace EasyRDP.Core.Protocol
             return new EncodedFrame
             {
                 Data = packed,
-                // ZRLE 无帧间依赖，始终 false。若返回 true，客户端 EnqueueVideoFrame
-                // 会保护此帧不被覆盖（ClientStreamSession），导致周期性延迟尖峰。
-                IsKeyframe = false,
+                // v5：全量帧（首帧 / forceKeyframe）标记为 keyframe。
+                // ZRLE 增量帧依赖上一帧基线，客户端据此判定"全量帧可独立重建画面"，
+                // 在序列缺口/队列积压时丢弃旧增量帧、直接等全量帧恢复（见 EnqueueVideoFrame）。
+                // 增量帧仍为 false。
+                IsKeyframe = fullFrame,
                 Width = _width,
                 Height = _height,
                 // regionCount 即本帧变化瓦片数（每个变化瓦片产生一个 region）。

@@ -5,7 +5,7 @@
         WindowStartupLocation="CenterOwner"
         ResizeMode="NoResize" WindowStyle="ToolWindow" ShowInTaskbar="False">
     <StackPanel Margin="14">
-        <TextBlock Text="显示名称（留空则恢复为 IP）：" Margin="0,0,0,6"/>
+        <TextBlock Text="Display name (leave empty to show the IP):" Margin="0,0,0,6"/>
         <TextBox Text="{Binding DisplayName, UpdateSourceTrigger=PropertyChanged}"
                  Height="26" VerticalContentAlignment="Center"/>
 

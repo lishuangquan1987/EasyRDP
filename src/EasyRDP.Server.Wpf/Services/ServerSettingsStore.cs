@@ -95,7 +95,7 @@ namespace EasyRDP.Server.Wpf.Services
             }
         }
 
-        /// <summary>序列化为 JSON 对象（端口/用户名/密码 + 变化检测模式）。</summary>
+        /// <summary>序列化为 JSON 对象（端口/用户名/密码 + 变化检测模式 + 自启/自动监听）。</summary>
         private static string SerializeJson(ServerSettings s, string encryptedPassword)
         {
             var sb = new StringBuilder(192);
@@ -104,7 +104,9 @@ namespace EasyRDP.Server.Wpf.Services
             sb.Append("\"Username\":\"").Append(Escape(s.Username)).Append("\",");
             sb.Append("\"Password\":\"").Append(Escape(encryptedPassword ?? "")).Append("\",");
             // 整型枚举以数字形式序列化，老版本读取时会被忽略（解析时仅识别已知键）
-            sb.Append("\"ChangeDetectionMode\":").Append((int)s.ChangeDetectionMode);
+            sb.Append("\"ChangeDetectionMode\":").Append((int)s.ChangeDetectionMode).Append(',');
+            sb.Append("\"AutoStart\":").Append(s.AutoStart ? "true" : "false").Append(',');
+            sb.Append("\"AutoListen\":").Append(s.AutoListen ? "true" : "false");
             sb.Append('}');
             return sb.ToString();
         }
@@ -187,6 +189,23 @@ namespace EasyRDP.Server.Wpf.Services
                                 s.ChangeDetectionMode = (ChangeDetectionMode)num;
                         }
                     }
+                    key = null;
+                    expectValue = false;
+                    i = j;
+                }
+                else if (expectValue && key != null && (c == 't' || c == 'f'))
+                {
+                    // 非引号布尔值（true/false）：解析到 ',' 或 '}' 为止
+                    int j = i;
+                    var boolSb = new StringBuilder(8);
+                    while (j < json.Length && json[j] != ',' && json[j] != '}' && !char.IsWhiteSpace(json[j]))
+                    {
+                        boolSb.Append(json[j]);
+                        j++;
+                    }
+                    bool flag = string.Equals(boolSb.ToString(), "true", StringComparison.OrdinalIgnoreCase);
+                    if (key == "AutoStart") s.AutoStart = flag;
+                    else if (key == "AutoListen") s.AutoListen = flag;
                     key = null;
                     expectValue = false;
                     i = j;

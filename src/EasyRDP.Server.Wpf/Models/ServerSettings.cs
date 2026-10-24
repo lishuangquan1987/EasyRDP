@@ -22,6 +22,12 @@ namespace EasyRDP.Server.Wpf.Models
         /// </summary>
         public ChangeDetectionMode ChangeDetectionMode { get; set; }
 
+        /// <summary>是否随 Windows 登录自动启动（HKCU Run 项，注册表为准）。</summary>
+        public bool AutoStart { get; set; }
+
+        /// <summary>程序启动后是否立即开始监听（凭据为空时静默跳过）。</summary>
+        public bool AutoListen { get; set; }
+
         public ServerSettings()
         {
             Port = "2000";
@@ -29,6 +35,9 @@ namespace EasyRDP.Server.Wpf.Models
             Password = "";
             // 默认原始方式：保持与历史版本完全一致的行为，避免引入潜在回归
             ChangeDetectionMode = ChangeDetectionMode.FullFrameMemcmp;
+            // 自启需要显式开启（会写注册表）；监听默认开启，打开程序即可接受连接
+            AutoStart = false;
+            AutoListen = true;
         }
     }
 }

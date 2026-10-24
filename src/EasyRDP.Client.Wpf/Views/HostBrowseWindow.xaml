@@ -88,7 +88,7 @@
                                     HorizontalAlignment="Center"
                                     FontSize="12"
                                     Foreground="#9CA3AF"
-                                    Text="无预览" />
+                                    Text="No preview" />
                             </StackPanel>
                         </Border>
                     </Grid>
@@ -184,7 +184,7 @@
                     BorderThickness="1"
                     FontSize="13"
                     Text="{Binding AddressText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                    ToolTip="输入 IP、host[:port] 或 user@host[:port]，回车或点 Connect 连接">
+                    ToolTip="Enter an IP, host[:port] or user@host[:port]; press Enter or click Connect">
                     <TextBox.InputBindings>
                         <KeyBinding Key="Enter" Command="{Binding ConnectAddressCommand}" />
                     </TextBox.InputBindings>
@@ -198,7 +198,7 @@
                         Command="{Binding ConnectAddressCommand}"
                         Content="Connect"
                         Style="{StaticResource PrimaryButtonStyle}"
-                        ToolTip="连接地址栏输入的主机（输入 IP 后会自动弹出表单填写端口/用户名/密码）" />
+                        ToolTip="Connect to the host typed in the address bar (an IP opens the form for port / username / password)" />
                     <!--  Sign in...（视觉占位，与 RealVNC 一致）  -->
                     <Button
                         Height="30"

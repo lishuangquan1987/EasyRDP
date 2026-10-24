@@ -24,8 +24,8 @@ public partial class MainWindow : Window
     private static readonly Logger Logger = LogManager.GetCurrentClassLogger();
     private readonly MainWindowViewModel _vm;
     // 全屏状态：由 SetFullscreenMode 维护，WndProc 据此决定 WM_GETMINMAXINFO 返回值。
-    // 全屏 = WindowStyle.None + Maximized + 最大化尺寸覆盖整个监视器（含任务栏区域），
-    // 且绝不使用 Topmost（置顶窗口会锁死用户切换前台窗口，断连后尤其危险）。
+    // 全屏 = WindowStyle.None + SetWindowPos 直铺监视器 + Topmost（覆盖任务栏）；
+    // 因此所有退出路径（含断连）都必须先解除 Topmost，否则窗口会锁死用户切换前台窗口。
     private bool _fullscreen;
     // 全屏退出时恢复的窗口边界/状态（SetWindowPos 硬全屏方案保存）
     private double _restoreLeft, _restoreTop, _restoreWidth, _restoreHeight;
@@ -50,8 +50,6 @@ public partial class MainWindow : Window
     private double _cursorScaleX;
     private double _cursorScaleY;
     private bool _cursorScaleSet;
-    // 点击位置标记（诊断）及其隐藏定时器
-    private DispatcherTimer _clickMarkerTimer;
     // 剪贴板监听窗口句柄（OnSourceInitialized 注册，OnClosing 注销）
     private IntPtr _clipboardListenerHwnd;
 
@@ -152,9 +150,8 @@ public partial class MainWindow : Window
     private const int LocalIdleBeforeFollowMs = 300;
 
     /// <summary>
-    /// 切换全屏模式：进入全屏时用 WindowStyle.None + Maximized，
-    /// 并通过 WM_GETMINMAXINFO 把最大化尺寸撑到整个监视器（含任务栏区域）。
-    /// 退出全屏恢复普通窗口。绝不使用 Topmost，保证用户随时能切走。
+    /// 切换全屏模式：进入全屏时用 WindowStyle.None + SetWindowPos 直铺 rcMonitor
+    /// 并置顶（覆盖任务栏与其他窗口）；退出全屏恢复普通窗口并解除置顶。
     /// </summary>
     /// <param name="fullscreen">true=进入全屏，false=退出全屏。</param>
     public void SetFullscreenMode(bool fullscreen)
@@ -284,24 +281,25 @@ public partial class MainWindow : Window
             return;
         }
 
-        // 断开连接 → 隐藏远程光标、恢复本地系统光标
-        if (propertyName == nameof(MainWindowViewModel.IsConnected) && !_vm.IsConnected)
+        if (propertyName == nameof(MainWindowViewModel.IsConnected))
         {
-            HideRemoteCursor();
-            if (FloatingToolbar != null)
-                FloatingToolbar.Visibility = Visibility.Collapsed;
-            // 断连后清除本地位置标记：重连时先以服务端回显位置兜底，
-            // 直到用户下一次移动鼠标重新锚定本地位置
-            _hasLocalCursorPos = false;
-        }
-            if (propertyName == nameof(MainWindowViewModel.IsConnected))
+            if (!_vm.IsConnected)
             {
-                var okBrush = TryFindResource("StatusOkBrush") as Brush;
-                var idleBrush = TryFindResource("StatusIdleBrush") as Brush;
-                StatusDot.Foreground = _vm.IsConnected
-                    ? (okBrush ?? idleBrush ?? StatusDot.Foreground)
-                    : (idleBrush ?? okBrush ?? StatusDot.Foreground);
+                // 断开连接 → 隐藏远程光标、恢复本地系统光标
+                HideRemoteCursor();
+                if (FloatingToolbar != null)
+                    FloatingToolbar.Visibility = Visibility.Collapsed;
+                // 断连后清除本地位置标记：重连时先以服务端回显位置兜底，
+                // 直到用户下一次移动鼠标重新锚定本地位置
+                _hasLocalCursorPos = false;
             }
+            // 状态灯随连接状态切换颜色
+            var okBrush = TryFindResource("StatusOkBrush") as Brush;
+            var idleBrush = TryFindResource("StatusIdleBrush") as Brush;
+            StatusDot.Foreground = _vm.IsConnected
+                ? (okBrush ?? idleBrush ?? StatusDot.Foreground)
+                : (idleBrush ?? okBrush ?? StatusDot.Foreground);
+        }
         // 缩放模式切换 / 远程分辨率变化 → 更新滚动容器与画面元素尺寸
         if (propertyName == nameof(MainWindowViewModel.BrushStretch)
             || propertyName == nameof(MainWindowViewModel.RemoteScreenWidth)
@@ -483,14 +481,9 @@ public partial class MainWindow : Window
         double scaleY = rect.Height / _vm.RemoteScreenHeight;
         ResizeRemoteCursor(scaleX, scaleY);
         // 关键：_localCursorX 是相对 RenderImage 元素左上角的坐标（含黑边区域），
-        // 但叠加层应定位到视频画面上的鼠标位置。
-        // rect.X/Y 是视频画面在元素内的 letterbox 偏移，
-        // 叠加层位置 = rect.X + (_localCursorX - rect.X) = _localCursorX（等等，这似乎不需要加 rect.X？）
-        //
-        // 实际分析：_localCursorX 已经是元素坐标系下的绝对位置（包括黑边区域），
-        // 叠加层 Margin 也是相对元素左上角，所以直接用 _localCursorX 是对的。
-        // 但为了与 UpdateCursorPosition 保持一致（后者用 rect.X + remoteX * scaleX），
-        // 并且确保 ClickMarker 也用相同坐标系，这里保持直接用 _localCursorX。
+        // 而叠加层 Margin 也相对同一个元素左上角，因此直接使用 _localCursorX 即可。
+        // UpdateCursorPosition（服务端回显路径）用 rect.X + remoteX * scaleX，
+        // 是因为它从远程坐标空间换算，两条路径在元素坐标系下等价。
         RemoteCursorImage.Margin = new Thickness(
             _localCursorX - _cursorHotX * scaleX,
             _localCursorY - _cursorHotY * scaleY,
@@ -697,11 +690,6 @@ public partial class MainWindow : Window
     /// <summary>窗口关闭前停止 aly 自动更新后台循环，避免阻塞线程残留。</summary>
     protected override void OnClosing(CancelEventArgs e)
     {
-        if (_clickMarkerTimer != null)
-        {
-            try { _clickMarkerTimer.Stop(); } catch { }
-            _clickMarkerTimer = null;
-        }
         if (_clipboardListenerHwnd != IntPtr.Zero)
         {
             try { RemoveClipboardFormatListener(_clipboardListenerHwnd); }
@@ -770,7 +758,6 @@ public partial class MainWindow : Window
         // 按下瞬间刷新本地位置并发送最新坐标：快速移动时点击落点精确到按下瞬间，
         // 不再依赖按下前最后一次 MouseMove 的旧坐标
         RefreshLocalCursorPosition(e);
-        ShowClickMarker(_localCursorX, _localCursorY);
         // 诊断：点击瞬间的本地坐标与最近回显坐标（差值即"可见光标 vs 实际落点"偏差）
         Logger.Debug("Click down local=({0:F0},{1:F0}) size={2:F0}x{3:F0} lastEcho=({4},{5})",
             _localCursorX, _localCursorY,
@@ -785,27 +772,6 @@ public partial class MainWindow : Window
         RefreshLocalCursorPosition(e);
         _vm.HandleMouseUp(e.ChangedButton);
         Mouse.Capture(null);
-    }
-
-    /// <summary>
-    /// 在按下位置显示红点标记 1.5 秒（诊断用）：用户点击后可直接对照红点
-    /// 与远端操作生效位置，量化残余水平偏移。
-    /// </summary>
-    private void ShowClickMarker(double x, double y)
-    {
-        if (_clickMarkerTimer == null)
-        {
-            _clickMarkerTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1.5) };
-            _clickMarkerTimer.Tick += (s, e) =>
-            {
-                _clickMarkerTimer.Stop();
-                ClickMarker.Visibility = Visibility.Collapsed;
-            };
-        }
-        ClickMarker.Margin = new Thickness(x - 5, y - 5, 0, 0);
-        ClickMarker.Visibility = Visibility.Visible;
-        _clickMarkerTimer.Stop();
-        _clickMarkerTimer.Start();
     }
 
     /// <summary>
