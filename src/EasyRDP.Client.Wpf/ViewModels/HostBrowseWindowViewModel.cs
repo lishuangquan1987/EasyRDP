@@ -22,12 +22,126 @@ namespace EasyRDP.Client.Wpf.ViewModels
         private readonly IUserNotifier _notifier;
         private RecentConnection? _selected;
         private string _addressText = "";
+        // 搜索过滤（按名称/地址实时过滤树）
+        private string _searchText = "";
+        // 最近使用缓存（供 Recent 横条与"上次连接"展示，ReloadTree 时刷新一次）
+        private List<RecentConnection> _recentCache = new List<RecentConnection>();
+        // 树中选中的连接节点（右侧详情数据源）
+        private ConnectionTreeNode? _selectedNode;
 
         /// <summary>最近连接列表（缩略图网格数据源）。</summary>
         public ObservableCollection<RecentConnection> Connections { get; } = new ObservableCollection<RecentConnection>();
 
-        /// <summary>连接分组树（Recent / 各分组 / 未分组）。</summary>
+        /// <summary>连接分组树（各分组 / 未分组）。</summary>
         public ObservableCollection<ConnectionTreeNode> Nodes { get; } = new ObservableCollection<ConnectionTreeNode>();
+
+        /// <summary>最近使用（顶部横条，最多 8 条；已单独展示，不再进主树）。</summary>
+        public ObservableCollection<RecentConnection> Recents { get; } = new ObservableCollection<RecentConnection>();
+
+        /// <summary>是否显示最近使用横条。</summary>
+        public bool HasRecents
+        {
+            get { return Recents.Count > 0; }
+        }
+
+        /// <summary>搜索文本：按名称或地址实时过滤分组树。</summary>
+        public string SearchText
+        {
+            get { return _searchText; }
+            set
+            {
+                string text = value ?? "";
+                if (_searchText == text) return;
+                _searchText = text;
+                OnPropertyChanged(nameof(SearchText));
+                ReloadTree();
+            }
+        }
+
+        /// <summary>树中选中的连接（右侧详情）。</summary>
+        public ConnectionTreeNode? SelectedNode
+        {
+            get { return _selectedNode; }
+            set
+            {
+                if (ReferenceEquals(_selectedNode, value)) return;
+                _selectedNode = value;
+                OnPropertyChanged(nameof(SelectedNode));
+                OnPropertyChanged(nameof(HasSelection));
+                OnPropertyChanged(nameof(SelectedName));
+                OnPropertyChanged(nameof(SelectedAddress));
+                OnPropertyChanged(nameof(SelectedUserText));
+                OnPropertyChanged(nameof(SelectedGroupText));
+                OnPropertyChanged(nameof(SelectedLastConnectedText));
+                OnPropertyChanged(nameof(SelectedThumbnail));
+                OnPropertyChanged(nameof(HasSelectedThumbnail));
+            }
+        }
+
+        /// <summary>详情区是否已选中连接。</summary>
+        public bool HasSelection
+        {
+            get { return _selectedNode != null && !_selectedNode.IsGroup; }
+        }
+
+        /// <summary>选中连接名称。</summary>
+        public string SelectedName
+        {
+            get { return _selectedNode != null ? _selectedNode.DisplayName : ""; }
+        }
+
+        /// <summary>选中连接地址（host:port）。</summary>
+        public string SelectedAddress
+        {
+            get { return _selectedNode != null ? _selectedNode.Detail : ""; }
+        }
+
+        /// <summary>选中连接用户名。</summary>
+        public string SelectedUserText
+        {
+            get
+            {
+                var p = _selectedNode != null ? _selectedNode.Profile : null;
+                string user = p != null ? p.Username : "";
+                return "User: " + (string.IsNullOrWhiteSpace(user) ? "—" : user);
+            }
+        }
+
+        /// <summary>选中连接所属分组。</summary>
+        public string SelectedGroupText
+        {
+            get
+            {
+                var p = _selectedNode != null ? _selectedNode.Profile : null;
+                string g = p != null ? (p.Group ?? "").Trim() : "";
+                return "Group: " + (g.Length == 0 ? "Ungrouped" : g);
+            }
+        }
+
+        /// <summary>选中连接的上次连接时间（相对时间）。</summary>
+        public string SelectedLastConnectedText
+        {
+            get
+            {
+                var p = _selectedNode != null ? _selectedNode.Profile : null;
+                if (p == null) return "";
+                var hit = _recentCache.FirstOrDefault(r =>
+                    string.Equals(r.Host, p.Host, StringComparison.OrdinalIgnoreCase));
+                return "Last used: " + (hit != null ? FormatRelative(hit.LastConnectedUtc) : "never");
+            }
+        }
+
+        /// <summary>选中连接缩略图（可空）。</summary>
+        public System.Windows.Media.ImageSource? SelectedThumbnail
+        {
+            get { return _selectedNode != null ? _selectedNode.ThumbnailSource : null; }
+        }
+
+        /// <summary>是否有缩略图可显示（无则显示占位面板）。</summary>
+        public bool HasSelectedThumbnail
+        {
+            get { return SelectedThumbnail != null; }
+        }
 
         /// <summary>地址输入框文本（绑定到 XAML 地址栏）。</summary>
         public string AddressText
@@ -95,6 +209,15 @@ namespace EasyRDP.Client.Wpf.ViewModels
         /// <summary>删除分组（组内连接移入未分组）。</summary>
         public RelayCommand<ConnectionTreeNode> DeleteGroupCommand { get; }
 
+        /// <summary>连接右侧详情中选中的连接。</summary>
+        public RelayCommand ConnectSelectedCommand { get; }
+
+        /// <summary>编辑右侧详情中选中的连接。</summary>
+        public RelayCommand EditSelectedCommand { get; }
+
+        /// <summary>删除右侧详情中选中的连接。</summary>
+        public RelayCommand DeleteSelectedCommand { get; }
+
         // ====== 视图交互事件（由 View 订阅，ViewModel 不直接引用 Window） ======
 
         /// <summary>请求打开控制窗口并连接（参数为连接目标）。</summary>
@@ -130,6 +253,9 @@ namespace EasyRDP.Client.Wpf.ViewModels
             NewConnectionInGroupCommand = new RelayCommand<ConnectionTreeNode>(NewConnectionInGroup);
             RenameGroupCommand = new RelayCommand<ConnectionTreeNode>(RenameGroup);
             DeleteGroupCommand = new RelayCommand<ConnectionTreeNode>(DeleteGroup);
+            ConnectSelectedCommand = new RelayCommand(() => ConnectNode(_selectedNode));
+            EditSelectedCommand = new RelayCommand(() => EditNode(_selectedNode));
+            DeleteSelectedCommand = new RelayCommand(() => DeleteNode(_selectedNode));
 
             SignInCommand = new RelayCommand(() =>
                 _notifier.ShowInfo("账号登录为视觉占位（与 RealVNC 布局一致），后续版本接入。", "Sign in"));
@@ -180,33 +306,24 @@ namespace EasyRDP.Client.Wpf.ViewModels
             var profiles = _profileStore.Load(out lastProfileName);
             var groupNames = _groupStore.Load();
 
-            // 1) Recent（虚拟分组，只读）
-            var recents = _store.Load()
-                .OrderByDescending(r => r.LastConnectedUtc)
-                .Take(10)
-                .ToList();
-            if (recents.Count > 0)
+            // 0) 最近使用：单独横条展示（不进主树，避免与已保存连接重复）
+            _recentCache = _store.Load().OrderByDescending(r => r.LastConnectedUtc).ToList();
+            Recents.Clear();
+            foreach (var r in _recentCache.Take(8))
             {
-                var recentNode = new ConnectionTreeNode
-                {
-                    IsGroup = true,
-                    IsRecentGroup = true,
-                    GroupName = "Recent",
-                    DisplayName = "Recent",
-                    Detail = recents.Count + " recent",
-                    IsExpanded = true
-                };
-                foreach (var r in recents)
-                {
-                    recentNode.Children.Add(new ConnectionTreeNode
-                    {
-                        DisplayName = string.IsNullOrWhiteSpace(r.DisplayName) ? r.Host : r.DisplayName,
-                        Detail = r.Host + ":" + (string.IsNullOrWhiteSpace(r.Port) ? "2000" : r.Port),
-                        ThumbnailSource = ThumbnailCache.LoadThumbnail(r.Host),
-                        Recent = r
-                    });
-                }
-                Nodes.Add(recentNode);
+                r.ThumbnailSource = ThumbnailCache.LoadThumbnail(r.Host);
+                Recents.Add(r);
+            }
+            OnPropertyChanged(nameof(HasRecents));
+
+            // 搜索过滤：名称或地址命中（不区分大小写）
+            string filter = (_searchText ?? "").Trim();
+            if (filter.Length > 0)
+            {
+                profiles = profiles.Where(p =>
+                    (!string.IsNullOrEmpty(p.Name) && p.Name.IndexOf(filter, StringComparison.CurrentCultureIgnoreCase) >= 0)
+                    || (!string.IsNullOrEmpty(p.Host) && p.Host.IndexOf(filter, StringComparison.CurrentCultureIgnoreCase) >= 0))
+                    .ToList();
             }
 
             // 2) 具名分组：分组名清单 + profiles 中出现过的分组
@@ -229,6 +346,9 @@ namespace EasyRDP.Client.Wpf.ViewModels
                 };
                 foreach (var p in profiles.Where(x => string.Equals((x.Group ?? "").Trim(), groupName, StringComparison.Ordinal)))
                     groupNode.Children.Add(CreateProfileNode(p));
+                // 搜索状态下不显示空分组，避免结果里夹杂无关节点
+                if (filter.Length > 0 && groupNode.Children.Count == 0)
+                    continue;
                 groupNode.Detail = groupNode.Children.Count + " connection(s)";
                 Nodes.Add(groupNode);
             }
@@ -250,6 +370,24 @@ namespace EasyRDP.Client.Wpf.ViewModels
                     ungroupedNode.Children.Add(CreateProfileNode(p));
                 Nodes.Add(ungroupedNode);
             }
+        }
+
+        /// <summary>树选中项变化（View 代码后置调用）：同步右侧详情。</summary>
+        public void SelectNode(ConnectionTreeNode node)
+        {
+            SelectedNode = node != null && !node.IsGroup ? node : null;
+        }
+
+        /// <summary>把时间格式化为相对时间（刚刚 / N 分钟前 / N 小时前 / N 天前）。</summary>
+        private static string FormatRelative(DateTime utc)
+        {
+            if (utc == default(DateTime)) return "never";
+            TimeSpan span = DateTime.UtcNow - utc;
+            if (span.TotalSeconds < 60) return "just now";
+            if (span.TotalMinutes < 60) return (int)span.TotalMinutes + " min ago";
+            if (span.TotalHours < 24) return (int)span.TotalHours + " h ago";
+            if (span.TotalDays < 30) return (int)span.TotalDays + " d ago";
+            return utc.ToLocalTime().ToString("yyyy-MM-dd");
         }
 
         /// <summary>把保存的连接配置包装成树节点（含缩略图）。</summary>

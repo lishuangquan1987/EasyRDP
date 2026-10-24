@@ -193,149 +193,331 @@
                 <StackPanel Grid.Column="2" Orientation="Horizontal">
                     <Button
                         Height="30"
-                        Margin="0,0,8,0"
-                        Padding="10,0"
-                        Command="{Binding NewGroupCommand}"
-                        Content="+ Group"
-                        Style="{StaticResource LightButtonStyle}"
-                        ToolTip="Create a connection group" />
-                    <Button
-                        Height="30"
-                        Margin="0,0,8,0"
-                        Padding="10,0"
-                        Command="{Binding NewConnectionCommand}"
-                        Content="+ Connection"
-                        Style="{StaticResource LightButtonStyle}"
-                        ToolTip="Create a saved connection" />
-                    <Button
-                        Height="30"
-                        Margin="0,0,8,0"
-                        Padding="14,0"
+                        Padding="16,0"
                         Command="{Binding ConnectAddressCommand}"
                         Content="Connect"
                         Style="{StaticResource PrimaryButtonStyle}"
                         ToolTip="Connect to the host typed in the address bar" />
-                    <!--  Sign in...（视觉占位，与 RealVNC 一致）  -->
-                    <Button
-                        Height="30"
-                        Padding="12,0"
-                        Background="Transparent"
-                        BorderBrush="#D0D7DE"
-                        BorderThickness="1"
-                        Command="{Binding SignInCommand}"
-                        Content="Sign in..."
-                        FontSize="13"
-                        Foreground="#37474F" />
                 </StackPanel>
             </Grid>
         </Border>
 
-        <!--  ====== 主体：连接分组树（分组 → 连接） ======  -->
-        <Border Background="White">
-            <TreeView x:Name="ConnectionTree"
-                      Padding="8,6"
-                      Background="White"
-                      BorderThickness="0"
-                      ItemsSource="{Binding Nodes}"
-                      ScrollViewer.HorizontalScrollBarVisibility="Disabled">
-                <TreeView.ItemContainerStyle>
-                    <Style TargetType="TreeViewItem">
-                        <Setter Property="IsExpanded" Value="{Binding IsExpanded, Mode=TwoWay}" />
-                        <Setter Property="Padding" Value="2,1" />
-                        <Setter Property="Tag" Value="{Binding DataContext, RelativeSource={RelativeSource AncestorType={x:Type Window}}}" />
-                        <Setter Property="ContextMenu">
-                            <Setter.Value>
-                                <ContextMenu>
-                                    <MenuItem Header="Connect"
-                                              Command="{Binding PlacementTarget.Tag.ConnectNodeCommand, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}"
-                                              CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}" />
-                                    <MenuItem Header="New Connection in Group..."
-                                              Command="{Binding PlacementTarget.Tag.NewConnectionInGroupCommand, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}"
-                                              CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}" />
-                                    <Separator />
-                                    <MenuItem Header="Edit..."
-                                              Command="{Binding PlacementTarget.Tag.EditNodeCommand, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}"
-                                              CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}" />
-                                    <MenuItem Header="Rename..."
-                                              Command="{Binding PlacementTarget.Tag.RenameNodeCommand, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}"
-                                              CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}" />
-                                    <MenuItem Header="Rename Group..."
-                                              Command="{Binding PlacementTarget.Tag.RenameGroupCommand, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}"
-                                              CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}" />
-                                    <MenuItem Header="Delete Group"
-                                              Command="{Binding PlacementTarget.Tag.DeleteGroupCommand, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}"
-                                              CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}" />
-                                    <MenuItem Header="Delete"
-                                              Command="{Binding PlacementTarget.Tag.DeleteNodeCommand, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}"
-                                              CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}" />
-                                </ContextMenu>
-                            </Setter.Value>
-                        </Setter>
-                    </Style>
-                </TreeView.ItemContainerStyle>
-                <TreeView.ItemTemplate>
-                    <HierarchicalDataTemplate ItemsSource="{Binding Children}">
-                        <Grid Height="34" Background="Transparent"
-                              behaviors:DoubleClickCommand.Command="{Binding DataContext.ConnectNodeCommand, RelativeSource={RelativeSource AncestorType={x:Type Window}}}">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="Auto" />
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="Auto" />
-                            </Grid.ColumnDefinitions>
-                            <!--  分组图标 / 连接缩略图  -->
-                            <Border Grid.Column="0" Width="42" Height="26" Margin="0,0,10,0"
-                                    Background="#F2F5F8" BorderBrush="#E2E6EA" BorderThickness="1"
-                                    CornerRadius="3" VerticalAlignment="Center">
-                                <Grid>
-                                    <TextBlock x:Name="GroupGlyph" Text="&#xE8B7;"
-                                               FontFamily="Segoe MDL2 Assets" FontSize="13"
-                                               Foreground="#607D8B"
-                                               HorizontalAlignment="Center" VerticalAlignment="Center" />
-                                    <Image x:Name="ThumbImage" Source="{Binding ThumbnailSource}"
-                                           Stretch="UniformToFill" />
-                                </Grid>
-                            </Border>
-                            <StackPanel Grid.Column="1" VerticalAlignment="Center">
-                                <TextBlock x:Name="NameText" Text="{Binding DisplayName}"
-                                           FontSize="13" Foreground="#263238"
-                                           TextTrimming="CharacterEllipsis" />
-                                <TextBlock x:Name="DetailText" Text="{Binding Detail}"
-                                           FontSize="11" Foreground="#78909C"
-                                           TextTrimming="CharacterEllipsis" />
-                            </StackPanel>
-                            <TextBlock Grid.Column="2" Text="{Binding Detail}" FontSize="11"
-                                       Foreground="#90A4AE" VerticalAlignment="Center"
-                                       Margin="10,0,8,0">
-                                <TextBlock.Style>
-                                    <Style TargetType="TextBlock">
-                                        <Setter Property="Visibility" Value="Collapsed" />
-                                    </Style>
-                                </TextBlock.Style>
-                            </TextBlock>
-                        </Grid>
-                        <HierarchicalDataTemplate.Triggers>
-                            <!--  分组节点：显示分组图标、加粗名称、隐藏缩略图  -->
-                            <DataTrigger Binding="{Binding IsGroup}" Value="True">
-                                <Setter TargetName="ThumbImage" Property="Visibility" Value="Collapsed" />
-                                <Setter TargetName="NameText" Property="FontWeight" Value="SemiBold" />
-                                <Setter TargetName="NameText" Property="FontSize" Value="13" />
-                                <Setter TargetName="DetailText" Property="Visibility" Value="Collapsed" />
-                                <Setter TargetName="GroupGlyph" Property="Foreground" Value="#1565C0" />
-                            </DataTrigger>
-                            <DataTrigger Binding="{Binding IsGroup}" Value="False">
-                                <Setter TargetName="GroupGlyph" Property="Visibility" Value="Collapsed" />
-                            </DataTrigger>
-                            <!--  Recent 虚拟分组：用时钟图标  -->
-                            <DataTrigger Binding="{Binding IsRecentGroup}" Value="True">
-                                <Setter TargetName="GroupGlyph" Property="Text" Value="&#xE823;" />
-                            </DataTrigger>
-                            <DataTrigger Binding="{Binding IsUngrouped}" Value="True">
-                                <Setter TargetName="GroupGlyph" Property="Text" Value="&#xE8F4;" />
-                            </DataTrigger>
-                        </HierarchicalDataTemplate.Triggers>
-                    </HierarchicalDataTemplate>
-                </TreeView.ItemTemplate>
-            </TreeView>
+        <!--  ====== 最近使用（顶部横条，独立于分组树）  ======  -->
+        <Border DockPanel.Dock="Top" Padding="16,8"
+                Background="#F8FAFC" BorderBrush="#E2E6EA" BorderThickness="0,0,0,1"
+                Visibility="{Binding HasRecents, Converter={StaticResource BoolToVis}}">
+            <DockPanel>
+                <TextBlock DockPanel.Dock="Left" Text="RECENT" VerticalAlignment="Center"
+                           FontSize="11" FontWeight="SemiBold" Foreground="#90A4AE" Margin="0,0,14,0"/>
+                <ScrollViewer HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Disabled">
+                    <ItemsControl ItemsSource="{Binding Recents}">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <StackPanel Orientation="Horizontal" />
+                            </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Button Padding="0" Margin="0,0,10,0" Background="Transparent"
+                                        BorderBrush="Transparent" BorderThickness="0" Cursor="Hand"
+                                        Command="{Binding DataContext.ConnectItemCommand, RelativeSource={RelativeSource AncestorType={x:Type Window}}}"
+                                        CommandParameter="{Binding}"
+                                        ToolTip="Connect to this host again">
+                                    <StackPanel Width="112">
+                                        <Border Width="112" Height="63" Background="#0B1220" CornerRadius="4">
+                                            <Grid>
+                                                <TextBlock Text="&#xE7F4;" FontFamily="Segoe MDL2 Assets"
+                                                           FontSize="18" Foreground="#5B7083"
+                                                           HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                                <Image Source="{Binding ThumbnailSource}" Stretch="UniformToFill" />
+                                            </Grid>
+                                        </Border>
+                                        <TextBlock Text="{Binding Host}" FontSize="12" Foreground="#263238"
+                                                   TextTrimming="CharacterEllipsis" Margin="0,6,0,0" />
+                                        <TextBlock Text="{Binding Port}" FontSize="10" Foreground="#90A4AE" />
+                                    </StackPanel>
+                                </Button>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </ScrollViewer>
+            </DockPanel>
         </Border>
+
+        <!--  ====== 主体：左（分组树）+ 右（选中连接详情）  ======  -->
+        <Grid Background="White">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="380" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+
+            <!--  左侧：工具条 + 搜索 + 树  -->
+            <DockPanel Grid.Column="0" Background="#FCFDFE">
+                <Border DockPanel.Dock="Top" Padding="12,10" BorderBrush="#E8EDF1" BorderThickness="0,0,0,1">
+                    <StackPanel Orientation="Horizontal">
+                        <Button Height="26" Padding="10,0" Content="+ Group"
+                                Command="{Binding NewGroupCommand}"
+                                Style="{StaticResource LightButtonStyle}" Margin="0,0,6,0"
+                                ToolTip="Create a connection group" />
+                        <Button Height="26" Padding="10,0" Content="+ Connection"
+                                Command="{Binding NewConnectionCommand}"
+                                Style="{StaticResource LightButtonStyle}"
+                                ToolTip="Create a saved connection" />
+                    </StackPanel>
+                </Border>
+                <Border DockPanel.Dock="Top" Padding="12,8" BorderBrush="#E8EDF1" BorderThickness="0,0,0,1">
+                    <Grid>
+                        <TextBox Height="28" Padding="8,0" VerticalContentAlignment="Center"
+                                 FontSize="12" Background="#F5F7F9"
+                                 BorderBrush="#D0D7DE" BorderThickness="1"
+                                 Text="{Binding SearchText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                 ToolTip="Filter by name or address" />
+                        <TextBlock Text="Search name or address" FontSize="12" Foreground="#A7B4BE"
+                                   VerticalAlignment="Center" Margin="10,0,0,0" IsHitTestVisible="False">
+                            <TextBlock.Style>
+                                <Style TargetType="TextBlock">
+                                    <Setter Property="Visibility" Value="Collapsed" />
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding SearchText}" Value="">
+                                            <Setter Property="Visibility" Value="Visible" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </TextBlock.Style>
+                        </TextBlock>
+                    </Grid>
+                </Border>
+
+                <TreeView x:Name="ConnectionTree"
+                          Padding="6,6"
+                          Background="Transparent"
+                          BorderThickness="0"
+                          ItemsSource="{Binding Nodes}"
+                          ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                    <TreeView.ItemContainerStyle>
+                        <Style TargetType="TreeViewItem">
+                            <Setter Property="IsExpanded" Value="{Binding IsExpanded, Mode=TwoWay}" />
+                            <Setter Property="Tag" Value="{Binding DataContext, RelativeSource={RelativeSource AncestorType={x:Type Window}}}" />
+                            <Setter Property="Template">
+                                <Setter.Value>
+                                    <ControlTemplate TargetType="TreeViewItem">
+                                        <StackPanel>
+                                            <Border x:Name="Row" Height="30" Background="Transparent" CornerRadius="3">
+                                                <Grid>
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="16" />
+                                                        <ColumnDefinition Width="*" />
+                                                    </Grid.ColumnDefinitions>
+                                                    <ToggleButton x:Name="Expander" Grid.Column="0"
+                                                                  IsChecked="{Binding IsExpanded, RelativeSource={RelativeSource TemplatedParent}, Mode=TwoWay}"
+                                                                  ClickMode="Press" Focusable="False">
+                                                        <ToggleButton.Template>
+                                                            <ControlTemplate TargetType="ToggleButton">
+                                                                <Border Background="Transparent" Padding="2">
+                                                                    <Path x:Name="Arrow" Data="M 0 3 L 4 7 L 8 3 Z"
+                                                                          Fill="#78909C" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                                                </Border>
+                                                                <ControlTemplate.Triggers>
+                                                                    <Trigger Property="IsChecked" Value="False">
+                                                                        <Setter TargetName="Arrow" Property="Data" Value="M 3 0 L 7 4 L 3 8 Z" />
+                                                                    </Trigger>
+                                                                </ControlTemplate.Triggers>
+                                                            </ControlTemplate>
+                                                        </ToggleButton.Template>
+                                                    </ToggleButton>
+                                                    <ContentPresenter Grid.Column="1" ContentSource="Header" VerticalAlignment="Center" />
+                                                </Grid>
+                                            </Border>
+                                            <ItemsPresenter x:Name="ItemsHost" Margin="18,0,0,0" />
+                                        </StackPanel>
+                                        <ControlTemplate.Triggers>
+                                            <Trigger Property="IsExpanded" Value="False">
+                                                <Setter TargetName="ItemsHost" Property="Visibility" Value="Collapsed" />
+                                            </Trigger>
+                                            <Trigger Property="HasItems" Value="False">
+                                                <Setter TargetName="Expander" Property="Visibility" Value="Hidden" />
+                                            </Trigger>
+                                            <Trigger Property="IsMouseOver" Value="True">
+                                                <Setter TargetName="Row" Property="Background" Value="#F1F5F9" />
+                                            </Trigger>
+                                            <Trigger Property="IsSelected" Value="True">
+                                                <Setter TargetName="Row" Property="Background" Value="#E3F0FB" />
+                                            </Trigger>
+                                        </ControlTemplate.Triggers>
+                                    </ControlTemplate>
+                                </Setter.Value>
+                            </Setter>
+                            <Setter Property="ContextMenu">
+                                <Setter.Value>
+                                    <ContextMenu>
+                                        <MenuItem Header="Connect"
+                                                  Command="{Binding PlacementTarget.Tag.ConnectNodeCommand, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}"
+                                                  CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}" />
+                                        <MenuItem Header="New Connection in Group..."
+                                                  Command="{Binding PlacementTarget.Tag.NewConnectionInGroupCommand, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}"
+                                                  CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}" />
+                                        <Separator />
+                                        <MenuItem Header="Edit..."
+                                                  Command="{Binding PlacementTarget.Tag.EditNodeCommand, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}"
+                                                  CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}" />
+                                        <MenuItem Header="Rename..."
+                                                  Command="{Binding PlacementTarget.Tag.RenameNodeCommand, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}"
+                                                  CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}" />
+                                        <MenuItem Header="Rename Group..."
+                                                  Command="{Binding PlacementTarget.Tag.RenameGroupCommand, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}"
+                                                  CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}" />
+                                        <MenuItem Header="Delete Group"
+                                                  Command="{Binding PlacementTarget.Tag.DeleteGroupCommand, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}"
+                                                  CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}" />
+                                        <MenuItem Header="Delete"
+                                                  Command="{Binding PlacementTarget.Tag.DeleteNodeCommand, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}"
+                                                  CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}" />
+                                    </ContextMenu>
+                                </Setter.Value>
+                            </Setter>
+                        </Style>
+                    </TreeView.ItemContainerStyle>
+                    <TreeView.ItemTemplate>
+                        <HierarchicalDataTemplate ItemsSource="{Binding Children}">
+                            <Grid Height="28"
+                                  AutomationProperties.Name="{Binding DisplayName}"
+                                  behaviors:DoubleClickCommand.Command="{Binding DataContext.ConnectNodeCommand, RelativeSource={RelativeSource AncestorType={x:Type Window}}}">
+                                <Grid.Style>
+                                    <Style TargetType="Grid">
+                                        <Setter Property="Background" Value="Transparent" />
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding IsGroup}" Value="True">
+                                                <Setter Property="Background" Value="#F4F6F8" />
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Grid.Style>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock x:Name="RowGlyph" Grid.Column="0" Text="&#xE7F4;"
+                                           FontFamily="Segoe MDL2 Assets" FontSize="13" Foreground="#78909C"
+                                           VerticalAlignment="Center" Margin="0,0,8,0" />
+                                <TextBlock x:Name="NameText" Grid.Column="1" Text="{Binding DisplayName}"
+                                           FontSize="12.5" Foreground="#263238" VerticalAlignment="Center"
+                                           TextTrimming="CharacterEllipsis" />
+                                <TextBlock x:Name="DetailText" Grid.Column="2" Text="{Binding Detail}"
+                                           FontSize="10.5" Foreground="#90A4AE" VerticalAlignment="Center"
+                                           Margin="8,0,6,0" />
+                            </Grid>
+                            <HierarchicalDataTemplate.Triggers>
+                                <DataTrigger Binding="{Binding IsGroup}" Value="True">
+                                    <Setter TargetName="RowGlyph" Property="Text" Value="&#xE8B7;" />
+                                    <Setter TargetName="RowGlyph" Property="Foreground" Value="#1565C0" />
+                                    <Setter TargetName="NameText" Property="FontWeight" Value="SemiBold" />
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding IsUngrouped}" Value="True">
+                                    <Setter TargetName="RowGlyph" Property="Text" Value="&#xE8F4;" />
+                                </DataTrigger>
+                            </HierarchicalDataTemplate.Triggers>
+                        </HierarchicalDataTemplate>
+                    </TreeView.ItemTemplate>
+                </TreeView>
+            </DockPanel>
+
+            <Border Grid.Column="1" Width="1" Background="#E8EDF1" />
+
+            <!--  右侧：选中连接详情  -->
+            <Grid Grid.Column="2" Background="White" Margin="24,20">
+                <StackPanel>
+                    <StackPanel.Style>
+                        <Style TargetType="StackPanel">
+                            <Setter Property="Visibility" Value="Collapsed" />
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding HasSelection}" Value="True">
+                                    <Setter Property="Visibility" Value="Visible" />
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </StackPanel.Style>
+
+                    <Border Height="230" Width="360" HorizontalAlignment="Left"
+                            Background="#0B1220" CornerRadius="6">
+                        <Grid>
+                            <TextBlock Text="&#xE7F4;" FontFamily="Segoe MDL2 Assets" FontSize="42"
+                                       Foreground="#3D5568" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                            <Image Source="{Binding SelectedThumbnail}" Stretch="Uniform" />
+                        </Grid>
+                    </Border>
+
+                    <TextBlock Text="{Binding SelectedName}" FontSize="20" FontWeight="SemiBold"
+                               Foreground="#1B2A36" Margin="0,16,0,2" TextTrimming="CharacterEllipsis" />
+                    <TextBlock Text="{Binding SelectedAddress}" FontSize="13" Foreground="#607D8B" />
+
+                    <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                        <TextBlock Text="{Binding SelectedGroupText}" FontSize="12" Foreground="#78909C" />
+                        <TextBlock Text="   ·   " FontSize="12" Foreground="#B0BEC5" />
+                        <TextBlock Text="{Binding SelectedUserText}" FontSize="12" Foreground="#78909C" />
+                        <TextBlock Text="   ·   " FontSize="12" Foreground="#B0BEC5" />
+                        <TextBlock Text="{Binding SelectedLastConnectedText}" FontSize="12" Foreground="#78909C" />
+                    </StackPanel>
+
+                    <StackPanel Orientation="Horizontal" Margin="0,22,0,0">
+                        <Button Content="Connect" Height="32" Width="110" Margin="0,0,8,0"
+                                Command="{Binding ConnectSelectedCommand}"
+                                Style="{StaticResource PrimaryButtonStyle}" />
+                        <Button Content="Edit" Height="32" Width="90" Margin="0,0,8,0"
+                                Command="{Binding EditSelectedCommand}"
+                                Style="{StaticResource LightButtonStyle}" />
+                        <Button Content="Delete" Height="32" Width="90"
+                                Command="{Binding DeleteSelectedCommand}"
+                                Style="{StaticResource LightButtonStyle}" />
+                    </StackPanel>
+                </StackPanel>
+
+                <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+                    <TextBlock Text="Select a connection on the left"
+                               FontSize="13" Foreground="#A7B4BE" HorizontalAlignment="Center">
+                        <TextBlock.Style>
+                            <Style TargetType="TextBlock">
+                                <Setter Property="Visibility" Value="Visible" />
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding HasSelection}" Value="True">
+                                        <Setter Property="Visibility" Value="Collapsed" />
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </TextBlock.Style>
+                    </TextBlock>
+                    <TextBlock Text="or type an address above and press Connect"
+                               FontSize="12" Foreground="#C2CDD6" Margin="0,6,0,0"
+                               HorizontalAlignment="Center">
+                        <TextBlock.Style>
+                            <Style TargetType="TextBlock">
+                                <Setter Property="Visibility" Value="Visible" />
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding HasSelection}" Value="True">
+                                        <Setter Property="Visibility" Value="Collapsed" />
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </TextBlock.Style>
+                    </TextBlock>
+                </StackPanel>
+
+                <TextBlock Text="hidden"
+                           FontSize="1" Foreground="Transparent"
+                           HorizontalAlignment="Center" VerticalAlignment="Center">
+                    <TextBlock.Style>
+                        <Style TargetType="TextBlock">
+                            <Setter Property="Visibility" Value="Visible" />
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding HasSelection}" Value="True">
+                                    <Setter Property="Visibility" Value="Collapsed" />
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </TextBlock.Style>
+                </TextBlock>
+            </Grid>
+        </Grid>
     </DockPanel>
 </Window>

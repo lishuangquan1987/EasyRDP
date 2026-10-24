@@ -44,6 +44,8 @@ namespace EasyRDP.Client.Wpf.Views
             _refreshTimer.Start();
 
             // 连接树拖放：把连接拖到分组节点即归入该分组
+            ConnectionTree.SelectedItemChanged += (s2, e2) =>
+                _vm.SelectNode(e2.NewValue as ConnectionTreeNode);
             ConnectionTree.PreviewMouseLeftButtonDown += OnTreeMouseLeftButtonDown;
             ConnectionTree.PreviewMouseMove += OnTreeMouseMove;
             ConnectionTree.DragOver += OnTreeDragOver;
