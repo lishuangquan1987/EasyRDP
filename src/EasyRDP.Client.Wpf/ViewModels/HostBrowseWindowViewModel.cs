@@ -15,6 +15,8 @@ namespace EasyRDP.Client.Wpf.ViewModels
     /// </summary>
     public class HostBrowseWindowViewModel : INotifyPropertyChanged
     {
+        private static readonly NLog.Logger Logger = NLog.LogManager.GetCurrentClassLogger();
+
         private readonly RecentConnectionStore _store;
         private readonly ConnectionProfileStore _profileStore = new ConnectionProfileStore();
         private readonly ConnectionGroupStore _groupStore = new ConnectionGroupStore();
@@ -37,6 +39,11 @@ namespace EasyRDP.Client.Wpf.ViewModels
         private int _offlineCount;
         // 探测频控：30 秒内不重复探测（手动刷新除外）
         private long _lastProbeTicks;
+        // 局域网发现：扫描状态与取消源
+        private volatile bool _scanning;
+        private readonly System.Threading.CancellationTokenSource _discoveryCts =
+            new System.Threading.CancellationTokenSource();
+        private long _lastDiscoveryTicks;
 
         /// <summary>最近连接列表（缩略图网格数据源）。</summary>
         public ObservableCollection<RecentConnection> Connections { get; } = new ObservableCollection<RecentConnection>();
@@ -46,6 +53,33 @@ namespace EasyRDP.Client.Wpf.ViewModels
 
         /// <summary>最近使用（顶部横条，最多 8 条；已单独展示，不再进主树）。</summary>
         public ObservableCollection<RecentConnection> Recents { get; } = new ObservableCollection<RecentConnection>();
+
+        /// <summary>局域网发现到的陌生服务端（与已配置连接按 host:port 去重）。</summary>
+        public ObservableCollection<EasyRDP.Core.Discovery.DiscoveredServer> Discovered { get; } =
+            new ObservableCollection<EasyRDP.Core.Discovery.DiscoveredServer>();
+
+        /// <summary>是否正在扫描局域网。</summary>
+        public bool IsScanning
+        {
+            get { return _scanning; }
+        }
+
+        /// <summary>发现区状态文本（Scanning… / N found / Click Scan）。</summary>
+        public string DiscoveryStatusText
+        {
+            get
+            {
+                if (_scanning) return "Scanning…";
+                if (Discovered.Count > 0) return Discovered.Count + " found";
+                return "Click Scan";
+            }
+        }
+
+        /// <summary>最近使用为空时显示占位提示。</summary>
+        public bool ShowNoRecentHint
+        {
+            get { return Recents.Count == 0; }
+        }
 
         /// <summary>是否显示最近使用横条。</summary>
         public bool HasRecents
@@ -230,6 +264,12 @@ namespace EasyRDP.Client.Wpf.ViewModels
         /// <summary>删除右侧详情中选中的连接。</summary>
         public RelayCommand DeleteSelectedCommand { get; }
 
+        /// <summary>扫描局域网中的 EasyRDP 服务端。</summary>
+        public RelayCommand DiscoverCommand { get; }
+
+        /// <summary>把发现到的服务端添加为连接（参数为 DiscoveredServer）。</summary>
+        public RelayCommand<EasyRDP.Core.Discovery.DiscoveredServer> AddDiscoveredCommand { get; }
+
         // ====== 视图交互事件（由 View 订阅，ViewModel 不直接引用 Window） ======
 
         /// <summary>请求打开控制窗口并连接（参数为连接目标）。</summary>
@@ -267,6 +307,8 @@ namespace EasyRDP.Client.Wpf.ViewModels
             ConnectSelectedCommand = new RelayCommand(() => ConnectNode(_selectedNode));
             EditSelectedCommand = new RelayCommand(() => EditNode(_selectedNode));
             DeleteSelectedCommand = new RelayCommand(() => DeleteNode(_selectedNode));
+            DiscoverCommand = new RelayCommand(() => ScanDiscovered(true), () => !_scanning);
+            AddDiscoveredCommand = new RelayCommand<EasyRDP.Core.Discovery.DiscoveredServer>(AddDiscovered);
 
             SignInCommand = new RelayCommand(() =>
                 _notifier.ShowInfo("账号登录为视觉占位（与 RealVNC 布局一致），后续版本接入。", "Sign in"));
@@ -279,15 +321,155 @@ namespace EasyRDP.Client.Wpf.ViewModels
             {
                 Interval = TimeSpan.FromSeconds(30)
             };
-            _probeTimer.Tick += (s2, e2) => RefreshAvailability();
+            _probeTimer.Tick += (s2, e2) =>
+            {
+                RefreshAvailability();
+                ScanDiscovered(false);
+            };
             _probeTimer.Start();
             RefreshAvailability();
+            ScanDiscovered(false);
         }
 
         /// <summary>停止在线探测（窗口关闭时调用）。</summary>
         public void StopAvailabilityProbe()
         {
             try { _probeTimer?.Stop(); } catch { }
+            try { _discoveryCts.Cancel(); } catch { }
+        }
+
+        // ====== 局域网发现 ======
+
+        /// <summary>扫描局域网服务端（manual=true 时忽略 5 秒频控）。</summary>
+        private async void ScanDiscovered(bool manual)
+        {
+            if (_scanning) return;
+
+            long now = System.Diagnostics.Stopwatch.GetTimestamp();
+            if (!manual && now - _lastDiscoveryTicks < System.Diagnostics.Stopwatch.Frequency * 20)
+                return; // 自动扫描 20 秒内不重复
+            _lastDiscoveryTicks = now;
+
+            _scanning = true;
+            OnPropertyChanged(nameof(IsScanning));
+            OnPropertyChanged(nameof(DiscoveryStatusText));
+            try
+            {
+                await DiscoveryClient.ScanAsync(
+                    DiscoveryClient.DefaultTimeoutMs,
+                    server => _dispatcher.BeginInvoke(new Action(() => MergeDiscovered(server))),
+                    _discoveryCts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn(ex, "Discovery scan failed");
+            }
+            finally
+            {
+                _scanning = false;
+                _dispatcher.BeginInvoke(new Action(() =>
+                {
+                    PruneDiscovered();
+                    OnPropertyChanged(nameof(IsScanning));
+                    OnPropertyChanged(nameof(DiscoveryStatusText));
+                }));
+            }
+        }
+
+        /// <summary>合并发现结果：跳过已配置的连接（按 host:port）与重复项。</summary>
+        private void MergeDiscovered(EasyRDP.Core.Discovery.DiscoveredServer server)
+        {
+            if (server == null) return;
+            if (IsConfigured(server.Address != null ? server.Address.ToString() : "", server.TcpPort))
+                return;
+            // 同一服务端可能从多块网卡各回一次（本机多网卡/虚拟网卡）：按 名称+TCP端口 去重，
+            // 保留最先到达的来源地址（真实部署时来源通常只有一个）。
+            string dedupeKey = (server.Name ?? "").Trim() + "|" + server.TcpPort;
+            foreach (var existing in Discovered)
+            {
+                if (string.Equals((existing.Name ?? "").Trim() + "|" + existing.TcpPort,
+                        dedupeKey, StringComparison.OrdinalIgnoreCase))
+                    return;
+            }
+            Discovered.Add(server);
+            OnPropertyChanged(nameof(DiscoveryStatusText));
+        }
+
+        /// <summary>移除已经被添加为配置连接的发现项。</summary>
+        private void PruneDiscovered()
+        {
+            string last;
+            var profiles = _profileStore.Load(out last);
+            for (int i = Discovered.Count - 1; i >= 0; i--)
+            {
+                var server = Discovered[i];
+                string host = server.Address != null ? server.Address.ToString() : "";
+                bool configured = profiles.Any(p =>
+                    string.Equals((p.Host ?? "").Trim(), host, StringComparison.OrdinalIgnoreCase)
+                    && ParsePort(p.Port) == server.TcpPort);
+                if (configured)
+                    Discovered.RemoveAt(i);
+            }
+            OnPropertyChanged(nameof(DiscoveryStatusText));
+        }
+
+        /// <summary>判断 host:port 是否已存在于已保存的连接中。</summary>
+        private bool IsConfigured(string host, int port)
+        {
+            if (string.IsNullOrWhiteSpace(host)) return false;
+            string last;
+            foreach (var p in _profileStore.Load(out last))
+            {
+                if (string.Equals((p.Host ?? "").Trim(), host.Trim(), StringComparison.OrdinalIgnoreCase)
+                    && ParsePort(p.Port) == port)
+                    return true;
+            }
+            return false;
+        }
+
+        /// <summary>把发现到的服务端添加为连接并立即连接（口令模式需补密码）。</summary>
+        private void AddDiscovered(EasyRDP.Core.Discovery.DiscoveredServer server)
+        {
+            if (server == null) return;
+
+            var model = new RecentConnection
+            {
+                Host = server.Address != null ? server.Address.ToString() : "",
+                Port = server.TcpPort.ToString(),
+                DisplayName = string.IsNullOrWhiteSpace(server.Name) ? null : server.Name
+            };
+            var result = _dialogs.EditConnection(model);
+            if (result == null || string.IsNullOrWhiteSpace(result.Host)) return;
+
+            string host = result.Host.Trim();
+            int port = ParsePort(result.Port);
+            string last;
+            var list = _profileStore.Load(out last);
+
+            var existing = list.FirstOrDefault(p =>
+                string.Equals((p.Host ?? "").Trim(), host, StringComparison.OrdinalIgnoreCase)
+                && ParsePort(p.Port) == port);
+            if (existing != null)
+                list.Remove(existing);
+
+            list.Add(new ServerProfile
+            {
+                Name = string.IsNullOrWhiteSpace(result.DisplayName) ? host : result.DisplayName.Trim(),
+                Host = host,
+                Port = string.IsNullOrWhiteSpace(result.Port) ? "2000" : result.Port.Trim(),
+                Username = result.Username ?? "",
+                Password = result.Password ?? "",
+                Group = ""
+            });
+            _profileStore.Save(list, last);
+
+            Discovered.Remove(server);
+            ReloadTree();
+            OnPropertyChanged(nameof(DiscoveryStatusText));
+            ConnectRequested?.Invoke(ToConnection(result));
         }
 
         // ====== 在线状态 ======
@@ -435,6 +617,7 @@ namespace EasyRDP.Client.Wpf.ViewModels
                 Recents.Add(r);
             }
             OnPropertyChanged(nameof(HasRecents));
+            OnPropertyChanged(nameof(ShowNoRecentHint));
 
             // 搜索过滤：名称或地址命中（不区分大小写）
             string filter = (_searchText ?? "").Trim();

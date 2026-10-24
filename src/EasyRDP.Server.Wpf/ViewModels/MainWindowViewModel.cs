@@ -50,6 +50,9 @@ namespace EasyRDP.Server.Wpf.ViewModels
         private bool _autoStart;
         // 启动即监听：默认开启，打开程序即开始接受连接
         private bool _autoListen = true;
+        // 允许局域网 UDP 发现（只暴露计算机名与 TCP 端口）
+        private bool _allowDiscovery = true;
+        private DiscoveryService _discoveryService;
         // 连接认证：默认口令模式（与历史版本一致）；审批模式免密码
         private ServerAuthMode _authMode = ServerAuthMode.Password;
         // PBKDF2 盐（Base64）：首次运行生成后固定，保证相同口令派生出相同密钥
@@ -326,6 +329,29 @@ namespace EasyRDP.Server.Wpf.ViewModels
             }
         }
 
+        /// <summary>
+        /// 是否允许局域网 UDP 发现。运行中切换立即生效（启停 UDP 监听）。
+        /// 发现应答只包含计算机名、TCP 端口、认证模式与是否已满，不含任何凭据。
+        /// </summary>
+        public bool AllowDiscovery
+        {
+            get { return _allowDiscovery; }
+            set
+            {
+                if (_allowDiscovery == value) return;
+                _allowDiscovery = value;
+                OnPropertyChanged(nameof(AllowDiscovery));
+                AddLog(value ? "LAN discovery enabled" : "LAN discovery disabled");
+                if (IsRunning)
+                {
+                    if (value)
+                        StartDiscoveryService(CurrentPort());
+                    else
+                        StopDiscoveryService();
+                }
+            }
+        }
+
         // ====== 命令 ======
 
         public RelayCommand StartCommand { get; }
@@ -388,6 +414,7 @@ namespace EasyRDP.Server.Wpf.ViewModels
             AutoListen = settings.AutoListen;
             _authMode = settings.AuthMode;
             _authSalt = settings.AuthSalt ?? "";
+            _allowDiscovery = settings.AllowDiscovery;
             _captureDisplayIndex = settings.CaptureDisplay;
             RefreshDisplays();
             // 首次运行生成并立即落盘 PBKDF2 盐：盐固定后同一口令派生密钥稳定，
@@ -699,6 +726,7 @@ namespace EasyRDP.Server.Wpf.ViewModels
                 _transportHost.SessionAttached += OnSessionAttached;
                 _transportHost.SessionDetached += OnSessionDetached;
                 _transportHost.Start(port.ToString());
+                StartDiscoveryService(port);
 
                 _startTime = DateTime.Now;
                 _uptimeTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
@@ -809,6 +837,7 @@ namespace EasyRDP.Server.Wpf.ViewModels
                 _transportHost.SessionDetached -= OnSessionDetached;
             }
             _transportHost = null;
+            StopDiscoveryService();
             _authConfig = null;
             _transportAcceptor?.Dispose();
             _transportAcceptor = null;
@@ -825,6 +854,43 @@ namespace EasyRDP.Server.Wpf.ViewModels
             AddLog("Server stopped");
         }
 
+        /// <summary>当前监听端口（解析失败回退 2000）。</summary>
+        private int CurrentPort()
+        {
+            int port;
+            return int.TryParse(PortText, out port) && port > 0 && port < 65536 ? port : 2000;
+        }
+
+        /// <summary>启动局域网发现（幂等；已启动则先停止再重建，保证端口/模式最新）。</summary>
+        private void StartDiscoveryService(int tcpPort)
+        {
+            StopDiscoveryService();
+            if (!_allowDiscovery) return;
+            if (_transportHost == null) return;
+
+            var host = _transportHost;
+            var service = new DiscoveryService(
+                () => tcpPort,
+                () => (byte)(_authMode == ServerAuthMode.Approve
+                    ? EasyRDP.Core.Discovery.DiscoveryConstants.AuthApprove
+                    : EasyRDP.Core.Discovery.DiscoveryConstants.AuthPassword),
+                () => host.ActiveSessionCount >= host.MaxSessions,
+                Environment.MachineName);
+            service.Start();
+            _discoveryService = service;
+            AddLog("LAN discovery: UDP " + EasyRDP.Core.Discovery.DiscoveryConstants.UdpPort
+                + " (" + Environment.MachineName + ")");
+        }
+
+        /// <summary>停止局域网发现。</summary>
+        private void StopDiscoveryService()
+        {
+            var service = _discoveryService;
+            _discoveryService = null;
+            if (service == null) return;
+            try { service.Dispose(); } catch (Exception ex) { Logger.Warn(ex, "Stop discovery failed"); }
+        }
+
         /// <summary>把当前端口/凭据/检测模式/认证设置保存到本地配置文件。</summary>
         public void SaveSettings()
         {
@@ -838,6 +904,7 @@ namespace EasyRDP.Server.Wpf.ViewModels
                 AutoListen = _autoListen,
                 AuthMode = _authMode,
                 AuthSalt = _authSalt,
+                AllowDiscovery = _allowDiscovery,
                 CaptureDisplay = _captureDisplayIndex
             });
             AddLog(ok ? "Settings saved" : "Settings save failed");

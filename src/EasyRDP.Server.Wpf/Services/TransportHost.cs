@@ -304,6 +304,18 @@ namespace EasyRDP.Server.Wpf.Services
             set { _changeDetectionMode = value; }
         }
 
+        /// <summary>当前活跃会话数（供局域网发现判断是否已满）。</summary>
+        public int ActiveSessionCount
+        {
+            get { lock (_lock) return _activeCount; }
+        }
+
+        /// <summary>最大并发会话数。</summary>
+        public int MaxSessions
+        {
+            get { return _maxSessions; }
+        }
+
         /// <summary>
         /// 运行中切换采集显示器（0=主屏，1..n=副屏）。捕获线程下一轮生效，
         /// 会话会收到 DisplayBoundsChanged 并重建编码器/发关键帧。

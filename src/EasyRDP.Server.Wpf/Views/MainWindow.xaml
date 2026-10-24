@@ -150,8 +150,13 @@
                     <CheckBox Content="Listen on launch"
                               IsChecked="{Binding AutoListen, Mode=TwoWay}"
                               Foreground="{StaticResource TextPrimaryBrush}" FontSize="12"
-                              VerticalAlignment="Center"
+                              VerticalAlignment="Center" Margin="0,0,16,0"
                               ToolTip="程序启动后立即开始监听；用户名/密码为空时跳过，填写后点 Start 即可"/>
+                    <CheckBox Content="Discoverable"
+                              IsChecked="{Binding AllowDiscovery, Mode=TwoWay}"
+                              Foreground="{StaticResource TextPrimaryBrush}" FontSize="12"
+                              VerticalAlignment="Center"
+                              ToolTip="允许局域网内客户端通过 UDP 自动发现本机（仅广播计算机名与端口，不含凭据）"/>
                 </StackPanel>
             </WrapPanel>
         </Border>

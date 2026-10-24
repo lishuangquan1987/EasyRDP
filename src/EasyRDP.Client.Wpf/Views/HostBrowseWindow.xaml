@@ -187,46 +187,140 @@
             </Grid>
         </Border>
 
-        <!--  ====== 最近使用（顶部横条，独立于分组树）  ======  -->
+        <!--  ====== 顶部横条：左 RECENT（历史连接）+ 右 DISCOVERED（局域网发现，已配置去重）  ======  -->
         <Border DockPanel.Dock="Top" Padding="16,8"
-                Background="#F8FAFC" BorderBrush="#E2E6EA" BorderThickness="0,0,0,1"
-                Visibility="{Binding HasRecents, Converter={StaticResource BoolToVis}}">
-            <DockPanel>
-                <TextBlock DockPanel.Dock="Left" Text="RECENT" VerticalAlignment="Center"
-                           FontSize="11" FontWeight="SemiBold" Foreground="#90A4AE" Margin="0,0,14,0"/>
-                <ScrollViewer HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Disabled">
-                    <ItemsControl ItemsSource="{Binding Recents}">
-                        <ItemsControl.ItemsPanel>
-                            <ItemsPanelTemplate>
-                                <StackPanel Orientation="Horizontal" />
-                            </ItemsPanelTemplate>
-                        </ItemsControl.ItemsPanel>
-                        <ItemsControl.ItemTemplate>
-                            <DataTemplate>
-                                <Button Padding="0" Margin="0,0,10,0" Background="Transparent"
-                                        BorderBrush="Transparent" BorderThickness="0" Cursor="Hand"
-                                        Command="{Binding DataContext.ConnectItemCommand, RelativeSource={RelativeSource AncestorType={x:Type Window}}}"
-                                        CommandParameter="{Binding}"
-                                        ToolTip="Connect to this host again">
-                                    <StackPanel Width="112">
-                                        <Border Width="112" Height="63" Background="#0B1220" CornerRadius="4">
-                                            <Grid>
-                                                <TextBlock Text="&#xE7F4;" FontFamily="Segoe MDL2 Assets"
-                                                           FontSize="18" Foreground="#5B7083"
-                                                           HorizontalAlignment="Center" VerticalAlignment="Center" />
-                                                <Image Source="{Binding ThumbnailSource}" Stretch="UniformToFill" />
-                                            </Grid>
-                                        </Border>
-                                        <TextBlock Text="{Binding Host}" FontSize="12" Foreground="#263238"
-                                                   TextTrimming="CharacterEllipsis" Margin="0,6,0,0" />
-                                        <TextBlock Text="{Binding Port}" FontSize="10" Foreground="#90A4AE" />
-                                    </StackPanel>
-                                </Button>
-                            </DataTemplate>
-                        </ItemsControl.ItemTemplate>
-                    </ItemsControl>
-                </ScrollViewer>
-            </DockPanel>
+                Background="#F8FAFC" BorderBrush="#E2E6EA" BorderThickness="0,0,0,1">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+
+                <!--  Recent  -->
+                <DockPanel Grid.Column="0">
+                    <TextBlock DockPanel.Dock="Left" Text="RECENT" VerticalAlignment="Center"
+                               FontSize="11" FontWeight="SemiBold" Foreground="#90A4AE" Margin="0,0,14,0" />
+                    <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
+                        <Grid>
+                            <TextBlock Text="No recent connections" FontSize="12" Foreground="#C2CDD6"
+                                       VerticalAlignment="Center" Margin="0,20,0,0">
+                                <TextBlock.Style>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="Visibility" Value="Collapsed" />
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding ShowNoRecentHint}" Value="True">
+                                                <Setter Property="Visibility" Value="Visible" />
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </TextBlock.Style>
+                            </TextBlock>
+                            <ItemsControl ItemsSource="{Binding Recents}">
+                                <ItemsControl.ItemsPanel>
+                                    <ItemsPanelTemplate>
+                                        <StackPanel Orientation="Horizontal" />
+                                    </ItemsPanelTemplate>
+                                </ItemsControl.ItemsPanel>
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Button Padding="0" Margin="0,0,10,0" Background="Transparent"
+                                                BorderBrush="Transparent" BorderThickness="0" Cursor="Hand"
+                                                Command="{Binding DataContext.ConnectItemCommand, RelativeSource={RelativeSource AncestorType={x:Type Window}}}"
+                                                CommandParameter="{Binding}"
+                                                ToolTip="Connect to this host again">
+                                            <StackPanel Width="112">
+                                                <Border Width="112" Height="63" Background="#0B1220" CornerRadius="4">
+                                                    <Grid>
+                                                        <TextBlock Text="&#xE7F4;" FontFamily="Segoe MDL2 Assets"
+                                                                   FontSize="18" Foreground="#5B7083"
+                                                                   HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                                        <Image Source="{Binding ThumbnailSource}" Stretch="UniformToFill" />
+                                                    </Grid>
+                                                </Border>
+                                                <TextBlock Text="{Binding Host}" FontSize="12" Foreground="#263238"
+                                                           TextTrimming="CharacterEllipsis" Margin="0,6,0,0" />
+                                                <TextBlock Text="{Binding Port}" FontSize="10" Foreground="#90A4AE" />
+                                            </StackPanel>
+                                        </Button>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </Grid>
+                    </ScrollViewer>
+                </DockPanel>
+
+                <Border Grid.Column="1" Width="1" Background="#E2E6EA" Margin="14,0" />
+
+                <!--  Discovered  -->
+                <DockPanel Grid.Column="2">
+                    <TextBlock DockPanel.Dock="Left" Text="DISCOVERED" VerticalAlignment="Center"
+                               FontSize="11" FontWeight="SemiBold" Foreground="#2E7D32" Margin="0,0,10,0" />
+                    <Button DockPanel.Dock="Right" Content="Scan" Height="26" Padding="10,0"
+                            Command="{Binding DiscoverCommand}"
+                            Style="{StaticResource LightButtonStyle}" VerticalAlignment="Center"
+                            ToolTip="Scan the local network for EasyRDP servers (UDP broadcast)" />
+                    <TextBlock DockPanel.Dock="Right" Text="{Binding DiscoveryStatusText}"
+                               FontSize="11" Foreground="#78909C" VerticalAlignment="Center" Margin="0,0,10,0" />
+                    <ScrollViewer HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Disabled">
+                        <Grid>
+                            <TextBlock Text="No servers found on the LAN" FontSize="12" Foreground="#C2CDD6"
+                                       VerticalAlignment="Center" Margin="0,20,0,0">
+                                <TextBlock.Style>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="Visibility" Value="Collapsed" />
+                                        <Style.Triggers>
+                                            <MultiDataTrigger>
+                                                <MultiDataTrigger.Conditions>
+                                                    <Condition Binding="{Binding IsScanning}" Value="False" />
+                                                    <Condition Binding="{Binding DiscoveryStatusText}" Value="Click Scan" />
+                                                </MultiDataTrigger.Conditions>
+                                                <Setter Property="Visibility" Value="Visible" />
+                                            </MultiDataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </TextBlock.Style>
+                            </TextBlock>
+                            <ItemsControl ItemsSource="{Binding Discovered}">
+                                <ItemsControl.ItemsPanel>
+                                    <ItemsPanelTemplate>
+                                        <StackPanel Orientation="Horizontal" />
+                                    </ItemsPanelTemplate>
+                                </ItemsControl.ItemsPanel>
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Button Padding="0" Margin="0,0,10,0" Background="Transparent"
+                                                BorderBrush="Transparent" BorderThickness="0" Cursor="Hand"
+                                                Command="{Binding DataContext.AddDiscoveredCommand, RelativeSource={RelativeSource AncestorType={x:Type Window}}}"
+                                                CommandParameter="{Binding}"
+                                                ToolTip="Add this server as a connection">
+                                            <StackPanel Width="112">
+                                                <Border Width="112" Height="63" Background="#E8F5E9" CornerRadius="4"
+                                                        BorderBrush="#A5D6A7" BorderThickness="1">
+                                                    <Grid>
+                                                        <TextBlock Text="&#xE7F4;" FontFamily="Segoe MDL2 Assets"
+                                                                   FontSize="18" Foreground="#43A047"
+                                                                   HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                                        <Border HorizontalAlignment="Right" VerticalAlignment="Top"
+                                                                Margin="3" Padding="4,1" CornerRadius="2"
+                                                                Background="#43A047">
+                                                            <TextBlock Text="{Binding AuthModeText}" FontSize="9"
+                                                                       Foreground="White" />
+                                                        </Border>
+                                                    </Grid>
+                                                </Border>
+                                                <TextBlock Text="{Binding Name}" FontSize="12" Foreground="#1B5E20"
+                                                           TextTrimming="CharacterEllipsis" Margin="0,6,0,0" />
+                                                <TextBlock Text="{Binding EndpointText}" FontSize="10" Foreground="#66BB6A" />
+                                            </StackPanel>
+                                        </Button>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </Grid>
+                    </ScrollViewer>
+                </DockPanel>
+            </Grid>
         </Border>
 
         <!--  ====== 主体：左（分组树）+ 右（选中连接详情）  ======  -->

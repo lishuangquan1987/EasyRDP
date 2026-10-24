@@ -107,6 +107,7 @@ namespace EasyRDP.Server.Wpf.Services
             sb.Append("\"ChangeDetectionMode\":").Append((int)s.ChangeDetectionMode).Append(',');
             sb.Append("\"AutoStart\":").Append(s.AutoStart ? "true" : "false").Append(',');
             sb.Append("\"AutoListen\":").Append(s.AutoListen ? "true" : "false").Append(',');
+            sb.Append("\"AllowDiscovery\":").Append(s.AllowDiscovery ? "true" : "false").Append(',');
             sb.Append("\"AuthMode\":").Append((int)s.AuthMode).Append(',');
             sb.Append("\"AuthSalt\":\"").Append(Escape(s.AuthSalt ?? "")).Append("\",");
             sb.Append("\"CaptureDisplay\":").Append(s.CaptureDisplay);
@@ -222,6 +223,7 @@ namespace EasyRDP.Server.Wpf.Services
                     bool flag = string.Equals(boolSb.ToString(), "true", StringComparison.OrdinalIgnoreCase);
                     if (key == "AutoStart") s.AutoStart = flag;
                     else if (key == "AutoListen") s.AutoListen = flag;
+                    else if (key == "AllowDiscovery") s.AllowDiscovery = flag;
                     key = null;
                     expectValue = false;
                     i = j;
