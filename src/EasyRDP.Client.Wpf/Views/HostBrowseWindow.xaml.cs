@@ -1,6 +1,8 @@
 using System;
 using System.ComponentModel;
 using System.Windows;
+using System.Windows.Input;
+using System.Windows.Media;
 using System.Windows.Threading;
 using EasyRDP.Client.Wpf.Dialogs;
 using EasyRDP.Client.Wpf.Models;
@@ -12,8 +14,7 @@ using NLog;
 namespace EasyRDP.Client.Wpf.Views
 {
     /// <summary>
-    /// 浏览窗口（1:1 复刻 RealVNC Viewer）：菜单栏 File/View/Help +
-    /// 品牌行（logo + 地址输入框 + Sign in）+ 白色 5 列缩略图网格。
+    /// 浏览窗口：菜单栏 File/View/Help + 品牌行（logo + 地址输入框）+ 连接分组树。
     /// 严格 MVVM：本 View 仅负责初始化 ViewModel、订阅视图交互事件、
     /// 打开控制窗口、聚焦地址栏与定时静默刷新缩略图；所有业务逻辑在 HostBrowseWindowViewModel。
     /// </summary>
@@ -41,6 +42,67 @@ namespace EasyRDP.Client.Wpf.Views
             _refreshTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
             _refreshTimer.Tick += (s, e) => _vm.RefreshThumbnails();
             _refreshTimer.Start();
+
+            // 连接树拖放：把连接拖到分组节点即归入该分组
+            ConnectionTree.PreviewMouseLeftButtonDown += OnTreeMouseLeftButtonDown;
+            ConnectionTree.PreviewMouseMove += OnTreeMouseMove;
+            ConnectionTree.DragOver += OnTreeDragOver;
+            ConnectionTree.Drop += OnTreeDrop;
+        }
+
+        // ====== 连接树拖放 ======
+
+        private Point _dragStartPoint;
+        private ConnectionTreeNode _dragNode;
+
+        private void OnTreeMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+        {
+            _dragStartPoint = e.GetPosition(null);
+            _dragNode = FindNode(e.OriginalSource as DependencyObject);
+        }
+
+        private void OnTreeMouseMove(object sender, MouseEventArgs e)
+        {
+            if (e.LeftButton != MouseButtonState.Pressed || _dragNode == null) return;
+            if (_dragNode.IsGroup || _dragNode.Profile == null) return;
+
+            Point pos = e.GetPosition(null);
+            if (Math.Abs(pos.X - _dragStartPoint.X) < SystemParameters.MinimumHorizontalDragDistance
+                && Math.Abs(pos.Y - _dragStartPoint.Y) < SystemParameters.MinimumVerticalDragDistance)
+                return;
+
+            DragDrop.DoDragDrop(ConnectionTree, _dragNode, DragDropEffects.Move);
+            _dragNode = null;
+        }
+
+        private void OnTreeDragOver(object sender, DragEventArgs e)
+        {
+            var source = e.Data.GetData(typeof(ConnectionTreeNode)) as ConnectionTreeNode;
+            var target = FindNode(e.OriginalSource as DependencyObject);
+            bool canDrop = source != null && source.Profile != null
+                && target != null && target.IsGroup && !target.IsRecentGroup;
+            e.Effects = canDrop ? DragDropEffects.Move : DragDropEffects.None;
+            e.Handled = true;
+        }
+
+        private void OnTreeDrop(object sender, DragEventArgs e)
+        {
+            var source = e.Data.GetData(typeof(ConnectionTreeNode)) as ConnectionTreeNode;
+            var target = FindNode(e.OriginalSource as DependencyObject);
+            if (source == null || source.Profile == null) return;
+            if (target == null || !target.IsGroup || target.IsRecentGroup) return;
+
+            _vm.MoveProfileToGroup(source.Profile, target.IsUngrouped ? "" : target.GroupName);
+            e.Handled = true;
+        }
+
+        /// <summary>从命中的可视元素向上找到所属的 TreeViewItem，取其节点数据。</summary>
+        private static ConnectionTreeNode FindNode(DependencyObject element)
+        {
+            while (element != null && !(element is System.Windows.Controls.TreeViewItem))
+                element = VisualTreeHelper.GetParent(element);
+            var item = element as System.Windows.Controls.TreeViewItem;
+            return item != null ? item.DataContext as ConnectionTreeNode : null;
         }
 
         /// <summary>打开新控制窗口（MainWindow）并立即连接。</summary>

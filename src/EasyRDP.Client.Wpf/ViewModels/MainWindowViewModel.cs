@@ -666,6 +666,24 @@ namespace EasyRDP.Client.Wpf.ViewModels
             get { return _remoteScreenHeight; }
         }
 
+        // 当前连接的只读摘要（远程界面顶栏 / Details 面板显示）
+        private string _connectionSummary = "";
+        private System.Windows.Media.ImageSource? _connectionThumbnail;
+
+        /// <summary>当前连接摘要（如 "办公室 · 192.168.1.10:2000 · user"）。</summary>
+        public string ConnectionSummary
+        {
+            get { return _connectionSummary; }
+            private set { _connectionSummary = value ?? ""; OnPropertyChanged(nameof(ConnectionSummary)); }
+        }
+
+        /// <summary>当前连接缩略图（Details 面板使用，可空）。</summary>
+        public System.Windows.Media.ImageSource? ConnectionThumbnail
+        {
+            get { return _connectionThumbnail; }
+            private set { _connectionThumbnail = value; OnPropertyChanged(nameof(ConnectionThumbnail)); }
+        }
+
         /// <summary>文件剪贴板是否正在传输，控制进度条可见性。</summary>
         public bool IsClipboardTransferring
         {
@@ -1278,6 +1296,11 @@ namespace EasyRDP.Client.Wpf.ViewModels
                 handshakeRes.Codec, handshakeRes.ScreenWidth, handshakeRes.ScreenHeight);
             _running = true;
             IsConnected = true;
+            // 顶栏/Details 只读摘要（远程界面不再显示连接参数输入）
+            ConnectionSummary = string.IsNullOrWhiteSpace(_username)
+                ? string.Format("{0}:{1}", Host, _port)
+                : string.Format("{0}:{1}  ·  {2}", Host, _port, _username);
+            ConnectionThumbnail = ThumbnailCache.LoadThumbnail(Host);
             SendFileCommand.RaiseCanExecuteChanged();
             // 文件传输：握手 token 打开独立通道；通道建立失败时自动回退主连接
             StartFileTransfer(host, port.ToString(), handshakeRes.SessionToken);
@@ -2575,6 +2598,7 @@ namespace EasyRDP.Client.Wpf.ViewModels
             }
             IsFileTransferVisible = false;
             SendFileCommand.RaiseCanExecuteChanged();
+            ConnectionThumbnail = null;
 
             // 剪贴板文件延迟渲染：断连后不再有数据来源，清掉占位
             ClearPendingFileClipboard("disconnect", true);

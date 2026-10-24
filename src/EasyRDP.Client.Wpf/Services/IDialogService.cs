@@ -13,5 +13,8 @@ namespace EasyRDP.Client.Wpf.Services
 
         /// <summary>重命名连接：返回新的显示名（可能为空串表示恢复 IP）；取消返回 null。</summary>
         string? RenameConnection(RecentConnection current);
+
+        /// <summary>单行文本输入（新建/重命名分组）；取消返回 null。</summary>
+        string? PromptText(string title, string label, string initialValue);
     }
 }

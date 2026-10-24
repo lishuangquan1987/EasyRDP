@@ -58,7 +58,8 @@ namespace EasyRDP.Client.Wpf.Services
                                 Host = GetString(e, "host"),
                                 Port = GetString(e, "port"),
                                 Username = GetString(e, "username"),
-                                Password = SecretProtector.Unprotect(GetString(e, "password")) ?? ""
+                                Password = SecretProtector.Unprotect(GetString(e, "password")) ?? "",
+                                Group = GetString(e, "group")
                             });
                         }
                     }
@@ -106,6 +107,7 @@ namespace EasyRDP.Client.Wpf.Services
                             w.WriteString("port", p.Port ?? "");
                             w.WriteString("username", p.Username ?? "");
                             w.WriteString("password", encryptedPassword ?? "");
+                            w.WriteString("group", p.Group ?? "");
                             w.WriteEndObject();
                         }
                         w.WriteEndArray();

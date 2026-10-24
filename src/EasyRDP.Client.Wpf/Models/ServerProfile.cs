@@ -18,6 +18,9 @@ namespace EasyRDP.Client.Wpf.Models
         /// <summary>登录密码（写入磁盘前经 Windows DPAPI 加密，仅当前用户可解密）。</summary>
         public string Password { get; set; } = "";
 
+        /// <summary>所属分组（空字符串=未分组）。</summary>
+        public string Group { get; set; } = "";
+
         /// <summary>复制一份（避免列表项被外部修改）。</summary>
         public ServerProfile Clone()
         {
@@ -27,7 +30,8 @@ namespace EasyRDP.Client.Wpf.Models
                 Host = Host,
                 Port = Port,
                 Username = Username,
-                Password = Password
+                Password = Password,
+                Group = Group
             };
         }
     }

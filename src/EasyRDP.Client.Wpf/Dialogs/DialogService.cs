@@ -2,6 +2,7 @@ using System.Windows;
 using EasyRDP.Client.Wpf.Models;
 using EasyRDP.Client.Wpf.Services;
 using EasyRDP.Client.Wpf.ViewModels;
+using EasyRDP.Client.Wpf.Views;
 
 namespace EasyRDP.Client.Wpf.Dialogs
 {
@@ -50,6 +51,17 @@ namespace EasyRDP.Client.Wpf.Dialogs
 
             bool? dialogResult = window.ShowDialog();
             return dialogResult == true ? vm.DisplayName : null;
+        }
+
+        /// <summary>单行文本输入框；取消返回 null。</summary>
+        public string? PromptText(string title, string label, string initialValue)
+        {
+            var window = new TextPromptWindow(title, label, initialValue)
+            {
+                Owner = _owner
+            };
+            bool? result = window.ShowDialog();
+            return result == true ? window.Value : null;
         }
     }
 }

@@ -37,66 +37,19 @@
                     <TextBlock Text="EasyRDP Client" Style="{StaticResource BrandTextStyle}"/>
                 </StackPanel>
 
-                <!-- 服务器配置管理：保存/加载多台服务器配置（同名覆盖） -->
-                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,10,0">
-                    <TextBlock Text="PROFILE" Style="{StaticResource ToolbarLabelStyle}" Margin="0,0,6,0"/>
-                    <ComboBox Width="132"
-                              Style="{StaticResource ToolbarComboBoxStyle}"
-                              ItemsSource="{Binding Profiles}"
-                              DisplayMemberPath="Name"
-                              SelectedItem="{Binding SelectedProfile}"
-                              Text="{Binding ProfileName, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                              ToolTip="Select a saved server profile, or type a new name and click Save"/>
-                    <Button Content="Save" Style="{StaticResource ToolbarButtonStyle}" Height="28" Padding="8,0"
-                            Command="{Binding SaveProfileCommand}" Margin="4,0,0,0"
-                            ToolTip="Save the current connection fields as a profile (same name overwrites)"/>
-                    <Button Content="Del" Style="{StaticResource ToolbarButtonStyle}" Height="28" Padding="8,0"
-                            Command="{Binding DeleteProfileCommand}" Margin="2,0,0,0"
-                            ToolTip="Delete the selected profile"/>
+                <!-- 连接摘要（只读）：连接统一从浏览窗口发起，远程界面不再显示 HOST/USER/PASS -->
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,12,0">
+                    <TextBlock Text="SERVER" Style="{StaticResource ToolbarLabelStyle}" Margin="0,0,8,0"/>
+                    <TextBlock Text="{Binding ConnectionSummary}" FontSize="13"
+                               Foreground="{StaticResource ToolbarTextBrush}"
+                               VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
                 </StackPanel>
 
-                <Separator Grid.Column="2" Style="{StaticResource ToolbarSeparatorStyle}"/>
-
-                <!-- Host -->
-                <StackPanel Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,12,0">
-                    <TextBlock Text="HOST" Style="{StaticResource ToolbarLabelStyle}" Margin="0,0,6,0"/>
-                    <TextBox Text="{Binding Host, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                             Style="{StaticResource ToolbarTextBoxStyle}" Width="132"
-                             ToolTip="Server address (IP or hostname)"/>
-                </StackPanel>
-
-                <!-- Port -->
-                <StackPanel Grid.Column="4" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,12,0">
-                    <TextBlock Text="PORT" Style="{StaticResource ToolbarLabelStyle}" Margin="0,0,6,0"/>
-                    <TextBox Text="{Binding Port, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                             Style="{StaticResource ToolbarTextBoxStyle}" Width="64"
-                             ToolTip="Server listening port (default 2000)"/>
-                </StackPanel>
-
-                <!-- Username -->
-                <StackPanel Grid.Column="5" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,12,0">
-                    <TextBlock Text="USER" Style="{StaticResource ToolbarLabelStyle}" Margin="0,0,6,0"/>
-                    <TextBox Text="{Binding Username, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                             Style="{StaticResource ToolbarTextBoxStyle}" Width="96"
-                             ToolTip="Username configured on the server (required)"/>
-                </StackPanel>
-
-                <!-- Password -->
-                <StackPanel Grid.Column="6" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,12,0">
-                    <TextBlock Text="PASS" Style="{StaticResource ToolbarLabelStyle}" Margin="0,0,6,0"/>
-                    <PasswordBox Style="{StaticResource ToolbarPasswordBoxStyle}" Width="104"
-                                 behaviors:PasswordBoxBehavior.BindPassword="True"
-                                 behaviors:PasswordBoxBehavior.Password="{Binding Password, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                 ToolTip="Password configured on the server (required)"/>
-                </StackPanel>
-
-                <!-- 主操作按钮：连接/断开 -->
+                <!-- 主操作按钮：只保留断开（连接入口统一在浏览窗口） -->
                 <StackPanel Grid.Column="8" Orientation="Horizontal" VerticalAlignment="Center">
-                    <Button Content="Connect" Style="{StaticResource PrimaryButtonStyle}"
-                            Command="{Binding ConnectCommand}" Margin="0,0,6,0"
-                            ToolTip="Connect using the HOST / PORT / USER / PASS above"/>
                     <Button Content="Disconnect" Style="{StaticResource DangerButtonStyle}"
-                            Command="{Binding StopCommand}"/>
+                            Command="{Binding StopCommand}"
+                            ToolTip="Disconnect the current session (the window stays open)"/>
                 </StackPanel>
             </Grid>
         </Border>
@@ -287,6 +240,23 @@
                             <TextBlock Grid.Row="3" Grid.Column="1" Text="{Binding RemoteResolutionText}" Foreground="White" FontSize="12" TextWrapping="Wrap"/>
                             <TextBlock Grid.Row="4" Grid.Column="0" Text="Scaling" Foreground="#B0FFFFFF" FontSize="12"/>
                             <TextBlock Grid.Row="4" Grid.Column="1" Text="Auto (Uniform)" Foreground="White" FontSize="12"/>
+                        </Grid>
+
+                        <!-- ═══ 连接 ═══ -->
+                        <TextBlock Text="Session" Foreground="{StaticResource AccentBrush}"
+                                   FontSize="13" FontWeight="Bold" Margin="0,0,0,6"/>
+                        <Grid Margin="0,0,0,12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="56"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition/><RowDefinition/>
+                            </Grid.RowDefinitions>
+                            <TextBlock Grid.Row="0" Grid.Column="0" Text="Server" Foreground="#B0FFFFFF" FontSize="12"/>
+                            <TextBlock Grid.Row="0" Grid.Column="1" Text="{Binding ConnectionSummary}" Foreground="White" FontSize="12" TextTrimming="CharacterEllipsis"/>
+                            <TextBlock Grid.Row="1" Grid.Column="0" Text="Zoom" Foreground="#B0FFFFFF" FontSize="12"/>
+                            <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding ZoomModeText}" Foreground="White" FontSize="12"/>
                         </Grid>
 
                         <!-- ═══ 系统性能 ═══ -->

@@ -16,6 +16,8 @@ namespace EasyRDP.Client.Wpf.ViewModels
     public class HostBrowseWindowViewModel : INotifyPropertyChanged
     {
         private readonly RecentConnectionStore _store;
+        private readonly ConnectionProfileStore _profileStore = new ConnectionProfileStore();
+        private readonly ConnectionGroupStore _groupStore = new ConnectionGroupStore();
         private readonly IDialogService _dialogs;
         private readonly IUserNotifier _notifier;
         private RecentConnection? _selected;
@@ -23,6 +25,9 @@ namespace EasyRDP.Client.Wpf.ViewModels
 
         /// <summary>最近连接列表（缩略图网格数据源）。</summary>
         public ObservableCollection<RecentConnection> Connections { get; } = new ObservableCollection<RecentConnection>();
+
+        /// <summary>连接分组树（Recent / 各分组 / 未分组）。</summary>
+        public ObservableCollection<ConnectionTreeNode> Nodes { get; } = new ObservableCollection<ConnectionTreeNode>();
 
         /// <summary>地址输入框文本（绑定到 XAML 地址栏）。</summary>
         public string AddressText
@@ -66,6 +71,30 @@ namespace EasyRDP.Client.Wpf.ViewModels
         /// <summary>Sign in...（视觉占位）。</summary>
         public RelayCommand SignInCommand { get; }
 
+        /// <summary>新建分组。</summary>
+        public RelayCommand NewGroupCommand { get; }
+
+        /// <summary>连接树中的连接。</summary>
+        public RelayCommand<ConnectionTreeNode> ConnectNodeCommand { get; }
+
+        /// <summary>编辑树中的连接。</summary>
+        public RelayCommand<ConnectionTreeNode> EditNodeCommand { get; }
+
+        /// <summary>重命名树中的连接。</summary>
+        public RelayCommand<ConnectionTreeNode> RenameNodeCommand { get; }
+
+        /// <summary>删除树中的连接。</summary>
+        public RelayCommand<ConnectionTreeNode> DeleteNodeCommand { get; }
+
+        /// <summary>在分组内新建连接（参数为分组节点）。</summary>
+        public RelayCommand<ConnectionTreeNode> NewConnectionInGroupCommand { get; }
+
+        /// <summary>重命名分组。</summary>
+        public RelayCommand<ConnectionTreeNode> RenameGroupCommand { get; }
+
+        /// <summary>删除分组（组内连接移入未分组）。</summary>
+        public RelayCommand<ConnectionTreeNode> DeleteGroupCommand { get; }
+
         // ====== 视图交互事件（由 View 订阅，ViewModel 不直接引用 Window） ======
 
         /// <summary>请求打开控制窗口并连接（参数为连接目标）。</summary>
@@ -93,10 +122,20 @@ namespace EasyRDP.Client.Wpf.ViewModels
             ExitCommand = new RelayCommand(() => RequestClose?.Invoke());
             AboutCommand = new RelayCommand(() =>
                 _notifier.ShowInfo("EasyRDP Client\nRealVNC Viewer 风格浏览窗口", "About"));
+            NewGroupCommand = new RelayCommand(NewGroup);
+            ConnectNodeCommand = new RelayCommand<ConnectionTreeNode>(ConnectNode);
+            EditNodeCommand = new RelayCommand<ConnectionTreeNode>(EditNode);
+            RenameNodeCommand = new RelayCommand<ConnectionTreeNode>(RenameNode);
+            DeleteNodeCommand = new RelayCommand<ConnectionTreeNode>(DeleteNode);
+            NewConnectionInGroupCommand = new RelayCommand<ConnectionTreeNode>(NewConnectionInGroup);
+            RenameGroupCommand = new RelayCommand<ConnectionTreeNode>(RenameGroup);
+            DeleteGroupCommand = new RelayCommand<ConnectionTreeNode>(DeleteGroup);
+
             SignInCommand = new RelayCommand(() =>
                 _notifier.ShowInfo("账号登录为视觉占位（与 RealVNC 布局一致），后续版本接入。", "Sign in"));
 
             ReloadConnections();
+            ReloadTree();
         }
 
         // ====== 列表加载与刷新 ======
@@ -113,6 +152,7 @@ namespace EasyRDP.Client.Wpf.ViewModels
                 Connections.Add(r);
             }
             _selected = null;
+            ReloadTree();
         }
 
         /// <summary>静默刷新所有卡片缩略图图像源（不重建列表，不打断选中）。</summary>
@@ -123,6 +163,330 @@ namespace EasyRDP.Client.Wpf.ViewModels
                 var img = ThumbnailCache.LoadThumbnail(r.Host);
                 if (img != null)
                     r.ThumbnailSource = img;
+            }
+        }
+
+        // ====== 分组树 ======
+
+        /// <summary>
+        /// 重建分组树：Recent（最近使用，虚拟）→ 具名分组 → 未分组。
+        /// 分组名单独持久化（允许空分组），连接的分组字段存在 connections.json。
+        /// </summary>
+        public void ReloadTree()
+        {
+            Nodes.Clear();
+
+            string lastProfileName;
+            var profiles = _profileStore.Load(out lastProfileName);
+            var groupNames = _groupStore.Load();
+
+            // 1) Recent（虚拟分组，只读）
+            var recents = _store.Load()
+                .OrderByDescending(r => r.LastConnectedUtc)
+                .Take(10)
+                .ToList();
+            if (recents.Count > 0)
+            {
+                var recentNode = new ConnectionTreeNode
+                {
+                    IsGroup = true,
+                    IsRecentGroup = true,
+                    GroupName = "Recent",
+                    DisplayName = "Recent",
+                    Detail = recents.Count + " recent",
+                    IsExpanded = true
+                };
+                foreach (var r in recents)
+                {
+                    recentNode.Children.Add(new ConnectionTreeNode
+                    {
+                        DisplayName = string.IsNullOrWhiteSpace(r.DisplayName) ? r.Host : r.DisplayName,
+                        Detail = r.Host + ":" + (string.IsNullOrWhiteSpace(r.Port) ? "2000" : r.Port),
+                        ThumbnailSource = ThumbnailCache.LoadThumbnail(r.Host),
+                        Recent = r
+                    });
+                }
+                Nodes.Add(recentNode);
+            }
+
+            // 2) 具名分组：分组名清单 + profiles 中出现过的分组
+            var ordered = new List<string>(groupNames);
+            foreach (var p in profiles)
+            {
+                string g = (p.Group ?? "").Trim();
+                if (g.Length > 0 && !ordered.Contains(g))
+                    ordered.Add(g);
+            }
+            ordered.Sort(StringComparer.CurrentCultureIgnoreCase);
+            foreach (string groupName in ordered)
+            {
+                var groupNode = new ConnectionTreeNode
+                {
+                    IsGroup = true,
+                    GroupName = groupName,
+                    DisplayName = groupName,
+                    IsExpanded = true
+                };
+                foreach (var p in profiles.Where(x => string.Equals((x.Group ?? "").Trim(), groupName, StringComparison.Ordinal)))
+                    groupNode.Children.Add(CreateProfileNode(p));
+                groupNode.Detail = groupNode.Children.Count + " connection(s)";
+                Nodes.Add(groupNode);
+            }
+
+            // 3) 未分组
+            var ungrouped = profiles.Where(x => string.IsNullOrWhiteSpace(x.Group)).ToList();
+            if (ungrouped.Count > 0)
+            {
+                var ungroupedNode = new ConnectionTreeNode
+                {
+                    IsGroup = true,
+                    IsUngrouped = true,
+                    GroupName = "",
+                    DisplayName = "Ungrouped",
+                    Detail = ungrouped.Count + " connection(s)",
+                    IsExpanded = true
+                };
+                foreach (var p in ungrouped)
+                    ungroupedNode.Children.Add(CreateProfileNode(p));
+                Nodes.Add(ungroupedNode);
+            }
+        }
+
+        /// <summary>把保存的连接配置包装成树节点（含缩略图）。</summary>
+        private static ConnectionTreeNode CreateProfileNode(ServerProfile p)
+        {
+            return new ConnectionTreeNode
+            {
+                DisplayName = string.IsNullOrWhiteSpace(p.Name) ? p.Host : p.Name,
+                Detail = p.Host + ":" + (string.IsNullOrWhiteSpace(p.Port) ? "2000" : p.Port),
+                ThumbnailSource = ThumbnailCache.LoadThumbnail(p.Host),
+                Profile = p,
+                GroupName = p.Group ?? ""
+            };
+        }
+
+        /// <summary>连接树节点（Recent 条目或保存的连接配置）。</summary>
+        private void ConnectNode(ConnectionTreeNode node)
+        {
+            if (node == null || node.IsGroup) return;
+            if (node.Recent != null)
+            {
+                ConnectRequested?.Invoke(node.Recent);
+                return;
+            }
+            var p = node.Profile;
+            if (p == null || string.IsNullOrWhiteSpace(p.Host)) return;
+            ConnectRequested?.Invoke(new RecentConnection
+            {
+                Host = p.Host.Trim(),
+                Port = string.IsNullOrWhiteSpace(p.Port) ? "2000" : p.Port.Trim(),
+                Username = p.Username,
+                Password = p.Password,
+                DisplayName = string.IsNullOrWhiteSpace(p.Name) ? null : p.Name,
+                SavePassword = true
+            });
+        }
+
+        /// <summary>编辑保存的连接（保留分组）。</summary>
+        private void EditNode(ConnectionTreeNode node)
+        {
+            var p = node?.Profile;
+            if (p == null) return;
+
+            var model = new RecentConnection
+            {
+                Host = p.Host,
+                Port = string.IsNullOrWhiteSpace(p.Port) ? "2000" : p.Port,
+                Username = p.Username,
+                Password = p.Password,
+                DisplayName = p.Name,
+                SavePassword = true
+            };
+            var result = _dialogs.EditConnection(model);
+            if (result == null || string.IsNullOrWhiteSpace(result.Host)) return;
+
+            string oldHost = p.Host ?? "";
+            string last;
+            var list = _profileStore.Load(out last);
+            var item = list.FirstOrDefault(x => string.Equals(x.Name, p.Name, StringComparison.Ordinal)
+                                             && string.Equals(x.Host, oldHost, StringComparison.OrdinalIgnoreCase));
+            if (item == null) return;
+
+            bool hostChanged = !string.Equals(item.Host, result.Host.Trim(), StringComparison.OrdinalIgnoreCase);
+            item.Host = result.Host.Trim();
+            item.Port = string.IsNullOrWhiteSpace(result.Port) ? "2000" : result.Port.Trim();
+            item.Username = result.Username ?? "";
+            item.Password = result.Password ?? "";
+            item.Name = string.IsNullOrWhiteSpace(result.DisplayName) ? item.Host : result.DisplayName.Trim();
+            if (hostChanged)
+                ThumbnailCache.DeleteThumbnail(oldHost);
+            _profileStore.Save(list, last);
+            ReloadTree();
+        }
+
+        /// <summary>重命名保存的连接。</summary>
+        private void RenameNode(ConnectionTreeNode node)
+        {
+            var p = node?.Profile;
+            if (p == null) return;
+            string newName = _dialogs.PromptText("Rename Connection", "Name", p.Name);
+            if (newName == null) return;
+            string last;
+            var list = _profileStore.Load(out last);
+            var item = list.FirstOrDefault(x => string.Equals(x.Name, p.Name, StringComparison.Ordinal)
+                                             && string.Equals(x.Host, p.Host, StringComparison.OrdinalIgnoreCase));
+            if (item == null) return;
+            item.Name = string.IsNullOrWhiteSpace(newName) ? item.Host : newName.Trim();
+            _profileStore.Save(list, last);
+            ReloadTree();
+        }
+
+        /// <summary>删除保存的连接（含缩略图缓存）。</summary>
+        private void DeleteNode(ConnectionTreeNode node)
+        {
+            var p = node?.Profile;
+            if (p != null)
+            {
+                string last;
+                var list = _profileStore.Load(out last);
+                var item = list.FirstOrDefault(x => string.Equals(x.Name, p.Name, StringComparison.Ordinal)
+                                                 && string.Equals(x.Host, p.Host, StringComparison.OrdinalIgnoreCase));
+                if (item != null)
+                {
+                    list.Remove(item);
+                    _profileStore.Save(list, last);
+                }
+                ThumbnailCache.DeleteThumbnail(p.Host);
+                ReloadTree();
+                return;
+            }
+            if (node?.Recent != null)
+            {
+                _store.Remove(node.Recent.Host);
+                ThumbnailCache.DeleteThumbnail(node.Recent.Host);
+                ReloadConnections();
+            }
+        }
+
+        /// <summary>在指定分组内新建连接并立即连接。</summary>
+        private void NewConnectionInGroup(ConnectionTreeNode groupNode)
+        {
+            var result = _dialogs.EditConnection(new RecentConnection { Host = "", Port = "2000" });
+            if (result == null || string.IsNullOrWhiteSpace(result.Host)) return;
+
+            string groupName = groupNode != null && groupNode.IsGroup && !groupNode.IsRecentGroup
+                ? groupNode.GroupName : "";
+
+            string last;
+            var list = _profileStore.Load(out last);
+            var profile = new ServerProfile
+            {
+                Name = string.IsNullOrWhiteSpace(result.DisplayName) ? result.Host.Trim() : result.DisplayName.Trim(),
+                Host = result.Host.Trim(),
+                Port = string.IsNullOrWhiteSpace(result.Port) ? "2000" : result.Port.Trim(),
+                Username = result.Username ?? "",
+                Password = result.Password ?? "",
+                Group = groupName
+            };
+            var existing = list.FirstOrDefault(x => string.Equals(x.Name, profile.Name, StringComparison.Ordinal));
+            if (existing != null)
+                list.Remove(existing);
+            list.Add(profile);
+            _profileStore.Save(list, last);
+            if (groupName.Length > 0)
+                EnsureGroup(groupName);
+
+            ReloadTree();
+            ConnectRequested?.Invoke(ToConnection(result));
+        }
+
+        /// <summary>新建空分组。</summary>
+        private void NewGroup()
+        {
+            string name = _dialogs.PromptText("New Group", "Group name", "");
+            if (string.IsNullOrWhiteSpace(name)) return;
+            EnsureGroup(name.Trim());
+            ReloadTree();
+        }
+
+        /// <summary>重命名分组（同步更新组内连接）。</summary>
+        private void RenameGroup(ConnectionTreeNode node)
+        {
+            if (node == null || !node.IsGroup || node.IsRecentGroup) return;
+            string name = _dialogs.PromptText("Rename Group", "Group name", node.GroupName);
+            if (string.IsNullOrWhiteSpace(name)) return;
+            string newName = name.Trim();
+            if (string.Equals(newName, node.GroupName, StringComparison.Ordinal)) return;
+
+            var groups = _groupStore.Load();
+            groups.Remove(node.GroupName);
+            if (!groups.Contains(newName)) groups.Add(newName);
+            _groupStore.Save(groups);
+
+            string last;
+            var list = _profileStore.Load(out last);
+            foreach (var p in list)
+            {
+                if (string.Equals((p.Group ?? "").Trim(), node.GroupName, StringComparison.Ordinal))
+                    p.Group = newName;
+            }
+            _profileStore.Save(list, last);
+            ReloadTree();
+        }
+
+        /// <summary>删除分组（组内连接移入未分组）。</summary>
+        private void DeleteGroup(ConnectionTreeNode node)
+        {
+            if (node == null || !node.IsGroup || node.IsRecentGroup) return;
+
+            var groups = _groupStore.Load();
+            groups.Remove(node.GroupName);
+            _groupStore.Save(groups);
+
+            string last;
+            var list = _profileStore.Load(out last);
+            bool changed = false;
+            foreach (var p in list)
+            {
+                if (string.Equals((p.Group ?? "").Trim(), node.GroupName, StringComparison.Ordinal))
+                {
+                    p.Group = "";
+                    changed = true;
+                }
+            }
+            if (changed)
+                _profileStore.Save(list, last);
+            ReloadTree();
+        }
+
+        /// <summary>把连接移动到指定分组（拖放调用）；groupName 为空表示未分组。</summary>
+        public void MoveProfileToGroup(ServerProfile profile, string groupName)
+        {
+            if (profile == null) return;
+            string target = (groupName ?? "").Trim();
+            if (string.Equals((profile.Group ?? "").Trim(), target, StringComparison.Ordinal)) return;
+
+            string last;
+            var list = _profileStore.Load(out last);
+            var item = list.FirstOrDefault(x => string.Equals(x.Name, profile.Name, StringComparison.Ordinal)
+                                             && string.Equals(x.Host, profile.Host, StringComparison.OrdinalIgnoreCase));
+            if (item == null) return;
+            item.Group = target;
+            _profileStore.Save(list, last);
+            if (target.Length > 0)
+                EnsureGroup(target);
+            ReloadTree();
+        }
+
+        /// <summary>确保分组名存在（不存在则加入 groups.json）。</summary>
+        private void EnsureGroup(string groupName)
+        {
+            if (string.IsNullOrWhiteSpace(groupName)) return;
+            var groups = _groupStore.Load();
+            if (!groups.Contains(groupName))
+            {
+                groups.Add(groupName);
+                _groupStore.Save(groups);
             }
         }
 
