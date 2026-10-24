@@ -430,7 +430,10 @@ namespace EasyRDP.Client.Wpf.ViewModels
             return false;
         }
 
-        /// <summary>把发现到的服务端添加为连接并立即连接（口令模式需补密码）。</summary>
+        /// <summary>
+        /// 发现卡片 → 打开新建连接表单（预填 IP / 端口，名称与凭据由用户填写），
+        /// 确认后与「+ Connection」完全一致的逻辑：保存连接信息并直接连接。
+        /// </summary>
         private void AddDiscovered(EasyRDP.Core.Discovery.DiscoveredServer server)
         {
             if (server == null) return;
@@ -439,36 +442,16 @@ namespace EasyRDP.Client.Wpf.ViewModels
             {
                 Host = server.Address != null ? server.Address.ToString() : "",
                 Port = server.TcpPort.ToString(),
-                DisplayName = string.IsNullOrWhiteSpace(server.Name) ? null : server.Name
+                // 名称留空：由用户填写（发现信息只有计算机名，未必是用户想要的连接名）
+                DisplayName = null
             };
             var result = _dialogs.EditConnection(model);
             if (result == null || string.IsNullOrWhiteSpace(result.Host)) return;
 
-            string host = result.Host.Trim();
-            int port = ParsePort(result.Port);
-            string last;
-            var list = _profileStore.Load(out last);
-
-            var existing = list.FirstOrDefault(p =>
-                string.Equals((p.Host ?? "").Trim(), host, StringComparison.OrdinalIgnoreCase)
-                && ParsePort(p.Port) == port);
-            if (existing != null)
-                list.Remove(existing);
-
-            list.Add(new ServerProfile
-            {
-                Name = string.IsNullOrWhiteSpace(result.DisplayName) ? host : result.DisplayName.Trim(),
-                Host = host,
-                Port = string.IsNullOrWhiteSpace(result.Port) ? "2000" : result.Port.Trim(),
-                Username = result.Username ?? "",
-                Password = result.Password ?? "",
-                Group = ""
-            });
-            _profileStore.Save(list, last);
-
+            SaveProfile(result, "");
             Discovered.Remove(server);
             ReloadTree();
-            OnPropertyChanged(nameof(DiscoveryStatusText));
+            SelectProfileByEndpoint(result.Host.Trim(), ParsePort(result.Port));
             ConnectRequested?.Invoke(ToConnection(result));
         }
 
@@ -829,6 +812,7 @@ namespace EasyRDP.Client.Wpf.ViewModels
             SaveProfile(result, groupName);
             ReloadTree();
             SelectProfileByEndpoint(result.Host.Trim(), ParsePort(result.Port));
+            ConnectRequested?.Invoke(ToConnection(result));
         }
 
         /// <summary>新建空分组。</summary>
@@ -936,11 +920,12 @@ namespace EasyRDP.Client.Wpf.ViewModels
             SaveProfile(result, "");
             ReloadTree();
             SelectProfileByEndpoint(result.Host.Trim(), ParsePort(result.Port));
+            // 保存后直接进入远程窗口（连接信息已落盘，可在树中复用）
+            ConnectRequested?.Invoke(ToConnection(result));
         }
 
         /// <summary>
         /// 把编辑结果保存为「连接信息」（connections.json），按 host:port 去重。
-        /// 只保存不连接——连接入口保持"先有连接信息再连接"的约定。
         /// </summary>
         private void SaveProfile(ConnectionEditResult result, string groupName)
         {
