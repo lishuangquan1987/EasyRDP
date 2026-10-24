@@ -365,7 +365,7 @@
         <!-- ====== 连接加载层（D19）：连接成功、首帧渲染前显示转圈等待，
               避免连接后短暂黑屏；首帧写入后 ShowConnectingOverlay=false 自动隐藏 ====== -->
         <Grid Grid.Row="2" Background="#CC0B1220"
-              IsHitTestVisible="False"
+              IsHitTestVisible="{Binding IsReconnecting}"
               Visibility="{Binding ShowConnectingOverlay, Converter={StaticResource BoolToVis}}">
             <Grid.Triggers>
                 <EventTrigger RoutedEvent="FrameworkElement.Loaded">
@@ -392,8 +392,12 @@
                         </Ellipse.RenderTransform>
                     </Ellipse>
                 </Grid>
-                <TextBlock Text="Connecting, waiting for the first frame…" FontSize="15" Foreground="#D0DAE2"
+                <TextBlock Text="{Binding ConnectingMessage}" FontSize="15" Foreground="#D0DAE2"
                            HorizontalAlignment="Center" Margin="0,14,0,0"/>
+                <Button Content="Cancel" Width="96" Height="30" Margin="0,16,0,0"
+                        HorizontalAlignment="Center"
+                        Command="{Binding CancelReconnectCommand}"
+                        Visibility="{Binding IsReconnecting, Converter={StaticResource BoolToVis}}"/>
             </StackPanel>
         </Grid>
 

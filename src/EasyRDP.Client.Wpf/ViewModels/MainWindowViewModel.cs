@@ -65,6 +65,20 @@ namespace EasyRDP.Client.Wpf.ViewModels
         private int _frameRate;
         private string _codecName = "—";
         private WriteableBitmap? _renderBitmap;
+
+        // ── 自动重连 ──
+        // 非用户触发的断线（网络抖动/服务端重启）自动重连，退避 1/2/4/8/10… 秒。
+        private bool _reconnecting;
+        private int _reconnectAttempt;
+        private CancellationTokenSource? _reconnectCts;
+        // 当前是否处于"重连尝试"中：用于抑制重复错误弹框（重连失败只更新遮罩文字）
+        private bool _isReconnectAttempt;
+        // 最近一次连接失败是否值得重试（认证失败/版本不符/被拒绝 → 不重试）
+        private bool _lastOutcomeRetryable = true;
+        // 用户取消连接/重连：在途的握手完成后不再对外呈现在线状态
+        private bool _cancelConnectRequested;
+        private const int MaxReconnectDelayMs = 10000;
+        private string _connectingMessage = "Connecting, waiting for the first frame…";
         // 远程屏幕尺寸（握手时记录）：用于把远程光标坐标映射到本地显示区
         private int _remoteScreenWidth;
         private int _remoteScreenHeight;
@@ -132,6 +146,7 @@ namespace EasyRDP.Client.Wpf.ViewModels
             _notifier = new WpfUserNotifier();
             ConnectCommand = new RelayCommand(async () => await ConnectSafelyAsync(), () => !_running);
             StopCommand = new RelayCommand(Stop, () => _running);
+            CancelReconnectCommand = new RelayCommand(CancelReconnect, () => _reconnecting);
             FullscreenCommand = new RelayCommand(ToggleFullscreen);
             LockCommand = new RelayCommand(SendLockKey);
             AltTabCommand = new RelayCommand(SendAltTab);
@@ -504,10 +519,35 @@ namespace EasyRDP.Client.Wpf.ViewModels
             get { return _isConnected && _isFirstFrameRendered; }
         }
 
-        /// <summary>连接加载层（转圈等待）可见性：连接成功但首帧尚未渲染。</summary>
+        /// <summary>连接加载层（转圈等待）可见性：首帧尚未渲染，或正在自动重连。</summary>
         public bool ShowConnectingOverlay
         {
-            get { return _isConnected && !_isFirstFrameRendered; }
+            get { return _reconnecting || (_isConnected && !_isFirstFrameRendered); }
+        }
+
+        /// <summary>加载层文字（连接中 / 等待服务端审批 / 正在重连）。</summary>
+        public string ConnectingMessage
+        {
+            get { return _connectingMessage; }
+            set
+            {
+                _connectingMessage = value ?? "";
+                OnPropertyChanged(nameof(ConnectingMessage));
+            }
+        }
+
+        /// <summary>是否正在自动重连（加载层显示取消按钮与重连提示）。</summary>
+        public bool IsReconnecting
+        {
+            get { return _reconnecting; }
+            private set
+            {
+                if (_reconnecting == value) return;
+                _reconnecting = value;
+                OnPropertyChanged(nameof(IsReconnecting));
+                OnPropertyChanged(nameof(ShowConnectingOverlay));
+                CancelReconnectCommand.RaiseCanExecuteChanged();
+            }
         }
 
         public string FrameSize
@@ -626,6 +666,8 @@ namespace EasyRDP.Client.Wpf.ViewModels
         }
 
         public RelayCommand ConnectCommand { get; }
+        /// <summary>取消自动重连（加载层上的 Cancel 按钮）。</summary>
+        public RelayCommand CancelReconnectCommand { get; }
         public RelayCommand StopCommand { get; }
         public RelayCommand FullscreenCommand { get; }
         public RelayCommand LockCommand { get; }
@@ -867,7 +909,13 @@ namespace EasyRDP.Client.Wpf.ViewModels
         {
             try
             {
-                await ConnectAsync();
+                _cancelConnectRequested = false;
+                bool ok = await ConnectAsync(false);
+                if (!ok)
+                {
+                    // 失败路径可能留下半开连接/会话对象，统一清理（不触发自动重连）
+                    StopInternal(false);
+                }
             }
             catch (Exception ex)
             {
@@ -877,8 +925,7 @@ namespace EasyRDP.Client.Wpf.ViewModels
                 // 尚未创建任何连接对象时只需复位忙碌状态。
                 if (_transport != null || _streamSession != null)
                 {
-                    _disconnecting = false;
-                    Stop();
+                    StopInternal(false);
                 }
                 else
                 {
@@ -887,21 +934,25 @@ namespace EasyRDP.Client.Wpf.ViewModels
             }
         }
 
-        private async Task ConnectAsync()
+        private async Task<bool> ConnectAsync(bool isReconnect = false)
         {
-            if (_running) return;
+            if (_running) return false;
             _disconnecting = false;
+            _isReconnectAttempt = isReconnect;
+            _lastOutcomeRetryable = true;
             // D19：新连接先重置首帧状态，首帧渲染前显示"连接加载层"而非残留画面/黑屏
             IsFirstFrameRendered = false;
-            SetBusy(true, "Connecting...");
+            if (!isReconnect) ConnectingMessage = "Connecting, waiting for the first frame…";
+            SetBusy(true, isReconnect ? "Reconnecting…" : "Connecting...");
 
             string host = _host.Trim();
             if (!int.TryParse(_port, out int port))
                 port = DefaultPort;
             if (string.IsNullOrEmpty(host))
             {
+                _lastOutcomeRetryable = false;
                 SetBusy(false, "Host is empty");
-                return;
+                return false;
             }
 
             var connector = new TcpTransportConnector();
@@ -916,11 +967,15 @@ namespace EasyRDP.Client.Wpf.ViewModels
             {
                 Logger.Warn("Connection to {0}:{1} failed", host, port);
                 SetBusy(false, "Connection failed");
-                // 连接不成功必须有明确弹框反馈（只改状态栏文字用户看不到）
-                _notifier.ShowError(
-                    string.Format("Unable to connect to {0}:{1}.\nPlease check:\n· the server is running (click Start)\n· the IP address and port are correct\n· the network is reachable", host, port),
-                    "Connection Failed");
-                return;
+                // 连接不成功必须有明确弹框反馈（只改状态栏文字用户看不到）；
+                // 自动重连期间不弹框，避免每次退避都打断用户。
+                if (!isReconnect)
+                {
+                    _notifier.ShowError(
+                        string.Format("Unable to connect to {0}:{1}.\nPlease check:\n· the server is running (click Start)\n· the IP address and port are correct\n· the network is reachable", host, port),
+                        "Connection Failed");
+                }
+                return false;
             }
             _transport = connectedTransport;
             Logger.Info("TCP connected to {0}:{1}, sending handshake", host, port);
@@ -962,10 +1017,17 @@ namespace EasyRDP.Client.Wpf.ViewModels
                 _dispatcher.BeginInvoke(() =>
                 {
                     if (_disconnecting) return;
-                    SetBusy(false, "Stream error: " + message);
-                    // 连接中/已连接后流错误也要弹框告知，不能静默断开
-                    _notifier.ShowError("Connection lost: " + message, "Connection Error");
-                    Stop();
+                    if (!_running)
+                    {
+                        // 首次连接阶段失败：弹框告知（此时没有可恢复的会话）
+                        SetBusy(false, "Stream error: " + message);
+                        if (!_isReconnectAttempt)
+                            _notifier.ShowError("Connection lost: " + message, "Connection Error");
+                        StopInternal(false);
+                        return;
+                    }
+                    // 已建立会话后出错：进入自动重连（不弹框，遮罩提示）
+                    OnConnectionLost("stream error: " + message);
                 });
             };
 
@@ -990,6 +1052,7 @@ namespace EasyRDP.Client.Wpf.ViewModels
             if (signaled == WaitHandle.WaitTimeout)
             {
                 StatusText = "Waiting for the server to accept the connection…";
+                ConnectingMessage = "Waiting for the server to accept the connection…";
                 Logger.Info("No handshake reply yet — server may be awaiting operator approval");
                 signaled = await Task.Run(() => WaitHandle.WaitAny(
                     new WaitHandle[] { challengeSignal.WaitHandle, handshakeSignal.WaitHandle },
@@ -1008,13 +1071,17 @@ namespace EasyRDP.Client.Wpf.ViewModels
                 {
                     // 服务端要求口令但用户没填：直接给出可操作提示（发送空口令证明没有意义）
                     _transport.MessageReceived -= onHandshakeMsg;
+                    _lastOutcomeRetryable = false;
                     SetBusy(false, "Password required");
-                    _notifier.ShowError(
-                        "This server requires a password.\nEnter the password configured on the server and try again.",
-                        "Authentication Required");
+                    if (!isReconnect)
+                    {
+                        _notifier.ShowError(
+                            "This server requires a password.\nEnter the password configured on the server and try again.",
+                            "Authentication Required");
+                    }
                     _streamSession?.Stop();
                     _transport.Disconnect();
-                    return;
+                    return false;
                 }
 
                 // 口令不上网：PBKDF2 派生密钥 + 对两个随机数做 HMAC-SHA256
@@ -1035,12 +1102,15 @@ namespace EasyRDP.Client.Wpf.ViewModels
                     _transport.MessageReceived -= onHandshakeMsg;
                     Logger.Warn("Handshake proof timeout after {0}ms", HandshakeTimeoutMs);
                     SetBusy(false, "Handshake timeout");
-                    _notifier.ShowError(
-                        string.Format("Handshake with {0}:{1} timed out while authenticating.", host, port),
-                        "Handshake Timeout");
+                    if (!isReconnect)
+                    {
+                        _notifier.ShowError(
+                            string.Format("Handshake with {0}:{1} timed out while authenticating.", host, port),
+                            "Handshake Timeout");
+                    }
                     _streamSession?.Stop();
                     _transport.Disconnect();
-                    return;
+                    return false;
                 }
                 gotResponse = true;
             }
@@ -1051,12 +1121,15 @@ namespace EasyRDP.Client.Wpf.ViewModels
             {
                 Logger.Warn("Handshake timeout (challenge={0}, response={1})", gotChallenge, gotResponse);
                 SetBusy(false, "Handshake timeout");
-                _notifier.ShowError(
-                    string.Format("Handshake with {0}:{1} timed out.\nPlease verify the server version and credentials.", host, port),
-                    "Handshake Timeout");
+                if (!isReconnect)
+                {
+                    _notifier.ShowError(
+                        string.Format("Handshake with {0}:{1} timed out.\nPlease verify the server version and credentials.", host, port),
+                        "Handshake Timeout");
+                }
                 _streamSession?.Stop();
                 _transport.Disconnect();
-                return;
+                return false;
             }
 
             var handshakeRes = HandshakeRes.Unpack(handshakeResponse.Data);
@@ -1065,6 +1138,9 @@ namespace EasyRDP.Client.Wpf.ViewModels
             if (handshakeRes.Result != HandshakeResult.Success)
             {
                 Logger.Warn("Handshake rejected: {0}", handshakeRes.Result);
+                // 忙碌/内部错误可重试；认证失败、被拒绝、版本不符需用户介入
+                _lastOutcomeRetryable = handshakeRes.Result == HandshakeResult.ServerBusy
+                    || handshakeRes.Result == HandshakeResult.InternalError;
                 SetBusy(false, "Handshake failed: " + handshakeRes.Result);
                 // 认证/版本/审批失败给出可操作的提示（地址栏直连最易踩坑）
                 string reason;
@@ -1086,12 +1162,28 @@ namespace EasyRDP.Client.Wpf.ViewModels
                         reason = handshakeRes.Result.ToString();
                         break;
                 }
-                _notifier.ShowError(
-                    string.Format("Server {0}:{1} rejected the connection: {2}", host, port, reason),
-                    "Connection Failed");
+                if (!isReconnect)
+                {
+                    _notifier.ShowError(
+                        string.Format("Server {0}:{1} rejected the connection: {2}", host, port, reason),
+                        "Connection Failed");
+                }
+                else
+                {
+                    StatusText = "Reconnect failed: " + reason;
+                }
                 _streamSession?.Stop();
                 _transport.Disconnect();
-                return;
+                return false;
+            }
+
+            // 用户已取消（关闭窗口/取消重连）：握手虽然成功也不再建立会话
+            if (_cancelConnectRequested)
+            {
+                Logger.Info("Connect canceled by user after handshake — aborting");
+                _streamSession?.Stop();
+                _transport?.Disconnect();
+                return false;
             }
 
             // 初始化渲染管线
@@ -1157,14 +1249,14 @@ namespace EasyRDP.Client.Wpf.ViewModels
             CodecName = handshakeRes.Codec.ToString();
             FrameSize = string.Format("{0}x{1}", handshakeRes.ScreenWidth, handshakeRes.ScreenHeight);
 
-            // 监听断连事件：服务端断开时自动清理状态
+            // 监听断连事件：非用户触发的断开进入自动重连
             EventHandler? onDisconnected = null;
             onDisconnected = (s, ev) =>
             {
                 if (_disconnecting) return; // 防止重入
                 _transport.Disconnected -= onDisconnected;
                 // BeginInvoke：不阻塞传输接收线程，避免 Stop 期间 Join 与接收线程互等
-                _dispatcher.BeginInvoke(() => Stop());
+                _dispatcher.BeginInvoke(() => OnConnectionLost("transport closed"));
             };
             _transport.Disconnected += onDisconnected;
 
@@ -1248,6 +1340,12 @@ namespace EasyRDP.Client.Wpf.ViewModels
             StatusText = string.Format("Connected — {0}x{1}",
                 handshakeRes.ScreenWidth, handshakeRes.ScreenHeight);
             UpdateCommandState();
+            // 连接成功：复位重连上下文（重连循环据此结束）
+            _isReconnectAttempt = false;
+            _lastOutcomeRetryable = true;
+            IsReconnecting = false;
+            ConnectingMessage = "Connecting, waiting for the first frame…";
+            return true;
         }
 
         /// <summary>
@@ -1863,13 +1961,143 @@ namespace EasyRDP.Client.Wpf.ViewModels
             return hash.ToString("X");
         }
 
-        // ====== Stop 逻辑 ======
+        // ====== Stop / 断线重连 ======
 
+        /// <summary>用户主动断开（Stop 按钮）：取消自动重连并清理会话。</summary>
         private void Stop()
+        {
+            CancelReconnect();
+            StopInternal(true);
+        }
+
+        /// <summary>关闭控制窗口时调用：停止自动重连并确保连接被释放。</summary>
+        public void DisconnectAndStop()
+        {
+            CancelReconnect();
+            StopInternal(true);
+        }
+
+        /// <summary>取消进行中的自动重连（加载层 Cancel 按钮）。</summary>
+        private void CancelReconnect()
+        {
+            _cancelConnectRequested = true;
+            var cts = _reconnectCts;
+            if (cts != null)
+            {
+                try { cts.Cancel(); } catch { }
+            }
+        }
+
+        /// <summary>
+        /// 非用户触发的连接丢失：清理旧会话后进入自动重连（不弹框）。
+        /// </summary>
+        private void OnConnectionLost(string reason)
+        {
+            if (_disconnecting || _reconnecting) return;
+            if (!_running && !_isConnected) return; // 没有可恢复的会话
+            Logger.Warn("Connection lost ({0}) — starting auto reconnect", reason);
+            StopInternal(false);
+            StartReconnectLoop();
+        }
+
+        /// <summary>
+        /// 自动重连循环：退避 1/2/4/8/10… 秒重试，直到成功、用户取消，
+        /// 或遇到不可重试的失败（认证失败/被拒绝/版本不符）。
+        /// </summary>
+        private async void StartReconnectLoop()
+        {
+            _reconnectAttempt = 0;
+            _reconnectCts = new CancellationTokenSource();
+            CancellationToken token = _reconnectCts.Token;
+            IsReconnecting = true;
+            try
+            {
+                while (!token.IsCancellationRequested)
+                {
+                    _reconnectAttempt++;
+                    int delayMs = ReconnectDelayMs(_reconnectAttempt);
+                    string text = string.Format("Connection lost — reconnecting in {0:F0}s (attempt {1})…",
+                        delayMs / 1000.0, _reconnectAttempt);
+                    ConnectingMessage = text;
+                    StatusText = text;
+                    Logger.Info("Reconnect attempt {0} scheduled in {1}ms", _reconnectAttempt, delayMs);
+                    await Task.Delay(delayMs, token);
+                    if (token.IsCancellationRequested) break;
+
+                    ConnectingMessage = string.Format("Reconnecting (attempt {0})…", _reconnectAttempt);
+                    bool ok;
+                    try
+                    {
+                        ok = await ConnectAsync(true);
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Warn(ex, "Reconnect attempt {0} threw", _reconnectAttempt);
+                        ok = false;
+                        _lastOutcomeRetryable = true;
+                    }
+
+                    if (ok)
+                    {
+                        Logger.Info("Reconnected successfully after {0} attempt(s)", _reconnectAttempt);
+                        return;
+                    }
+                    // 失败后清理半成品连接，避免下次尝试复用残留对象
+                    StopInternal(false);
+                    if (!_lastOutcomeRetryable)
+                    {
+                        Logger.Warn("Reconnect aborted: non-retryable failure");
+                        SetBusy(false, "Reconnect failed");
+                        return;
+                    }
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // 用户取消：正常退出
+            }
+            catch (Exception ex)
+            {
+                Logger.Error(ex, "Reconnect loop failed");
+            }
+            finally
+            {
+                IsReconnecting = false;
+                var cts = _reconnectCts;
+                _reconnectCts = null;
+                if (cts != null)
+                {
+                    try { cts.Dispose(); } catch { }
+                }
+                if (token.IsCancellationRequested)
+                {
+                    // 取消时可能已建立连接（取消发生在握手过程中），确保断开
+                    StopInternal(true);
+                }
+                if (!_running)
+                {
+                    ConnectingMessage = "Connecting, waiting for the first frame…";
+                    SetBusy(false, "Disconnected");
+                }
+            }
+        }
+
+        /// <summary>指数退避：1、2、4、8、10、10… 秒。</summary>
+        private static int ReconnectDelayMs(int attempt)
+        {
+            int shift = Math.Min(Math.Max(attempt - 1, 0), 4);
+            int ms = 1000 << shift;
+            return Math.Min(ms, MaxReconnectDelayMs);
+        }
+
+        /// <summary>清理连接与渲染资源（userInitiated=true 表示用户主动断开，不走重连）。</summary>
+        private void StopInternal(bool userInitiated)
         {
             if (_disconnecting) return;
             _disconnecting = true;
             Logger.Info("Stopping client session");
+            if (userInitiated)
+                IsReconnecting = false;
 
             if (_fpsTimer != null) { _fpsTimer.Stop(); _fpsTimer = null; }
             if (_clipboardTimer != null) { _clipboardTimer.Stop(); _clipboardTimer = null; }
@@ -1930,6 +2158,8 @@ namespace EasyRDP.Client.Wpf.ViewModels
             ClipboardProgressValue = 0;
             ClipboardProgressText = "";
             SetBusy(false, "Disconnected");
+            // 释放重入锁：之后可能还要发起重连尝试（ConnectAsync 亦会重置，这里保持状态一致）
+            _disconnecting = false;
         }
 
         /// <summary>首帧像素已写入渲染位图回调（WpfRenderTarget.FirstFramePresented，UI 线程）。

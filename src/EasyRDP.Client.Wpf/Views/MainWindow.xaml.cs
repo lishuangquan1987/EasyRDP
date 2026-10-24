@@ -687,7 +687,7 @@ public partial class MainWindow : Window
         return false;
     }
 
-    /// <summary>窗口关闭前停止 aly 自动更新后台循环，避免阻塞线程残留。</summary>
+    /// <summary>窗口关闭前停止 aly 自动更新后台循环、停止自动重连并断开当前会话。</summary>
     protected override void OnClosing(CancelEventArgs e)
     {
         if (_clipboardListenerHwnd != IntPtr.Zero)
@@ -695,6 +695,16 @@ public partial class MainWindow : Window
             try { RemoveClipboardFormatListener(_clipboardListenerHwnd); }
             catch (Exception ex) { Logger.Warn(ex, "RemoveClipboardFormatListener failed"); }
             _clipboardListenerHwnd = IntPtr.Zero;
+        }
+        try
+        {
+            // 关闭窗口 = 用户主动结束会话：取消重连、断开传输并释放渲染资源，
+            // 否则窗口关闭后连接仍然挂着（服务端会话要到心跳超时才释放）。
+            _vm?.DisconnectAndStop();
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn(ex, "Disconnect on window close failed");
         }
         try
         {
