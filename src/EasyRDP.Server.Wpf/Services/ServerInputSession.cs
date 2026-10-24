@@ -25,6 +25,11 @@ namespace EasyRDP.Server.Wpf.Services
         // EasyDesk 的绝对鼠标映射会加主屏原点，因此这里先补偿 (显示器原点 - 主屏原点)。
         private volatile int _displayOffsetX;
         private volatile int _displayOffsetY;
+        // 左键是否按下：拖动（窗口移动/边框缩放、拖拽文件、滚动条）期间改用相对位移。
+        // Windows 的移动/缩放模态循环依赖连续的相对鼠标位移，绝对定位（MOUSEEVENTF_ABSOLUTE）
+        // 会让光标被"钉住"，表现为鼠标形状变成缩放箭头却拖不动窗口。
+        private volatile bool _leftButtonDown;
+        private int _relativeMoveCounter;
 
         public ServerInputSession(IInputSimulator inputSimulator)
         {
@@ -82,12 +87,28 @@ namespace EasyRDP.Server.Wpf.Services
                     case InputEventType.MouseMove:
                         // 客户端坐标是选中显示器的局部坐标；加偏移换算到"主屏坐标系"，
                         // EasyDesk 随后再加主屏原点得到虚拟桌面绝对坐标。
-                        _lastRequestedX = msg.X + _displayOffsetX;
-                        _lastRequestedY = msg.Y + _displayOffsetY;
+                        int absX = msg.X + _displayOffsetX;
+                        int absY = msg.Y + _displayOffsetY;
+                        int prevX = _lastRequestedX;
+                        int prevY = _lastRequestedY;
+                        _lastRequestedX = absX;
+                        _lastRequestedY = absY;
+                        if (_leftButtonDown)
+                        {
+                            int dx = absX - prevX;
+                            int dy = absY - prevY;
+                            if (dx == 0 && dy == 0) return true;
+                            // 每 20 次做一次绝对校正，抵消相对位移的累计取整误差
+                            if ((++_relativeMoveCounter % 20) == 0)
+                                _inputSimulator.SendMouseMove(absX, absY, true);
+                            else
+                                _inputSimulator.SendMouseMove(dx, dy, false);
+                            return true;
+                        }
                         if ((_mouseMoveLogCounter++ % 20) == 0)
                             Logger.Debug("MouseMove requested=({0},{1}) offset=({2},{3})",
                                 msg.X, msg.Y, _displayOffsetX, _displayOffsetY);
-                        _inputSimulator.SendMouseMove(_lastRequestedX, _lastRequestedY, true);
+                        _inputSimulator.SendMouseMove(absX, absY, true);
                         return true;
                     case InputEventType.MouseDown:
                         // 客户端在 MouseDown 中携带了映射坐标 (X,Y)。
@@ -101,6 +122,11 @@ namespace EasyRDP.Server.Wpf.Services
                         if (msg.X != 0 || msg.Y != 0)
                             _inputSimulator.SendMouseMove(downX, downY, true);
                         _inputSimulator.SendMouseButton((MouseButton)msg.KeyCode, true);
+                        if (msg.KeyCode == (int)MouseButton.Left)
+                        {
+                            _leftButtonDown = true;
+                            _relativeMoveCounter = 0;
+                        }
                         return true;
                     case InputEventType.MouseUp:
                         int upX = msg.X != 0 || msg.Y != 0 ? msg.X + _displayOffsetX : _lastRequestedX;
@@ -110,6 +136,8 @@ namespace EasyRDP.Server.Wpf.Services
                         if (msg.X != 0 || msg.Y != 0)
                             _inputSimulator.SendMouseMove(upX, upY, true);
                         _inputSimulator.SendMouseButton((MouseButton)msg.KeyCode, false);
+                        if (msg.KeyCode == (int)MouseButton.Left)
+                            _leftButtonDown = false;
                         return true;
                     case InputEventType.MouseWheel:
                         _inputSimulator.SendMouseWheel(msg.WheelDelta);

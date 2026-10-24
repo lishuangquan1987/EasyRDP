@@ -56,6 +56,10 @@ public partial class MainWindow : Window
     // 剪贴板监听窗口句柄（OnSourceInitialized 注册，OnClosing 注销）
     private IntPtr _clipboardListenerHwnd;
 
+    // 当前窗口 DPI 缩放（鼠标映射必须用物理像素：位图固定 96 DPI）
+    private double _dpiScaleX = 1.0;
+    private double _dpiScaleY = 1.0;
+
     [DllImport("user32.dll")]
     private static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint dwFlags);
 
@@ -97,6 +101,8 @@ public partial class MainWindow : Window
         RenderBorder.SizeChanged += (s, e) => UpdateRenderScroll();
         _vm = new MainWindowViewModel();
         DataContext = _vm;
+        // DPI 变化（窗口拖到不同缩放的显示器）：重算 1:1 尺寸与鼠标映射基准
+        DpiChanged += (s2, e2) => { RefreshDpiScale(); UpdateRenderScroll(); };
         // 拖拽文件到远程画面即发送（无需点 Send File）
         RenderBorder.AllowDrop = true;
         RenderBorder.DragOver += OnRenderAreaDragOver;
@@ -225,6 +231,7 @@ public partial class MainWindow : Window
         if (source != null)
         {
             source.AddHook(WndProc);
+            RefreshDpiScale();
             // 延迟渲染的剪贴板所有者窗口：系统会向本窗口发 WM_RENDERFORMAT
             if (_vm != null)
                 _vm.ClipboardOwnerHandle = source.Handle;
@@ -356,6 +363,14 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>刷新当前窗口的 DPI 缩放（鼠标映射与 1:1 尺寸都以此为准）。</summary>
+    private void RefreshDpiScale()
+    {
+        var dpi = System.Windows.Media.VisualTreeHelper.GetDpi(this);
+        _dpiScaleX = dpi.DpiScaleX > 0 ? dpi.DpiScaleX : 1.0;
+        _dpiScaleY = dpi.DpiScaleY > 0 ? dpi.DpiScaleY : 1.0;
+    }
+
     /// <summary>
     /// 按缩放模式设置滚动容器与画面元素尺寸：
     /// Actual（原始大小）→ RenderImage 尺寸 = 远程分辨率，画面大于视口时出现滚动条；
@@ -373,8 +388,14 @@ public partial class MainWindow : Window
         {
             double w = _vm.RemoteScreenWidth;
             double h = _vm.RemoteScreenHeight;
-            RenderImage.Width = w > 0 ? w : 1;
-            RenderImage.Height = h > 0 ? h : 1;
+            // 位图 DPI 固定 96（1 位图像素 = 1 DIP）：元素尺寸必须按当前 DPI 缩小，
+            // 否则 150% 缩放下 2240px 会被绘制成 3360 物理像素，
+            // 画面比鼠标映射（按远程像素计算）大 1.5 倍，越远偏移越大。
+            var dpi = VisualTreeHelper.GetDpi(this);
+            double scaleX = dpi.DpiScaleX > 0 ? dpi.DpiScaleX : 1.0;
+            double scaleY = dpi.DpiScaleY > 0 ? dpi.DpiScaleY : 1.0;
+            RenderImage.Width = w > 0 ? w / scaleX : 1;
+            RenderImage.Height = h > 0 ? h / scaleY : 1;
         }
         else
         {
@@ -592,8 +613,9 @@ public partial class MainWindow : Window
                 // Fill：无黑边，全矩形拉伸
                 return new Rect(0, 0, iw, ih);
             case ZoomMode.Actual:
-                // None：左上角原始像素，超出部分裁切（可见区 = min(控件, 屏幕)）
-                return new Rect(0, 0, Math.Min(iw, sw), Math.Min(ih, sh));
+                // None：内容按 1 位图像素 = 1 DIP 绘制，元素尺寸已按 DPI 缩小，
+                // 因此画面铺满整个元素（滚动由 ScrollViewer 处理，元素坐标已含滚动偏移）
+                return new Rect(0, 0, iw, ih);
             default:
                 // Uniform：等比缩放，居中留黑边
                 double scale = Math.Min(iw / sw, ih / sh);
@@ -861,7 +883,8 @@ public partial class MainWindow : Window
                 RenderImage.Margin.Left, RenderImage.Margin.Top,
                 RenderImage.Margin.Right, RenderImage.Margin.Bottom);
         }
-        _vm.HandleMouseMove(pos.X, pos.Y, RenderImage.ActualWidth, RenderImage.ActualHeight);
+        _vm.HandleMouseMove(pos.X * _dpiScaleX, pos.Y * _dpiScaleY,
+            RenderImage.ActualWidth * _dpiScaleX, RenderImage.ActualHeight * _dpiScaleY);
         PositionRemoteCursorAtLocal();
     }
 
