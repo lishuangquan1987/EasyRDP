@@ -826,27 +826,9 @@ namespace EasyRDP.Client.Wpf.ViewModels
             string groupName = groupNode != null && groupNode.IsGroup && !groupNode.IsRecentGroup
                 ? groupNode.GroupName : "";
 
-            string last;
-            var list = _profileStore.Load(out last);
-            var profile = new ServerProfile
-            {
-                Name = string.IsNullOrWhiteSpace(result.DisplayName) ? result.Host.Trim() : result.DisplayName.Trim(),
-                Host = result.Host.Trim(),
-                Port = string.IsNullOrWhiteSpace(result.Port) ? "2000" : result.Port.Trim(),
-                Username = result.Username ?? "",
-                Password = result.Password ?? "",
-                Group = groupName
-            };
-            var existing = list.FirstOrDefault(x => string.Equals(x.Name, profile.Name, StringComparison.Ordinal));
-            if (existing != null)
-                list.Remove(existing);
-            list.Add(profile);
-            _profileStore.Save(list, last);
-            if (groupName.Length > 0)
-                EnsureGroup(groupName);
-
+            SaveProfile(result, groupName);
             ReloadTree();
-            ConnectRequested?.Invoke(ToConnection(result));
+            SelectProfileByEndpoint(result.Host.Trim(), ParsePort(result.Port));
         }
 
         /// <summary>新建空分组。</summary>
@@ -951,8 +933,59 @@ namespace EasyRDP.Client.Wpf.ViewModels
             var result = _dialogs.EditConnection(new RecentConnection { Host = "", Port = "2000" });
             if (result == null || string.IsNullOrWhiteSpace(result.Host))
                 return; // 取消
-            SaveConnection(result);
-            ConnectRequested?.Invoke(ToConnection(result));
+            SaveProfile(result, "");
+            ReloadTree();
+            SelectProfileByEndpoint(result.Host.Trim(), ParsePort(result.Port));
+        }
+
+        /// <summary>
+        /// 把编辑结果保存为「连接信息」（connections.json），按 host:port 去重。
+        /// 只保存不连接——连接入口保持"先有连接信息再连接"的约定。
+        /// </summary>
+        private void SaveProfile(ConnectionEditResult result, string groupName)
+        {
+            string host = (result.Host ?? "").Trim();
+            if (host.Length == 0) return;
+
+            int port = ParsePort(result.Port);
+            string last;
+            var list = _profileStore.Load(out last);
+            var existing = list.FirstOrDefault(p =>
+                string.Equals((p.Host ?? "").Trim(), host, StringComparison.OrdinalIgnoreCase)
+                && ParsePort(p.Port) == port);
+            if (existing != null)
+                list.Remove(existing);
+
+            list.Add(new ServerProfile
+            {
+                Name = string.IsNullOrWhiteSpace(result.DisplayName) ? host : result.DisplayName.Trim(),
+                Host = host,
+                Port = string.IsNullOrWhiteSpace(result.Port) ? "2000" : result.Port.Trim(),
+                Username = result.Username ?? "",
+                Password = result.Password ?? "",
+                Group = groupName ?? ""
+            });
+            _profileStore.Save(list, last);
+            if (!string.IsNullOrWhiteSpace(groupName))
+                EnsureGroup(groupName.Trim());
+        }
+
+        /// <summary>在树中按 host:port 选中刚保存的连接（右侧详情跟随显示）。</summary>
+        private void SelectProfileByEndpoint(string host, int port)
+        {
+            foreach (var group in Nodes)
+            {
+                foreach (var node in group.Children)
+                {
+                    var p = node.Profile;
+                    if (p == null) continue;
+                    if (!string.Equals((p.Host ?? "").Trim(), host, StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    if (ParsePort(p.Port) != port) continue;
+                    SelectedNode = node;
+                    return;
+                }
+            }
         }
 
         /// <summary>把编辑结果归一化为可直接发起连接的 RecentConnection。</summary>
@@ -966,33 +999,6 @@ namespace EasyRDP.Client.Wpf.ViewModels
                 Password = result.Password,
                 SavePassword = result.SavePassword
             };
-        }
-
-        /// <summary>
-        /// 把编辑结果保存为最近连接（同主机已存在则更新，否则新建）。
-        /// 新建条目完整落盘端口/用户名/密码——避免连接后只剩 IP、凭据丢失。
-        /// </summary>
-        private void SaveConnection(ConnectionEditResult result)
-        {
-            string host = (result.Host ?? "").Trim();
-            if (host.Length == 0) return;
-
-            var list = _store.Load();
-            var item = list.FirstOrDefault(x =>
-                string.Equals(x.Host, host, StringComparison.OrdinalIgnoreCase));
-            if (item == null)
-            {
-                item = new RecentConnection { Host = host };
-                list.Add(item);
-            }
-            item.DisplayName = string.IsNullOrWhiteSpace(result.DisplayName) ? null : result.DisplayName.Trim();
-            item.Port = string.IsNullOrWhiteSpace(result.Port) ? "2000" : result.Port.Trim();
-            item.Username = string.IsNullOrWhiteSpace(result.Username) ? null : result.Username.Trim();
-            item.Password = string.IsNullOrEmpty(result.Password) ? null : result.Password;
-            item.SavePassword = result.SavePassword;
-            item.LastConnectedUtc = DateTime.UtcNow;
-            _store.Save(list);
-            ReloadConnections();
         }
 
         /// <summary>请求连接指定卡片（携带保存的端口/用户名/密码）。</summary>
