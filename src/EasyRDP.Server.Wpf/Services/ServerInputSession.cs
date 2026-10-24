@@ -97,7 +97,7 @@ namespace EasyRDP.Server.Wpf.Services
                         // 精细拖动（1px 细线、边框缩放）才能跟手。相对位移会被加速曲线放大/压缩。
                         if (_leftButtonDown && (++_relativeMoveCounter % 20) == 0)
                         {
-                            Logger.Debug("DragMove abs=({0},{1}) from=({2},{3})", absX, absY, prevX, prevY);
+                            Logger.Info("DragMove abs=({0},{1}) from=({2},{3})", absX, absY, prevX, prevY);
                         }
                         else if ((_mouseMoveLogCounter++ % 20) == 0)
                         {
@@ -128,23 +128,23 @@ namespace EasyRDP.Server.Wpf.Services
                             _leftButtonDown = true;
                             _relativeMoveCounter = 0;
                         }
-                        Logger.Debug("MouseDown button={0} at ({1},{2})", msg.KeyCode, downX, downY);
+                        // Info 级别：便于用户回传日志确认输入链路（每键一条，量可控）
+                        Logger.Info("MouseDown button={0} at ({1},{2})", msg.KeyCode, downX, downY);
                         return true;
                     case InputEventType.MouseUp:
                         int upX = msg.X != 0 || msg.Y != 0 ? msg.X + _displayOffsetX : _lastRequestedX;
                         int upY = msg.X != 0 || msg.Y != 0 ? msg.Y + _displayOffsetY : _lastRequestedY;
                         Logger.Debug("MouseUp button={0} at ({1},{2}) lastRequested=({3},{4})",
                             msg.KeyCode, upX, upY, _lastRequestedX, _lastRequestedY);
-                        if (msg.X != 0 || msg.Y != 0)
-                        {
-                            _inputSimulator.SendMouseMove(upX, upY, true);
-                            _lastRequestedX = upX;
-                            _lastRequestedY = upY;
-                        }
+                        // 关键：抬起时不移动光标。旧实现在抬起前把光标移到 up 坐标——
+                        // down 与 up 的映射坐标常差 1~2px（取整/移动中），目标应用会把
+                        // "按下后有位移"识别为拖动起点，普通点击被当成微型拖动而失效。
+                        // 光标位置由之前的 MouseMove 序列保证已到位。
                         _inputSimulator.SendMouseButton((MouseButton)msg.KeyCode, false);
                         if (msg.KeyCode == (int)MouseButton.Left)
                             _leftButtonDown = false;
-                        Logger.Debug("MouseUp button={0} at ({1},{2})", msg.KeyCode, upX, upY);
+                        Logger.Info("MouseUp button={0} (cursor stays at {1},{2})",
+                            msg.KeyCode, _lastRequestedX, _lastRequestedY);
                         return true;
                     case InputEventType.MouseWheel:
                         _inputSimulator.SendMouseWheel(msg.WheelDelta);

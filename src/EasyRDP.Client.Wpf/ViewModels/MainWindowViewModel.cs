@@ -1184,7 +1184,8 @@ namespace EasyRDP.Client.Wpf.ViewModels
                 gotResponse = true;
             }
 
-            _transport.MessageReceived -= onHandshakeMsg;
+            if (_transport != null)
+                _transport.MessageReceived -= onHandshakeMsg;
 
             if (!gotResponse || handshakeResponse == null)
             {
@@ -1197,7 +1198,7 @@ namespace EasyRDP.Client.Wpf.ViewModels
                         "Handshake Timeout");
                 }
                 _streamSession?.Stop();
-                _transport.Disconnect();
+                _transport?.Disconnect();
                 return false;
             }
 
@@ -2739,7 +2740,7 @@ namespace EasyRDP.Client.Wpf.ViewModels
             _inputSession.SetButtonDown(true);
             var msg = new InputEventMessage { Type = InputEventType.MouseDown, KeyCode = btn, X = sx, Y = sy };
             _inputSession.SendInput(msg);
-            Logger.Debug("Click down button={0} precise=({1},{2})", changedButton, sx, sy);
+            Logger.Info("Click down button={0} precise=({1},{2})", changedButton, sx, sy);
         }
 
         /// <summary>鼠标抬起：同样携带精确坐标，保证 Up 位置与 Down 一致。</summary>
@@ -2755,7 +2756,7 @@ namespace EasyRDP.Client.Wpf.ViewModels
             _inputSession.SetButtonDown(false);
             var msg = new InputEventMessage { Type = InputEventType.MouseUp, KeyCode = btn, X = sx, Y = sy };
             _inputSession.SendInput(msg);
-            Logger.Debug("Click up button={0} precise=({1},{2})", changedButton, sx, sy);
+            Logger.Info("Click up button={0} precise=({1},{2})", changedButton, sx, sy);
         }
 
         /// <summary>

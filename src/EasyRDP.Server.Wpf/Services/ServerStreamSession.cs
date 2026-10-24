@@ -108,6 +108,10 @@ namespace EasyRDP.Server.Wpf.Services
         private int _downscaleStreak;
         private int _upscaleStreak;
         private const int DownscaleStreakLimit = 10;  // 连续 10 帧编码耗时超标 → 降一档（弱机快速降档，缩短 1~2 FPS 的持续期）
+        // 清晰度优先的阈值：混合模式下抑制降档以保清晰。但编码均值一旦超过该值
+        // （<7 FPS，实测 1920x1080 弱机/虚机常见），画面延迟会让所有精细操作
+        // （拖线/缩放/点选）"不跟手"——此时必须解除抑制，流畅优先。
+        private const int ClarityFirstMaxAvgMs = 150;
         private const int UpscaleStreakLimit = 45;    // 连续 45 帧编码耗时充裕 → 升一档（升档保守，避免降/升档振荡）
         private const double DownscaleThresholdMs = 100.0;  // 编码耗时 > 100ms 视为超标
         // 升档阈值 60ms（配合窗口内 ≥80% 帧低于此值才升档的占比判定）：
@@ -213,7 +217,8 @@ namespace EasyRDP.Server.Wpf.Services
         // 冷缓冲时硬页错误风暴（日志实证：BgraToI420 纯内存搬运 convMs=341ms，
         // 正常 10-17ms）→ 更慢 → D11 误降档 → 模糊。
         private long _lastPageFaultCount = -1;   // 上次采样的进程硬页错误计数（-1=未初始化）
-        private int _noDownscaleLogCounter;      // 混合模式禁用降档后的观测日志限频计数
+        private int _noDownscaleLogCounter;
+        private int _smoothFirstLogCounter;      // 混合模式禁用降档后的观测日志限频计数
         // 本帧实际使用的编码器。切换帧标签修正：EncodeFrameHybrid 在本帧编码完成后
         // 才执行 ZRLE↔H264 切换（_encoder 改指新编码器），若发送时取 _encoder.Codec，
         // 切换帧的数据（旧编码器输出）会被打上新编码器标签 → 客户端选错解码器 →
@@ -1008,8 +1013,9 @@ namespace EasyRDP.Server.Wpf.Services
                                 // 混合模式禁用自动降档：持续慢的病根是冷页回收/CPU，
                                 // 降档只是止痛药且代价是模糊（用户明确：清晰度优先）。
                                 // 限频记录观测值供排障；ZRLE-only 会话（H264 不可用）保留降档。
-                                if (_h264Allowed)
+                                if (_h264Allowed && h264AvgMs < ClarityFirstMaxAvgMs)
                                 {
+                                    // 清晰度优先：编码尚可（≥7 FPS）时抑制降档
                                     _downscaleStreak = 0;
                                     _upscaleStreak = 0;
                                     _noDownscaleLogCounter++;
@@ -1019,8 +1025,14 @@ namespace EasyRDP.Server.Wpf.Services
                                 }
                                 else
                                 {
+                                    // 流畅优先：编码均值 >= 150ms（<7 FPS）时解除抑制——
+                                    // 画面延迟到数百毫秒，拖动/点选全部"不跟手"，降档换帧率
                                     _downscaleStreak++;
                                     _upscaleStreak = 0;
+                                    _smoothFirstLogCounter++;
+                                    if (_smoothFirstLogCounter == 1 || _smoothFirstLogCounter % 10 == 0)
+                                        Logger.Warn("Session {0}: D11 downscale allowed (smooth first): avg={1:F1}ms >= {2}ms — lowering resolution to keep interactive framerate",
+                                            _sessionId, h264AvgMs, ClarityFirstMaxAvgMs);
                                 }
                             }
                             else if (underCount * 10 >= _dynEncodeTimes.Count * 8)
