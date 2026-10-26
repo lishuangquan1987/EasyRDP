@@ -1,6 +1,7 @@
 #nullable disable
 using System;
 using System.Collections.ObjectModel;
+using System.Threading;
 using System.ComponentModel;
 using System.Windows;
 using System.Windows.Input;
@@ -687,6 +688,40 @@ namespace EasyRDP.Server.Wpf.ViewModels
             if (!int.TryParse(PortText, out int port))
                 port = 2000;
 
+            // 单实例互斥：aly 更新重启/手动重复启动时，旧实例可能仍在（托盘）运行，
+            // 直接绑端口只会得到一个"端口被占用"的裸异常——这里给出明确提示并退出新实例。
+            bool createdNew;
+            _singleInstanceMutex = new Mutex(true, @"Local\EasyRDP.Server.SingleInstance", out createdNew);
+            if (!createdNew)
+            {
+                // 进程退出（含托盘 Exit / aly 强杀）时互斥由系统释放，新实例即可启动
+                if (silent)
+                    AddLog("Start aborted: another EasyRDP Server instance is already running");
+                else
+                    _notifier.ShowWarning(
+                        "EasyRDP Server is already running.\nPlease exit the running instance (check the tray icon) first.",
+                        "Already Running");
+                return;
+            }
+
+            // 端口占用预检 + 等待：更新重启时旧实例刚被关闭，端口释放可能有毫秒级延迟
+            for (int attempt = 1; ; attempt++)
+            {
+                if (!IsPortInUse(port)) break;
+                if (attempt >= 5)
+                {
+                    string msg = "Port " + port + " is already in use. Another EasyRDP Server instance may " +
+                        "still be running (check the tray icon), or another program is using this port.";
+                    Logger.Warn(msg);
+                    if (silent) AddLog(msg);
+                    else _notifier.ShowError(msg, "Port In Use");
+                    return;
+                }
+                Thread.Sleep(2000);
+                if (!IsRunning) continue;
+            }
+
+
             // 校验凭据：审批模式无需密码（由操作员确认）；口令模式必须配置非空凭据
             string username = Username ?? "";
             string password = Password ?? "";
@@ -873,6 +908,26 @@ namespace EasyRDP.Server.Wpf.ViewModels
             Uptime = "—";
             HideFileTransfer();
             AddLog("Server stopped");
+        }
+
+        /// <summary>探测端口是否被占用（尝试绑定，立即释放）。</summary>
+        private static bool IsPortInUse(int port)
+        {
+            System.Net.Sockets.TcpListener probe = null;
+            try
+            {
+                probe = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Any, port);
+                probe.Start();
+                return false;
+            }
+            catch (System.Net.Sockets.SocketException)
+            {
+                return true;
+            }
+            finally
+            {
+                try { if (probe != null) probe.Stop(); } catch { }
+            }
         }
 
         /// <summary>当前监听端口（解析失败回退 2000）。</summary>

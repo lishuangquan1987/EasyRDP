@@ -61,8 +61,32 @@ public partial class App : Application
     /// 服务端进程级未处理异常捕获 — 主要是为了在 EncodeFrame 等原生调用
     /// 触发 AccessViolation 时能记录崩溃前最后的日志，便于定位根因。
     /// </summary>
+    /// <summary>单实例互斥体（进程存活期间持有，退出/被杀时系统释放）。</summary>
+    private static Mutex? _singleInstanceMutex;
+
     protected override void OnStartup(StartupEventArgs e)
     {
+        // 单实例：aly 更新重启/重复启动时，旧实例可能仍在运行（托盘），
+        // 第二个进程直接退出——否则只会得到一个"端口被占用"的裸异常。
+        _singleInstanceMutex = new Mutex(true, @"Local\EasyRDP.Server.SingleInstance", out bool createdNew);
+        if (!createdNew)
+        {
+            // aly 更新器会强杀旧实例：被放弃（abandoned）的互斥体可以直接接管所有权
+            bool acquired = false;
+            try { acquired = _singleInstanceMutex.WaitOne(0); }
+            catch (AbandonedMutexException) { acquired = true; }
+            if (!acquired)
+            {
+                Logger.Warn("Another EasyRDP Server instance is already running — exiting");
+                System.Windows.Forms.MessageBox.Show(
+                    "EasyRDP Server is already running.\nPlease exit the running instance (check the tray icon) first.",
+                    "EasyRDP Server", System.Windows.Forms.MessageBoxButtons.OK,
+                    System.Windows.Forms.MessageBoxIcon.Information);
+                Shutdown();
+                return;
+            }
+        }
+
         // 捕获后台线程未处理异常（如 EncodeLoop 线程崩溃）
         AppDomain.CurrentDomain.UnhandledException += OnDomainUnhandledException;
         // 捕获 Task 未观察异常

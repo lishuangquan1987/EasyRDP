@@ -21,3 +21,5 @@ reasonix.toml
 # Release staging / installer output
 stage/
 dist/
+.reasonix/
+.vscode/

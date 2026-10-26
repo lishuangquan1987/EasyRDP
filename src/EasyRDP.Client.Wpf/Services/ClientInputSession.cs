@@ -182,8 +182,9 @@ namespace EasyRDP.Client.Wpf.Services
             {
                 double px = controlX < 0 ? 0 : (controlX > controlW ? controlW : controlX);
                 double py = controlY < 0 ? 0 : (controlY > controlH ? controlH : controlY);
-                serverX = (int)(px / controlW * _screenWidth);
-                serverY = (int)(py / controlH * _screenHeight);
+                // 四舍五入：截断会恒定向左/上偏 ~0.5px
+                serverX = (int)Math.Round(px / controlW * _screenWidth);
+                serverY = (int)Math.Round(py / controlH * _screenHeight);
                 return;
             }
 
@@ -193,8 +194,8 @@ namespace EasyRDP.Client.Wpf.Services
             {
                 double px = controlX < 0 ? 0 : (controlX > controlW ? controlW : controlX);
                 double py = controlY < 0 ? 0 : (controlY > controlH ? controlH : controlY);
-                serverX = (int)(px < _screenWidth ? px : _screenWidth);
-                serverY = (int)(py < _screenHeight ? py : _screenHeight);
+                serverX = (int)Math.Round(px < _screenWidth ? px : _screenWidth);
+                serverY = (int)Math.Round(py < _screenHeight ? py : _screenHeight);
                 return;
             }
 
@@ -222,8 +223,9 @@ namespace EasyRDP.Client.Wpf.Services
             else if (px2 > drawW) px2 = drawW;
             if (py2 < 0) py2 = 0;
             else if (py2 > drawH) py2 = drawH;
-            serverX = (int)(px2 / drawW * _screenWidth);
-            serverY = (int)(py2 / drawH * _screenHeight);
+            // 四舍五入：截断会恒定向左/上偏 ~0.5px（拖 1px 细线时整体偏移）
+            serverX = (int)Math.Round(px2 / drawW * _screenWidth);
+            serverY = (int)Math.Round(py2 / drawH * _screenHeight);
             // 诊断日志（每 50 次）：映射全流程参数，验证 draw/off/px/py 计算。
             // 若 draw 与 control 不一致（黑边扣除生效）而用户仍报偏移，
             // 说明偏移不在映射层，需检查渲染/回显路径。
