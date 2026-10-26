@@ -519,12 +519,31 @@ namespace EasyRDP.Server.Wpf.ViewModels
         public RelayCommand CheckUpdateCommand { get; private set; }
 
         /// <summary>
+        /// 用户已确认应用更新。此后更新器会向本进程发送 WM_CLOSE 以优雅关闭：
+        /// 主窗口收到关闭请求时必须真正退出（停止监听、保存设置、释放托盘），
+        /// 而不是隐藏到托盘——否则 2 秒后被更新器强杀，端口无法干净释放。
+        /// </summary>
+        public bool ExitRequestedByUpdate { get; private set; }
+
+        /// <summary>
         /// 初始化 aly 更新客户端：启动后台循环（检查 → 下载 → 应用），
         /// 并将 SDK 线程上的状态事件转发到 UI 线程。
         /// </summary>
         private void InitializeUpdateClient()
         {
             _alyUpdateClient = new AlyUpdateClient();
+            // 应用更新前让更新器优雅关闭本进程（WM_CLOSE → 窗口真正退出并停止监听），
+            // 而不是在替换文件时探测到占用后强杀——强杀会导致新进程启动后端口被
+            // TIME_WAIT 连接短暂占用（详见 StartServerInternal 的端口预检说明）。
+            try
+            {
+                _alyUpdateClient.MustCloseProcessNames =
+                    System.Diagnostics.Process.GetCurrentProcess().ProcessName;
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn(ex, "Set aly must-close process name failed");
+            }
             // 事件处理委托保存为字段，便于 CleanupUpdateClient 退订
             _onUpdateStatusChanged = (status, tips) =>
             {
@@ -630,7 +649,12 @@ namespace EasyRDP.Server.Wpf.ViewModels
             if (AlyClientStatus == AlyClientStatus.DiscoveredUpdate)
                 ResetUpdateConfirmation(ref _requestDownloadUpdateCts);
             else if (AlyClientStatus == AlyClientStatus.DownloadedUpdate)
+            {
+                // 用户确认应用更新：置位退出标记，让随后更新器发来的 WM_CLOSE
+                // 触发真正的优雅退出（见 ExitRequestedByUpdate 注释）。
+                ExitRequestedByUpdate = true;
                 ResetUpdateConfirmation(ref _requestApplyUpdateCts);
+            }
             else
                 Logger.Warn("CheckUpdate called in unexpected state: {0}", AlyClientStatus);
         }
@@ -687,22 +711,6 @@ namespace EasyRDP.Server.Wpf.ViewModels
 
             if (!int.TryParse(PortText, out int port))
                 port = 2000;
-
-            // 单实例互斥：aly 更新重启/手动重复启动时，旧实例可能仍在（托盘）运行，
-            // 直接绑端口只会得到一个"端口被占用"的裸异常——这里给出明确提示并退出新实例。
-            bool createdNew;
-            _singleInstanceMutex = new Mutex(true, @"Local\EasyRDP.Server.SingleInstance", out createdNew);
-            if (!createdNew)
-            {
-                // 进程退出（含托盘 Exit / aly 强杀）时互斥由系统释放，新实例即可启动
-                if (silent)
-                    AddLog("Start aborted: another EasyRDP Server instance is already running");
-                else
-                    _notifier.ShowWarning(
-                        "EasyRDP Server is already running.\nPlease exit the running instance (check the tray icon) first.",
-                        "Already Running");
-                return;
-            }
 
             // 端口占用预检 + 等待：更新重启时旧实例刚被关闭，端口释放可能有毫秒级延迟
             for (int attempt = 1; ; attempt++)
@@ -910,14 +918,58 @@ namespace EasyRDP.Server.Wpf.ViewModels
             AddLog("Server stopped");
         }
 
-        /// <summary>探测端口是否被占用（尝试绑定，立即释放）。</summary>
+        /// <summary>
+        /// 探测端口是否真的不可用。分两步，避免把 TIME_WAIT 残留误判为占用：
+        /// 1) 向 127.0.0.1:port 发起 TCP 连接——能连上说明有活跃监听者，属于真占用；
+        /// 2) 用带 SO_REUSEADDR 的 socket 试绑定——与 TcpTransportAcceptor 的真实
+        ///    监听行为一致：旧实例被更新器强杀后残留的 TIME_WAIT 连接（最长 240 秒）
+        ///    不会阻塞带此选项的绑定，因此不应报"端口被占用"。
+        /// </summary>
         private static bool IsPortInUse(int port)
         {
-            System.Net.Sockets.TcpListener probe = null;
+            // 1) 活跃监听探测：连接成功 = 有进程正在监听该端口
             try
             {
-                probe = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Any, port);
-                probe.Start();
+                var client = new System.Net.Sockets.TcpClient();
+                try
+                {
+                    IAsyncResult ar = client.BeginConnect(
+                        System.Net.IPAddress.Loopback, port, null, null);
+                    if (ar.AsyncWaitHandle.WaitOne(300, false))
+                    {
+                        try
+                        {
+                            client.EndConnect(ar);
+                            return true; // 连接成功：存在活跃监听者
+                        }
+                        catch
+                        {
+                            // 连接被拒绝：无活跃监听者，继续第二步
+                        }
+                    }
+                }
+                finally
+                {
+                    try { client.Close(); } catch { }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn(ex, "Port active probe failed for {0}", port);
+            }
+
+            // 2) 带 SO_REUSEADDR 的绑定探测（与真实监听器一致）
+            System.Net.Sockets.Socket probe = null;
+            try
+            {
+                probe = new System.Net.Sockets.Socket(
+                    System.Net.Sockets.AddressFamily.InterNetwork,
+                    System.Net.Sockets.SocketType.Stream,
+                    System.Net.Sockets.ProtocolType.Tcp);
+                probe.SetSocketOption(
+                    System.Net.Sockets.SocketOptionLevel.Socket,
+                    System.Net.Sockets.SocketOptionName.ReuseAddress, true);
+                probe.Bind(new System.Net.IPEndPoint(System.Net.IPAddress.Any, port));
                 return false;
             }
             catch (System.Net.Sockets.SocketException)
@@ -926,7 +978,7 @@ namespace EasyRDP.Server.Wpf.ViewModels
             }
             finally
             {
-                try { if (probe != null) probe.Stop(); } catch { }
+                try { if (probe != null) probe.Close(); } catch { }
             }
         }
 

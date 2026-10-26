@@ -91,9 +91,29 @@ namespace EasyRDP.Server.Wpf.Views
             Application.Current.Shutdown();
         }
 
-        /// <summary>窗口关闭：默认隐藏到托盘；仅托盘 Exit 时真正退出。</summary>
+        /// <summary>窗口关闭：默认隐藏到托盘；仅托盘 Exit 或更新器请求关闭时真正退出。</summary>
         protected override void OnClosing(CancelEventArgs e)
         {
+            // 用户确认应用更新后，更新器会向本进程发送 WM_CLOSE 以优雅关闭：
+            // 此时必须真正退出（停止监听、保存设置、清理更新客户端），
+            // 让端口被干净释放，更新重启后的新实例才能立即绑定；
+            // 若按默认逻辑隐藏到托盘，2 秒后会被更新器强杀（见 ExitRequestedByUpdate）。
+            if (!_exitRequested && _vm.ExitRequestedByUpdate)
+            {
+                _exitRequested = true;
+                try
+                {
+                    if (_vm.IsRunning && _vm.StopCommand.CanExecute(null))
+                        _vm.StopCommand.Execute(null);
+                    _vm.SaveSettings();
+                    _vm.CleanupUpdateClient();
+                }
+                catch (Exception ex)
+                {
+                    Logger.Warn(ex, "Update exit cleanup failed");
+                }
+            }
+
             if (!_exitRequested)
             {
                 e.Cancel = true;

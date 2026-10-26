@@ -42,6 +42,12 @@ namespace EasyRDP.Core.Transport
                 if (_running)
                     return;
                 _listener = new TcpListener(IPAddress.Any, port);
+                // bind 前设置 SO_REUSEADDR：更新重启场景下旧进程被强杀后，
+                // 其历史连接可能残留 TIME_WAIT（Windows 默认 240 秒），不带此选项
+                // 新进程 bind 同一端口会报"地址已被占用"。SO_REUSEADDR 允许在
+                // TIME_WAIT 残留上立即重新绑定（这是 Windows 下服务重启的标准解法）。
+                _listener.Server.SetSocketOption(
+                    SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
                 _listener.Start();
                 _running = true;
             }
