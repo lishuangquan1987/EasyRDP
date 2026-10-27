@@ -118,6 +118,8 @@ namespace EasyRDP.Client.Wpf.ViewModels
 
         // ── 连接详情面板（ToDesk 风格，每秒刷新）──
         private bool _isDetailsPanelVisible;
+        // 详情面板折叠态：true = 仅显示右上角小"Details"角标（点击展开）
+        private bool _isDetailsPanelCollapsed;
         private DateTime _connectStartTime;
         private long _lastReceivedBytes;        // 码率差分基准
         private string _connectionDurationText = "—";
@@ -183,6 +185,7 @@ namespace EasyRDP.Client.Wpf.ViewModels
                 () => AlyClientStatus == AlyClientStatus.DiscoveredUpdate
                     || AlyClientStatus == AlyClientStatus.DownloadedUpdate);
             ToggleDetailsCommand = new RelayCommand(ToggleDetailsPanel);
+            ToggleDetailsCollapseCommand = new RelayCommand(ToggleDetailsCollapse);
             CycleZoomCommand = new RelayCommand(CycleZoom);
             SendFileCommand = new RelayCommand(SendFilesByDialog, () => _running);
 
@@ -620,8 +623,56 @@ namespace EasyRDP.Client.Wpf.ViewModels
         public bool IsDetailsPanelVisible
         {
             get { return _isDetailsPanelVisible; }
-            set { _isDetailsPanelVisible = value; OnPropertyChanged(nameof(IsDetailsPanelVisible)); }
+            set
+            {
+                if (_isDetailsPanelVisible == value) return;
+                _isDetailsPanelVisible = value;
+                // 重新打开面板时默认展开（记忆用户上次手动折叠状态无必要，展开是主诉求）
+                if (value) _isDetailsPanelCollapsed = false;
+                OnPropertyChanged(nameof(IsDetailsPanelVisible));
+                OnPropertyChanged(nameof(IsDetailsPanelExpandedVisible));
+                OnPropertyChanged(nameof(IsDetailsCollapsedBadgeVisible));
+            }
         }
+
+        /// <summary>
+        /// 详情面板是否折叠为小角标（面板右上"—"按钮收起、"Details"角标展开）。
+        /// 面板悬浮于远程画面右上角（宽 380），长时间挂机/操作远端右上区域时
+        /// 会遮挡画面（面板本身不参与命中测试，但视觉遮挡远端标题栏按钮等），
+        /// 提供人工折叠/展开后既保留随时查看诊断的能力，又不长期遮挡画面。
+        /// 折叠态仅显示一个小的"Details"角标按钮（可点击展开）。
+        /// </summary>
+        public bool IsDetailsPanelCollapsed
+        {
+            get { return _isDetailsPanelCollapsed; }
+            set
+            {
+                if (_isDetailsPanelCollapsed == value) return;
+                _isDetailsPanelCollapsed = value;
+                OnPropertyChanged(nameof(IsDetailsPanelCollapsed));
+                OnPropertyChanged(nameof(IsDetailsPanelExpandedVisible));
+                OnPropertyChanged(nameof(IsDetailsCollapsedBadgeVisible));
+            }
+        }
+
+        /// <summary>
+        /// 派生可见性：详情面板"展开态"（面板可见且未折叠）。
+        /// 面板 Border 与其右上角"—"收起按钮的 Visibility 直接绑定，
+        /// 避免在 XAML 里组合多重条件触发器。
+        /// </summary>
+        public bool IsDetailsPanelExpandedVisible
+        {
+            get { return _isDetailsPanelVisible && !_isDetailsPanelCollapsed; }
+        }
+
+        /// <summary>派生可见性：折叠角标"Details"按钮（面板可见但已折叠）。</summary>
+        public bool IsDetailsCollapsedBadgeVisible
+        {
+            get { return _isDetailsPanelVisible && _isDetailsPanelCollapsed; }
+        }
+
+        /// <summary>折叠/展开详情面板（面板右上"—"按钮与折叠角标共用）。</summary>
+        public RelayCommand ToggleDetailsCollapseCommand { get; }
 
         /// <summary>连接时长文本（如 "00:01:55"）。</summary>
         public string ConnectionDurationText { get { return _connectionDurationText; } }
@@ -1459,6 +1510,12 @@ namespace EasyRDP.Client.Wpf.ViewModels
         private void ToggleDetailsPanel()
         {
             IsDetailsPanelVisible = !IsDetailsPanelVisible;
+        }
+
+        /// <summary>折叠/展开详情面板（"—"收起按钮与折叠角标共用命令）。</summary>
+        private void ToggleDetailsCollapse()
+        {
+            IsDetailsPanelCollapsed = !IsDetailsPanelCollapsed;
         }
 
         /// <summary>

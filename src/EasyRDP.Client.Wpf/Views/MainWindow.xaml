@@ -188,13 +188,15 @@
 
                 <!-- 连接详情面板（ToDesk 风格）：网络诊断 / 连接详情 / 系统性能。
                      悬浮于桌面显示区右上角，工具栏 Details 按钮切换。
-                     不参与命中测试（IsHitTestVisible=False），不干扰鼠标转发。 -->
+                     不参与命中测试（IsHitTestVisible=False），不干扰鼠标转发。
+                     人工折叠：面板右上"—"按钮收起为"Details"角标（不遮挡远端画面），
+                     点角标重新展开——长时间挂机/操作远端右上区域时面板会视觉遮挡画面。 -->
                 <Border x:Name="DetailsPanel"
                         HorizontalAlignment="Right" VerticalAlignment="Top"
                         Margin="0,8,8,0" Width="380" Padding="14,10"
                         Background="#F21B1B1F" CornerRadius="6"
                         IsHitTestVisible="False"
-                        Visibility="{Binding IsDetailsPanelVisible, Converter={StaticResource BoolToVis}}">
+                        Visibility="{Binding IsDetailsPanelExpandedVisible, Converter={StaticResource BoolToVis}}">
                     <StackPanel>
                         <!-- ═══ 网络诊断 ═══ -->
                         <TextBlock Text="Network" Foreground="{StaticResource AccentBrush}"
@@ -298,6 +300,25 @@
                         </Grid>
                     </StackPanel>
                 </Border>
+
+                <!-- 详情面板"—"收起按钮：面板 Border 为 IsHitTestVisible=False（鼠标穿透转发远端），
+                     其整棵子树不参与命中测试——按钮必须是兄弟元素、独立命中。
+                     定位：面板右上角（面板 Margin 右 8 + 角标宽 22 重叠在面板边缘上）。 -->
+                <Button Content="—" Width="22" Height="22" FontSize="13"
+                        HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,10,10,0"
+                        Style="{StaticResource ToolbarButtonStyle}" Padding="0,2"
+                        Command="{Binding ToggleDetailsCollapseCommand}"
+                        Visibility="{Binding IsDetailsPanelExpandedVisible, Converter={StaticResource BoolToVis}}"
+                        ToolTip="Collapse the details panel (click the Details badge to expand again)"/>
+
+                <!-- 详情面板折叠角标："Details"小按钮，点开重新展开面板。
+                    折叠态仅占右上角一小块，不遮挡远端画面。 -->
+                <Button Content="Details" Height="22" FontSize="12"
+                        HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,10,8,0"
+                        Style="{StaticResource ToolbarButtonStyle}" Padding="10,2"
+                        Command="{Binding ToggleDetailsCollapseCommand}"
+                        Visibility="{Binding IsDetailsCollapsedBadgeVisible, Converter={StaticResource BoolToVis}}"
+                        ToolTip="Expand the connection details panel"/>
 
                 <!-- 未连接占位提示：连接成功后隐藏 -->
                 <StackPanel x:Name="NotConnectedHint" HorizontalAlignment="Center" VerticalAlignment="Center"

@@ -555,6 +555,21 @@ namespace EasyRDP.Server.Wpf.ViewModels
         public bool ExitRequestedByUpdate { get; private set; }
 
         /// <summary>
+        /// 判断本进程此刻是否应配合更新器真正退出（而非隐藏到托盘）。
+        /// 两个信号任一成立即应退出：
+        /// 1) 用户在程序内确认应用更新（ExitRequestedByUpdate，更新器随后发 WM_CLOSE）；
+        /// 2) aly 更新锁处于 apply_update / rollback 且持锁进程存活——更新并非经程序内
+        ///    确认路径发起时（旧版自动应用、aly-client-ui 手动应用、发布 CLI），
+        ///    ExitRequestedByUpdate 不会置位，WM_CLOSE 被当成普通关闭隐藏到托盘，
+        ///    旧实例带着监听 socket 存活 → 新实例绑定端口失败（生产日志实证）。
+        ///    更新锁是更新器侧的客观事实信号，覆盖全部发起路径。
+        /// </summary>
+        public bool ShouldExitForUpdate()
+        {
+            return ExitRequestedByUpdate || AlyUpdateLockDetector.IsUpdateInProgress();
+        }
+
+        /// <summary>
         /// 初始化 aly 更新客户端：启动后台循环（检查 → 下载 → 应用），
         /// 并将 SDK 线程上的状态事件转发到 UI 线程。
         /// </summary>
@@ -741,19 +756,29 @@ namespace EasyRDP.Server.Wpf.ViewModels
             if (!int.TryParse(PortText, out int port))
                 port = 2000;
 
-            // 端口占用预检 + 等待：更新重启时旧实例刚被关闭，端口释放可能有毫秒级延迟
+            // 端口占用预检 + 等待：
+            // - 常规场景（用户手动 Start）：重试 5×2s=10s——覆盖端口释放的毫秒级延迟；
+            // - 更新重启场景（本进程由更新器拉起，aly 更新锁仍持锁）：旧实例此刻可能
+            //   正在退出流程中（停止监听/释放 socket 需数秒），重试加长到 45×2s=90s，
+            //   覆盖旧实例退出全程（旧构建可能隐藏托盘不退出——用户从托盘退出即恢复）。
+            bool launchedByUpdater = AlyUpdateLockDetector.IsUpdateInProgress();
+            int maxAttempts = launchedByUpdater ? 45 : 5;
             for (int attempt = 1; ; attempt++)
             {
                 if (!IsPortInUse(port)) break;
-                if (attempt >= 5)
+                if (attempt >= maxAttempts)
                 {
-                    string msg = "Port " + port + " is already in use. Another EasyRDP Server instance may " +
-                        "still be running (check the tray icon), or another program is using this port.";
+                    // 枚举同进程名的其他服务端实例：区分"双开旧实例未退出"与"端口被其他程序占用"
+                    string otherInstanceHint = FindOtherInstanceHint();
+                    string msg = "Port " + port + " is already in use. " +
+                        (otherInstanceHint ?? "Another program may be using this port.");
                     Logger.Warn(msg);
                     if (silent) AddLog(msg);
                     else _notifier.ShowError(msg, "Port In Use");
                     return;
                 }
+                if (attempt == 1 && launchedByUpdater)
+                    Logger.Info("Port {0} still in use — waiting for old instance to exit (update restart, up to 90s)", port);
                 Thread.Sleep(2000);
                 if (!IsRunning) continue;
             }
@@ -1016,6 +1041,47 @@ namespace EasyRDP.Server.Wpf.ViewModels
         {
             int port;
             return int.TryParse(PortText, out port) && port > 0 && port < 65536 ? port : 2000;
+        }
+
+        /// <summary>
+        /// 查找同进程名的其他服务端实例（排除本进程）。
+        /// 端口占用报错时区分两种场景：
+        /// - 找到 → 旧实例/双开实例仍存活（通常隐藏在托盘继续监听），
+        ///   提示用户从托盘图标退出后重试；
+        /// - 未找到 → 端口被其他程序占用，提示更换端口。
+        /// 返回 null 表示无同进程名实例。
+        /// </summary>
+        private static string FindOtherInstanceHint()
+        {
+            try
+            {
+                int currentId = System.Diagnostics.Process.GetCurrentProcess().Id;
+                string processName = System.Diagnostics.Process.GetCurrentProcess().ProcessName;
+                var others = System.Diagnostics.Process.GetProcessesByName(processName);
+                try
+                {
+                    foreach (var p in others)
+                    {
+                        if (p != null && p.Id != currentId)
+                        {
+                            return "Another EasyRDP Server instance (PID " + p.Id +
+                                ") is still running — exit it from the tray icon and try again.";
+                        }
+                    }
+                }
+                finally
+                {
+                    // 统一在 finally 释放全部进程句柄（Process.Dispose 幂等，
+                    // return 路径与正常路径都覆盖，无需在取值时单独释放）
+                    foreach (var p in others)
+                        if (p != null) p.Dispose();
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn(ex, "Find other server instances failed");
+            }
+            return null;
         }
 
         /// <summary>启动局域网发现（幂等；已启动则先停止再重建，保证端口/模式最新）。</summary>

@@ -94,11 +94,15 @@ namespace EasyRDP.Server.Wpf.Views
         /// <summary>窗口关闭：默认隐藏到托盘；仅托盘 Exit 或更新器请求关闭时真正退出。</summary>
         protected override void OnClosing(CancelEventArgs e)
         {
-            // 用户确认应用更新后，更新器会向本进程发送 WM_CLOSE 以优雅关闭：
-            // 此时必须真正退出（停止监听、保存设置、清理更新客户端），
-            // 让端口被干净释放，更新重启后的新实例才能立即绑定；
-            // 若按默认逻辑隐藏到托盘，2 秒后会被更新器强杀（见 ExitRequestedByUpdate）。
-            if (!_exitRequested && _vm.ExitRequestedByUpdate)
+            // 更新器请求关闭的两种信号（任一成立即真正退出）：
+            // 1) 用户在程序内确认应用更新（ExitRequestedByUpdate）；
+            // 2) aly 更新锁处于 apply_update/rollback 且持锁进程存活（ShouldExitForUpdate 内判定）。
+            // 更新可能不经程序内确认路径发起（旧版自动应用/aly-client-ui/发布 CLI）——
+            // 此时更新器发来的 WM_CLOSE 若被当成普通关闭而隐藏到托盘，旧实例带着监听
+            // socket 存活（Windows 允许 rename 运行中 exe 所在目录，更新器无需杀进程），
+            // 更新拉起的新实例绑定端口即失败（生产日志实证）。
+            // 更新锁是更新器侧的客观事实信号，覆盖全部发起路径。
+            if (!_exitRequested && _vm.ShouldExitForUpdate())
             {
                 _exitRequested = true;
                 try
@@ -107,6 +111,7 @@ namespace EasyRDP.Server.Wpf.Views
                         _vm.StopCommand.Execute(null);
                     _vm.SaveSettings();
                     _vm.CleanupUpdateClient();
+                    Logger.Info("Exiting for aly update (update lock active or update confirmed) — listener stopped, port released");
                 }
                 catch (Exception ex)
                 {
