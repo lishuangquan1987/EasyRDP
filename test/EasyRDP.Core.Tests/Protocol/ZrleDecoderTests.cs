@@ -335,7 +335,7 @@ namespace EasyRDP.Core.Tests.Protocol
         }
 
         [Fact]
-        public void Decode_RegionOutOfBounds_SkipsRegionNotWholeFrame()
+        public void Decode_RegionOutOfBounds_FailsWholeFrame()
         {
             var dec = new ZrleDecoder();
             dec.Initialize(W, H);
@@ -360,9 +360,10 @@ namespace EasyRDP.Core.Tests.Protocol
             };
             byte[] output = new byte[W * H * 4];
             var result = dec.Decode(ZrleRegionCodec.Pack(regions), output);
-            // 整帧仍解码成功，越界区域被跳过
-            Assert.Equal(DecodeStatus.Ok, result.Status);
-            Assert.Equal(1, output[0]);  // 合法区域已应用
+            // v3 语义：任一区域越界 = 本帧数据损坏 → 整帧 Failed，由上层请求全量帧重建。
+            // 静默跳过坏区域会让画面在丢失的瓦片上永久保留旧像素（花屏），
+            // 与"部分应用"相比，"丢弃整帧 + 请求全量"能保证最终一致。
+            Assert.Equal(DecodeStatus.Failed, result.Status);
             dec.Dispose();
         }
 

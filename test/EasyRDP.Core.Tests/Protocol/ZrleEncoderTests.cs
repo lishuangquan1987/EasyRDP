@@ -50,7 +50,9 @@ namespace EasyRDP.Core.Tests.Protocol
             var result = enc.Encode(frame, false);
 
             Assert.NotNull(result.Data);
-            Assert.False(result.IsKeyframe);  // ZRLE 始终非关键帧
+            // v5：首帧为全量帧 → IsKeyframe=true（客户端在序列缺口时依赖该标记
+            // 识别"可独立解码的全量帧"，等待其重建基线）
+            Assert.True(result.IsKeyframe);
             var rects = ZrleRegionCodec.ExtractRects(result.Data);
             Assert.NotNull(rects);
             Assert.Equal(6, rects.Length);  // 3×2 瓦片全编码
@@ -94,15 +96,18 @@ namespace EasyRDP.Core.Tests.Protocol
         }
 
         [Fact]
-        public void IsKeyframe_AlwaysFalse()
+        public void IsKeyframe_FollowsForceKeyframeFlag()
         {
             var enc = new ZrleEncoder();
             enc.Initialize(W, H, 1000000);
             byte[] frame = CreateFrame(W, H, 10, 20, 30);
 
-            var r1 = enc.Encode(frame, true);   // forceKeyframe=true 也被忽略
+            // v4/v5：forceKeyframe=true 被尊重（全量编码）并标记 IsKeyframe=true——
+            // 混合编码切回 ZRLE / 客户端显式请求全量帧时依赖该语义重建解码基线。
+            var r1 = enc.Encode(frame, true);
+            Assert.True(r1.IsKeyframe);   // 强制全量帧 → 关键帧
+            // 增量帧（无变化 → 0 区域）→ 非关键帧
             var r2 = enc.Encode(frame, false);
-            Assert.False(r1.IsKeyframe);
             Assert.False(r2.IsKeyframe);
             enc.Dispose();
         }
@@ -145,11 +150,11 @@ namespace EasyRDP.Core.Tests.Protocol
         }
 
         [Fact]
-        public void CopyRect_ShiftedTileUsesCopyRectEncoding()
+        public void CopyRect_Disabled_EncodesShiftedContentAsDeflate()
         {
             var enc = new ZrleEncoder();
             enc.Initialize(W, H, 1000000);
-            enc.SetMouseButtonDown(true);  // 仅鼠标按下时启用 CopyRect 搜索
+            enc.SetMouseButtonDown(true);  // D16：EnableCopyRect=false，即使按下也不启用搜索
 
             byte[] frameA = CreateFrame(W, H, 10, 20, 30);
             // 在 (64,64) 放一个 64×64 纯色方块
@@ -163,20 +168,13 @@ namespace EasyRDP.Core.Tests.Protocol
 
             var regions = ZrleRegionCodec.Unpack(result.Data);
             Assert.NotNull(regions);
-            // 至少一个 CopyRect 区域（锚点瓦片 (72→64 偏移 -8)）
-            bool foundCopyRect = false;
+            // D16：CopyRect 总开关关闭（基线漂移会被 CopyRect 放大为持续花屏）——
+            // 平移内容全部走 Deflate/FillRect 全量编码，绝不产生 CopyRect 区域
+            Assert.NotEmpty(regions);
             for (int i = 0; i < regions.Length; i++)
             {
-                if (regions[i].Encoding == ZrleRegionEncoding.CopyRect)
-                {
-                    foundCopyRect = true;
-                    int srcX = BitConverter.ToInt32(regions[i].Data, 0);
-                    int srcY = BitConverter.ToInt32(regions[i].Data, 4);
-                    Assert.Equal(regions[i].X - 8, srcX);  // 源 = 目标左移 8
-                    Assert.Equal(regions[i].Y, srcY);
-                }
+                Assert.NotEqual(ZrleRegionEncoding.CopyRect, regions[i].Encoding);
             }
-            Assert.True(foundCopyRect, "expected at least one CopyRect region for shifted content");
             enc.Dispose();
         }
 
