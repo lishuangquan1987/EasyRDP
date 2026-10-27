@@ -448,8 +448,37 @@ namespace EasyRDP.Server.Wpf.ViewModels
                 if (!_settingsStore.Save(settings))
                     Logger.Warn("Persist auth salt failed; using in-memory salt for this run");
             }
-            // 自启状态以注册表为准：用户可能在任务管理器中已禁用启动项
-            _autoStart = AutoStartManager.IsEnabled();
+            // 自启状态以系统实际生效状态为准（Run 值 + StartupApproved 禁用标记）。
+            // 启动自愈（修复"卸载/重装后自启悄悄失效"）：
+            // settings.json 记录"曾开启自启"（AutoStart=true）而当前失效时——
+            //   Run 值丢失（安装包卸载/重装时 uninsdeletevalue 静默删除、或注册表被
+            //   清理）→ 按用户既往意图用当前 exe 路径重写注册表；
+            //   Run 值存在但被任务管理器/系统启动设置禁用 → 尊重系统开关不强行恢复，
+            //   在日志与界面明确提示用户去系统设置里重新启用（区分两种失效场景）。
+            bool autoStartInRegistry = AutoStartManager.IsEnabled();
+            if (settings.AutoStart && !autoStartInRegistry)
+            {
+                if (AutoStartManager.IsDisabledByTaskManager())
+                {
+                    Logger.Warn("Auto start is enabled in settings but disabled by Windows (Task Manager / Startup settings)");
+                    AddLog("Auto start is OFF in Windows startup settings — re-enable it there");
+                    _autoStart = false;
+                }
+                else
+                {
+                    bool healed = AutoStartManager.SetEnabled(true);
+                    _autoStart = healed;
+                    if (healed)
+                    {
+                        Logger.Info("Auto start entry was missing (uninstall/update cleaned it) — restored from saved settings");
+                        AddLog("Auto start entry restored from saved settings");
+                    }
+                }
+            }
+            else
+            {
+                _autoStart = autoStartInRegistry;
+            }
 
             // 启动 aly 自动更新后台检查（检查 → 下载 → 应用）
             InitializeUpdateClient();

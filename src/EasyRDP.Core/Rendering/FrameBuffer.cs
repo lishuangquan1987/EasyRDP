@@ -1,6 +1,7 @@
 namespace EasyRDP.Core.Rendering
 {
     using System.Diagnostics;
+    using System.Threading;
     using NLog;
 
     /// <summary>
@@ -138,6 +139,10 @@ namespace EasyRDP.Core.Rendering
                 _dirtyRects[_writeSlot] = dirtyRects;
                 _readSlot = _writeSlot;
                 _writeSlot = (_writeSlot + 1) % 2;
+                // 唤醒渲染线程的事件等待（WaitForFrame）：替代渲染线程的固定 Sleep 轮询
+                //（原 Sleep(5) 空轮询 200 次/秒，弱机上是纯 CPU 浪费）。
+                // PulseAll 在锁内调用，与 WaitForFrame 的 Monitor.Wait 构成标准条件变量模式。
+                Monitor.PulseAll(_lock);
                 if (_frameCount <= 5 || _frameCount % 100 == 0)
                 {
                     int rectCount = dirtyRects != null ? dirtyRects.Length : -1;
@@ -145,6 +150,25 @@ namespace EasyRDP.Core.Rendering
                         _frameCount, _sequence, width, height, rectCount, (_writeSlot + 1) % 2);
                 }
                 return true;
+            }
+        }
+
+        /// <summary>
+        /// 等待新的可读帧（事件驱动，替代渲染线程固定 Sleep 轮询）。
+        /// CommitFrame 成功提交时 PulseAll 唤醒全部等待者；timeoutMs 内无新帧
+        /// 返回 false（调用方回到自己的低频兜底节奏，如 40ms 心跳判定）。
+        /// 返回 true 后调用方应立即 TryBorrowReadFrame（不保证成功——其他等待者
+        /// 可能先借走；借不到再继续等待即可）。
+        /// </summary>
+        /// <param name="timeoutMs">最长等待毫秒数；0 表示只做一次即时检查。</param>
+        public bool WaitForFrame(int timeoutMs)
+        {
+            lock (_lock)
+            {
+                if (_readSlot >= 0) return true;
+                if (timeoutMs <= 0) return false;
+                Monitor.Wait(_lock, timeoutMs);
+                return _readSlot >= 0;
             }
         }
 

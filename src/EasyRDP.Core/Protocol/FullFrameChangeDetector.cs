@@ -24,7 +24,11 @@ namespace EasyRDP.Core.Protocol
 
         /// <summary>
         /// 对比当前帧与参考帧。完全相同返回 ShouldEncode=false，否则 true。
-        /// 副作用：拷贝当前帧到内部 _pendingPixels，等待 Commit() 提升为参考帧。
+        /// 性能修复（清晰度不受影响）：静止帧（memcmp 相等）不再做全帧拷贝——
+        /// 旧实现无条件 BlockCopy 整帧（1080p ≈ 8.3MB/帧，60fps 下纯内存带宽浪费），
+        /// 而"跳过编码"路径根本用不到该拷贝。相等路径同时把 _pendingLen 清零，
+        /// Commit 据此把"未变化帧的提交"处理为空操作（参考帧本来就等于当前画面，
+        /// 交换没有意义，避免把陈旧 pending 提升为参考帧）。
         /// </summary>
         public FrameChangeResult Detect(byte[] pixels, int width, int height)
         {
@@ -34,25 +38,30 @@ namespace EasyRDP.Core.Protocol
             if (len <= 0)
                 throw new ArgumentOutOfRangeException("len");
 
-            // 拷贝当前帧到 pending（无论是否变化，Commit 时都需要）
-            EnsurePendingBuffer(len);
-            Buffer.BlockCopy(pixels, 0, _pendingPixels, 0, len);
-            _pendingLen = len;
-
             int totalBlocks = ((width + 31) >> 5) * ((height + 31) >> 5);
 
-            // 首次调用或 Reset 后无基准帧 → 必须编码
+            // 首次调用或 Reset 后无基准帧 → 必须编码（拷贝当前帧为待提交参考）
             if (_prevPixels == null || _prevLen != len)
             {
+                EnsurePendingBuffer(len);
+                Buffer.BlockCopy(pixels, 0, _pendingPixels, 0, len);
+                _pendingLen = len;
                 return FrameChangeResult.Changed(totalBlocks, totalBlocks);
             }
 
-            // memcmp 快速路径：完全相同则跳过编码
-            bool equal = MemcmpEqual(pixels, _prevPixels, len);
-
-            if (equal)
+            // memcmp 快速路径：完全相同则跳过编码（0 拷贝）
+            if (MemcmpEqual(pixels, _prevPixels, len))
+            {
+                // 未变化：不拷贝（省 8.3MB/帧），pending 标记为空。
+                // Commit 见到空 pending 即空操作（参考帧已等于当前画面）。
+                _pendingLen = 0;
                 return FrameChangeResult.Unchanged(totalBlocks);
+            }
 
+            // 有变化：拷贝当前帧到 pending（Commit 时提升为参考帧）
+            EnsurePendingBuffer(len);
+            Buffer.BlockCopy(pixels, 0, _pendingPixels, 0, len);
+            _pendingLen = len;
             return FrameChangeResult.Changed(totalBlocks, totalBlocks);
         }
 

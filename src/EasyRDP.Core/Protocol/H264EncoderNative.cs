@@ -28,6 +28,8 @@ namespace EasyRDP.Core.Protocol
         private bool _initialized;
         private bool _disposed;
         private byte[] _i420Buffer;
+        // 编码器主动跳帧计数（bEnableFrameSkip 触发，诊断限频日志用）
+        private long _frameSkipCount;
 
         public CodecId Codec { get { return CodecId.H264Software; } }
 
@@ -359,8 +361,15 @@ namespace EasyRDP.Core.Protocol
                 int iLayerNum = H264Native.SFrameBSInfoAccess.GetLayerNum(pBsInfo);
                 if (iLayerNum <= 0)
                 {
-                    Logger.Warn("EncodeFrame succeeded (ret=0) but iLayerNum={0} — encoder produced no layers", iLayerNum);
-                    return new EncodedFrame();
+                    // 编码器主动跳帧（bEnableFrameSkip=1 在 VBV 溢出时的正常行为）：
+                    // ret=0 但无层输出。区别于编码失败——编码器内部参考链未推进，
+                    // 返回 Skipped 语义让上层安静丢弃本帧（不切编码器/不计失败）。
+                    // 旧逻辑把该情况当作失败返回空帧并 Warn，上层 SwitchToZrle
+                    // 触发全屏重建尖峰（生产日志实证 ZRLE↔H264 抖动切换的主因之一）。
+                    _frameSkipCount++;
+                    if (_frameSkipCount == 1 || _frameSkipCount % 100 == 0)
+                        Logger.Info("Encoder skipped frame (frameSkip enabled, ret=0 iLayerNum=0), total skips={0}", _frameSkipCount);
+                    return new EncodedFrame { Skipped = true, Width = _width, Height = _height };
                 }
 
                 // OpenH264 2.6.0 不填充顶层 eFrameType / iFrameSizeInBytes，

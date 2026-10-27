@@ -62,6 +62,35 @@ namespace EasyRDP.Server.Wpf.Services
         private const int ThumbDivisor = 8;                 // 缩略图边长 = 原尺寸/8
         private const int ThumbKeepaliveIntervalMs = 2000;  // 静止时强制全帧截屏的间隔（保活）
         private const int ThumbIdleProbeIntervalMs = 250;   // 静止时缩略图探测间隔（省 CPU）
+
+        // ── 输入驱动的强制全截（脏画面修复）──
+        // 缩略图探测的两类漏检（1/8 降采样平均效应 / 变化帧被丢弃后探测参考已前移）
+        // 会让"静止"误判持续到保活全截或下一次真实变化，表现为客户端画面残留。
+        // 等待期间监听 GetLastInputInfo（远端 SendInput 注入与本物理键鼠都会推进
+        // 系统空闲计时），检测到新输入立即强制一次全帧截屏，由编码器逐瓦片比较
+        // 原生像素兜底捕捉全部漏检变化。
+        private const int InputPollSliceMs = 50;            // 静止等待期间的输入轮询分片
+        // 强制全截的最小间隔（限频）：120Hz 鼠标移动流下防止捕获线程被打满。
+        // 50ms 分片轮询 + 200ms 强制限频 = 持续输入时最多 5 次额外全截/秒。
+        private const int InputForcedCaptureMinIntervalMs = 200;
+        private uint _lastSeenInputTick;                     // 上次轮询到的系统空闲计时（GetTickCount 域）
+        private long _lastInputForcedCaptureTicks;           // 上次输入强制全截时刻（限频）
+        private long _inputForcedCaptureCount;               // 输入强制全截总次数（诊断限频日志用）
+
+        // GetLastInputInfo（user32，Windows 2000+ 可用）：查询系统最后键鼠输入时刻。
+        // dwTime 与 GetTickCount 同域（毫秒，约 49.7 天回绕一次——对输入活动检测无影响）。
+        [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+        private static extern bool GetLastInputInfo(ref NativeLastInputInfo plii);
+
+        /// <summary>GetLastInputInfo 的原生结构（cbSize 必须先初始化）。</summary>
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        private struct NativeLastInputInfo
+        {
+            /// <summary>结构体大小（字节），调用前必须赋值。</summary>
+            public uint cbSize;
+            /// <summary>最后一次输入事件时刻（GetTickCount 毫秒域）。</summary>
+            public uint dwTime;
+        }
         private int _thumbW, _thumbH;                       // 当前缩略图尺寸
         private byte[] _thumbBuffer;                        // 最新缩略图 BGRA 像素（复用缓冲）
         private byte[] _thumbPrev;                          // 上一参考缩略图 BGRA 像素（比较基准）
@@ -86,9 +115,11 @@ namespace EasyRDP.Server.Wpf.Services
         }
 
         /// <summary>
-        /// 动态设置捕获分辨率上限（D11 自适应调用）。0 = 全分辨率；
-        /// >0 = 用 StretchBlt 直接按该宽度等比降采样捕获，编码线程不再做托管缩放。
-        /// 线程安全：编码线程调用，捕获线程下一轮迭代读取。
+        /// 动态设置捕获分辨率上限。0 = 全分辨率；
+        /// >0 = 用 StretchBlt 直接按该宽度等比降采样捕获。
+        /// 注意：清晰度绝对优先（用户明确要求不降清晰度）——会话层
+        /// （ServerStreamSession）已不再调用本方法做负载降档，保留能力仅供
+        /// 未来的显式 UI 开关使用。线程安全：编码线程调用，捕获线程下一轮迭代读取。
         /// </summary>
         public void SetCaptureMaxWidth(int width)
         {
@@ -367,11 +398,32 @@ namespace EasyRDP.Server.Wpf.Services
                     if (targetW > 0 && targetH > 0
                         && !thumbnailChanged && !_thumbNeedFull())
                     {
-                        // 桌面静止：跳过全帧截屏，低频探测（D20：虚拟显卡探测 ~76ms/次，
-                        // 高频探测会把捕获线程占满 1 核；静止降频到 250ms 省 4 倍 CPU，
-                        // 变化时走下方全截路径并恢复短间隔）
-                        Thread.Sleep(ThumbIdleProbeIntervalMs);
-                        continue;
+                        // 桌面静止候选：等待期间监听系统输入活动（GetLastInputInfo），
+                        // 覆盖远端 SendInput 注入与本物理键鼠（二者都推进系统空闲计时）。
+                        // 有新输入时立即结束等待并强制一次全帧截屏——缩略图探测存在
+                        // 两类漏检（1/8 降采样平均掉小面积变化、变化帧在队列满处被丢弃后
+                        // 探测参考已前移），输入后强制全截由编码器逐瓦片比较原生像素兜底，
+                        // 修复"窗口最小化后客户端残留旧画面、晃动鼠标才刷新"的脏画面问题。
+                        bool inputForced = TryBeginInputForcedCapture();
+                        if (!inputForced)
+                        {
+                            long idleDeadline = Stopwatch.GetTimestamp()
+                                + (long)ThumbIdleProbeIntervalMs * Stopwatch.Frequency / 1000;
+                            while (_running && !inputForced && Stopwatch.GetTimestamp() < idleDeadline)
+                            {
+                                Thread.Sleep(InputPollSliceMs);
+                                inputForced = TryBeginInputForcedCapture();
+                            }
+                        }
+                        if (!inputForced)
+                        {
+                            // 整个静止间隔内无输入活动：跳过全帧截屏，低频探测
+                            //（D20：虚拟显卡探测 ~76ms/次，高频探测会把捕获线程占满 1 核）
+                            continue;
+                        }
+                        _inputForcedCaptureCount++;
+                        if (_inputForcedCaptureCount == 1 || _inputForcedCaptureCount % 200 == 0)
+                            Logger.Info("CaptureLoop: input-driven forced capture (total={0})", _inputForcedCaptureCount);
                     }
                     _thumbLastKeepaliveTicks = Stopwatch.GetTimestamp();
 
@@ -527,6 +579,43 @@ namespace EasyRDP.Server.Wpf.Services
             long now = Stopwatch.GetTimestamp();
             long elapsedMs = (now - _thumbLastKeepaliveTicks) * 1000 / Stopwatch.Frequency;
             return elapsedMs >= ThumbKeepaliveIntervalMs;
+        }
+
+        /// <summary>
+        /// 检测系统输入活动并在满足限频时请求强制全帧截屏（脏画面修复核心）。
+        /// GetLastInputInfo 覆盖两类输入：客户端远端注入（EasyDesk SendInput）与
+        /// 服务端本地物理键鼠——二者都会推进系统空闲计时。
+        /// 返回 true 表示应立即做一次全帧截屏（输入驱动 + 200ms 限频双条件满足）；
+        /// 返回 false 表示无新输入或距上次强制全截不足 200ms（输入风暴下由
+        /// 调用方的分片循环继续重试，不丢失"有输入"这一事实）。
+        /// </summary>
+        private bool TryBeginInputForcedCapture()
+        {
+            // 读取系统空闲计时，与本地上次记录比较判断"是否有新输入"
+            var info = new NativeLastInputInfo();
+            info.cbSize = (uint)System.Runtime.InteropServices.Marshal.SizeOf(typeof(NativeLastInputInfo));
+            bool newInput;
+            try
+            {
+                if (!GetLastInputInfo(ref info))
+                    return false;
+                newInput = info.dwTime != _lastSeenInputTick;
+                _lastSeenInputTick = info.dwTime;
+            }
+            catch
+            {
+                // XP/受限环境理论上均可用；防御性兜底：视为无输入
+                return false;
+            }
+            if (!newInput)
+                return false;
+
+            long now = Stopwatch.GetTimestamp();
+            long sinceLastMs = (now - _lastInputForcedCaptureTicks) * 1000 / Stopwatch.Frequency;
+            if (sinceLastMs < InputForcedCaptureMinIntervalMs)
+                return false; // 输入风暴限频：不足 200ms 不再强制全截
+            _lastInputForcedCaptureTicks = now;
+            return true;
         }
     }
 }

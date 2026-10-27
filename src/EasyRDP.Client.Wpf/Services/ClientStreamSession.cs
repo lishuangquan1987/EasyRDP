@@ -130,6 +130,21 @@ namespace EasyRDP.Client.Wpf.Services
         /// （操作跟手度的决定因素）；空帧编码仅 ~8ms，40ms 心跳占弱机单核 ~20%，
         /// 换取画面变化最长 40ms 内被感知（原 250ms 是操作迟钝的主要来源）。</summary>
         private const int FrameRequestHeartbeatMs = 40;
+        /// <summary>静止连击阈值（≥3 帧连续空帧）：心跳从 40ms 升到 100ms（中档）。
+        /// 服务端静止时每条心跳都要做全帧瓦片比较 + 空帧编码发送（弱机常驻单核），
+        /// 降频直接降低服务端空闲 CPU；变化帧立即归零计数回到 40ms。</summary>
+        private const int StaticStreakMid = 3;
+        /// <summary>静止连击阈值（≥10 帧连续空帧）：心跳再升到 250ms（深度静止档）。
+        /// 此档位是"静止→变化"的感知延迟上限（服务端配合输入驱动强制采集，
+        /// 输入发生后 250ms 内必然发出请求，画面不会残留）。</summary>
+        private const int StaticStreakDeep = 10;
+        /// <summary>中档心跳间隔（毫秒），见 StaticStreakMid。</summary>
+        private const int StaticHeartbeatMs = 100;
+        /// <summary>深度静止心跳间隔（毫秒），见 StaticStreakDeep。</summary>
+        private const int DeepStaticHeartbeatMs = 250;
+        /// <summary>连续静止（0 区域空帧）帧数计数：仅渲染线程读写，心跳阶梯依据。
+        /// 变化帧（DirtyRects 非空/H264 全帧）立即归零。</summary>
+        private int _staticFrameStreak;
         /// <summary>Gets the current frame width in pixels.</summary>
         public int FrameWidth { get { return _frameBuffer != null ? _frameBuffer.Width : 0; } }
         /// <summary>Gets the current frame height in pixels.</summary>
@@ -1260,6 +1275,11 @@ namespace EasyRDP.Client.Wpf.Services
                             // 帧间隔却 250-300ms，等于心跳周期）。
                             // ZRLE 空帧（Length==0，4 字节保活帧）仍走心跳，不空转打满。
                             bool hasChanges = frame.DirtyRects == null || frame.DirtyRects.Length > 0;
+                            // 静止连击计数（心跳自适应阶梯依据）：变化帧立即归零，
+                            // 连续空帧爬阶梯——服务端静止时仍要为每条心跳做全帧瓦片
+                            // 比较 + 空帧 Pack/发送（弱机常驻单核 30-60%），阶梯降频
+                            // 在"静止→变化"感知延迟（最长 250ms）与服务端空闲 CPU 间折中。
+                            _staticFrameStreak = hasChanges ? 0 : _staticFrameStreak + 1;
                             if (hasChanges)
                             {
                                 SendFramebufferUpdateRequest();
@@ -1282,23 +1302,35 @@ namespace EasyRDP.Client.Wpf.Services
                 {
                     Interlocked.Increment(ref _renderLoopEmpty);
                     long empty = Interlocked.Read(ref _renderLoopEmpty);
-                    if (empty == 1 || (empty <= 5 && empty % 1 == 0))
-                    {
-                        if (empty == 1)
-                            Logger.Info("RenderLoop: no frame available (first time, normal during initial wait)");
-                    }
-                    Thread.Sleep(5); // 无帧时等待，降低 CPU 占用
+                    if (empty == 1)
+                        Logger.Info("RenderLoop: no frame available (first time, normal during initial wait)");
+                    // 事件驱动等待：CommitFrame 提交新帧时 PulseAll 唤醒（FrameBuffer.WaitForFrame），
+                    // 替代原固定 Thread.Sleep(5) 空轮询（实测 4 分钟会话空轮询 33401 次，
+                    // 约 139 次/秒纯 CPU 浪费）。40ms 超时兜底：万一错过 Pulse，
+                    // 仍保证下方心跳判定以基础节奏运行。
+                    if (_frameBuffer != null)
+                        _frameBuffer.WaitForFrame(40);
+                    else
+                        Thread.Sleep(5); // 管线尚未初始化（首帧前）：退回短睡
                 }
 
                 // 阶段三：心跳请求（每轮检查，与是否借到帧无关）。
                 // 静帧（服务端回 0 区域空帧、画面无变化）时维持低帧率空帧轮询：
                 // 若把心跳放进借帧分支，静帧时客户端不再发请求 → 服务端 1s 超时后
                 // 不再推帧 → 客户端永远等不到新帧 → 画面变化永久不更新（僵局）。
-                // 心跳保证任何时刻画面变化在 ≤250ms 内被客户端感知并请求更新。
+                // 心跳保证任何时刻画面变化在 ≤ 心跳周期内被客户端感知并请求更新。
+                // 自适应阶梯（不降清晰度的服务端省 CPU 手段）：
+                //   活跃（静止连击 <3）→ 40ms：变化期帧率优先；
+                //   静止连击 [3,10) → 100ms：服务端每秒少做 ~15 次全帧瓦片比较；
+                //   深度静止（≥10）→ 250ms：服务端静止 CPU 降 50-90%（弱机收益最大）。
+                // 任何变化帧立即归零阶梯（_staticFrameStreak=0），下一帧请求即刻回到 40ms。
                 if (_flowControlEnabled)
                 {
                     long now = System.Diagnostics.Stopwatch.GetTimestamp();
-                    long heartbeatTicks = FrameRequestHeartbeatMs * System.Diagnostics.Stopwatch.Frequency / 1000;
+                    int heartbeatMs = _staticFrameStreak < StaticStreakMid
+                        ? FrameRequestHeartbeatMs
+                        : (_staticFrameStreak < StaticStreakDeep ? StaticHeartbeatMs : DeepStaticHeartbeatMs);
+                    long heartbeatTicks = (long)heartbeatMs * System.Diagnostics.Stopwatch.Frequency / 1000;
                     if (now - _lastFrameRequestTicks >= heartbeatTicks)
                     {
                         SendFramebufferUpdateRequest();
