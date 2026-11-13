@@ -1,38 +1,77 @@
 name: Release
 
-# 发布 Release 时自动构建客户端/服务端并生成安装包；
-# 也可在 Actions 页面手动运行（workflow_dispatch）做预发布验证。
+# Publish a GitHub Release (tag like v1.2.3) -> build client + server installers
+# and attach every artifact to that Release.
+# Also runnable manually from the Actions tab (workflow_dispatch):
+#   - default: build only, upload to Actions Artifacts (pre-release validation)
+#   - optional: tick "upload_to_release" to attach files to a chosen tag
+#
+# Two Inno Setup toolchains are used on purpose:
+#   * Inno Setup 6.x  -> client.iss / server.iss (modern wizard, Win7+)
+#   * Inno Setup 5.6.1 -> server-xp.iss (LAST version supporting Windows XP,
+#     produces EasyRDP-Server-<v>-XP-Setup.exe, installable on XP SP3)
+# Inno Setup 6 installers cannot run on XP; only IS 5.6.1 can produce an XP
+# installer. A portable ZIP is also shipped for XP users who prefer no setup.
+
 on:
   release:
     types: [published]
   workflow_dispatch:
     inputs:
       version:
-        description: "Version without leading v (e.g. 1.2.3)"
-        required: true
+        description: 'Version without leading v (e.g. 1.2.3). Leave empty to use the latest tag.'
+        required: false
+        default: ''
+      upload_to_release:
+        description: 'Also attach artifacts to a Release (creates the Release if the tag does not exist).'
+        type: boolean
+        required: false
+        default: false
+      release_tag:
+        description: 'Target tag when upload_to_release is true (e.g. v1.2.3). Empty = use version above.'
+        required: false
+        default: ''
 
 permissions:
   contents: write
 
+concurrency:
+  group: easyrdp-release-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
-  # aly 自动更新器版本（aly 仓库的 release tag，见 aly/client 目录）
-  ALY_CLIENT_VERSION: "0.1.3"
+  DOTNET_VERSION: '8.0.x'
+  # Version of the aly updater shipped inside UpdateFolder (aly repo release tag)
+  ALY_CLIENT_VERSION: '0.1.3'
+  # Pinned IS 6.x from jrsoftware's immutable GitHub releases. Pinning matters:
+  # client.iss / server.iss use IS 6 syntax (WizardStyle, x86compatible, ...)
+  # and a bare `choco install innosetup` may resolve to IS 7 in the future.
+  INNO6_URL: 'https://github.com/jrsoftware/issrc/releases/download/is-6_7_4/innosetup-6.7.4.exe'
+  INNO6_DIR: 'C:\InnoSetup6'
+  # Last Inno Setup release that supports Windows 2000 / XP / Server 2003 (Unicode build)
+  INNO5_URL: 'https://files.jrsoftware.org/is/5/innosetup-5.6.1-unicode.exe'
+  INNO5_DIR: 'C:\InnoSetup5'
 
 jobs:
   build:
-    name: Build & Package (Windows)
+    name: Build & package (Windows)
     runs-on: windows-latest
+    timeout-minutes: 90
     steps:
-      - name: Checkout
+      # ---------------------------------------------------------------- 源码
+      - name: Checkout (including submodules)
         uses: actions/checkout@v4
         with:
           submodules: recursive
+          fetch-depth: 0
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 8.0.x
+          dotnet-version: ${{ env.DOTNET_VERSION }}
 
+      # 版本号只取 x.y.z[.w] 数字前缀；所有外部输入都经 env 传入，
+      # 不直接插值进脚本，避免 tag / 输入被当成 PowerShell 代码执行。
       - name: Resolve version
         id: ver
         shell: pwsh
@@ -40,58 +79,88 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
           INPUT_VERSION: ${{ inputs.version }}
+          INPUT_UPLOAD: ${{ inputs.upload_to_release }}
+          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
-          # 通过环境变量传递（而不是直接插值进脚本），避免 tag/输入被当作 PowerShell 代码执行
-          $tag = if ($env:EVENT_NAME -eq "release") { $env:RELEASE_TAG } else { $env:INPUT_VERSION }
-          $tag = ($tag ?? "").Trim()
-          if ($tag.StartsWith("v")) { $tag = $tag.Substring(1) }
-          # 只接受 x.y.z 数字前缀，后续步骤插入脚本时不会有注入面
-          $m = [regex]::Match($tag, '^\d+\.\d+\.\d+')
-          $v = if ($m.Success) { $m.Value } else { "0.0.0" }
-          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          "tag=v$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          Write-Host "Version=$v Tag=v$v"
+          $event = $env:EVENT_NAME
+          $raw = if ($event -eq 'release') { $env:RELEASE_TAG } else { $env:INPUT_VERSION }
+          $raw = "$raw".Trim()
 
-      # ---------------- 客户端（自包含，免装 .NET 运行时） ----------------
+          if ($event -ne 'release' -and [string]::IsNullOrWhiteSpace($raw)) {
+            $latest = (git describe --tags --abbrev=0 2>$null)
+            if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($latest)) {
+              $raw = "$latest".Trim()
+            }
+          }
+
+          if ($raw.StartsWith('v')) { $raw = $raw.Substring(1) }
+          $m = [regex]::Match($raw, '^\d+\.\d+\.\d+(?:\.\d+)?')
+          $version = if ($m.Success) { $m.Value } else { '0.0.0' }
+
+          $tag = if ($event -eq 'release') { "$env:RELEASE_TAG".Trim() } else { "v$version" }
+          if ([string]::IsNullOrWhiteSpace($tag)) { $tag = "v$version" }
+
+          $targetTag = if (-not [string]::IsNullOrWhiteSpace($env:INPUT_RELEASE_TAG)) {
+            $env:INPUT_RELEASE_TAG.Trim()
+          } else {
+            $tag
+          }
+          $upload = ($event -eq 'release') -or ($env:INPUT_UPLOAD -eq 'true')
+
+          @(
+            "version=$version",
+            "tag=$tag",
+            "release_tag=$targetTag",
+            "upload=$($upload.ToString().ToLowerInvariant())"
+          ) | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "Version=$version  Tag=$tag  ReleaseTag=$targetTag  UploadToRelease=$upload"
+
+      # ------------------------------------------------------------ 客户端构建
+      # net8.0-windows / WPF, self-contained win-x64: no .NET runtime needed
       - name: Build client (net8, self-contained win-x64)
         shell: pwsh
         run: |
-          $v = "${{ steps.ver.outputs.version }}"
-          $tag = "v$v"
+          $v = '${{ steps.ver.outputs.version }}'
+          $tag = '${{ steps.ver.outputs.tag }}'
           dotnet publish src/EasyRDP.Client.Wpf/EasyRDP.Client.Wpf.csproj `
             -c Release -r win-x64 --self-contained true `
             -p:Version=$v -p:InformationalVersion=$tag `
             -p:AlyClientVersion=$env:ALY_CLIENT_VERSION `
             -p:AlyUpdateFolder="$PWD/stage/client/UpdateFolder/" `
-            -o stage/client/ApplicationFolder
+            -o stage/client/ApplicationFolder --nologo
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      # ---------------- 服务端（net40，Windows XP+） ----------------
+      # ------------------------------------------------------------ 服务端构建
+      # net40 single target (Windows XP). AutomaticallyUseReferenceAssemblyPackages
+      # lets the SDK restore .NET Framework 4.0 reference assemblies from NuGet
+      # when the VS targeting pack is missing on the runner.
       - name: Build server (net40)
         shell: pwsh
         run: |
-          $v = "${{ steps.ver.outputs.version }}"
-          $tag = "v$v"
+          $v = '${{ steps.ver.outputs.version }}'
+          $tag = '${{ steps.ver.outputs.tag }}'
           dotnet build src/EasyRDP.Server.Wpf/EasyRDP.Server.Wpf.csproj `
             -c Release `
             -p:Version=$v -p:InformationalVersion=$tag `
             -p:AlyClientVersion=$env:ALY_CLIENT_VERSION `
             -p:AlyUpdateFolder="$PWD/stage/server/UpdateFolder/" `
-            -o stage/server/ApplicationFolder
+            -p:AutomaticallyUseReferenceAssemblyPackages=true `
+            -o stage/server/ApplicationFolder --nologo
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      # -------------------------------------------------- 组装待打包目录 + 校验
       - name: Prepare staged files
         shell: pwsh
         run: |
           $alyUrl = "https://github.com/lishuangquan1987/aly/releases/download/v$env:ALY_CLIENT_VERSION/aly-client.exe"
-          foreach ($app in @("client", "server")) {
+          foreach ($app in @('client', 'server')) {
             New-Item -ItemType Directory -Force -Path "stage/$app/UpdateFolder" | Out-Null
-            # aly 更新器所需的 manifest（指向 ApplicationFolder 下的主程序）
             Copy-Item "installer/update-$app.json" "stage/$app/UpdateFolder/client.json" -Force
-            # aly-client.exe 通过 ProjectReference 引用 SDK 时不会自动导入 build targets，这里显式下载；
-            # 失败只警告：更新器是可选组件，不阻断发布
+            # aly-client.exe comes via ProjectReference to the SDK, which does not
+            # import its build targets; fetch it explicitly. The updater is an
+            # optional component, so a download failure must not block a release.
             try {
-              Invoke-WebRequest -Uri $alyUrl -OutFile "stage/$app/UpdateFolder/aly-client.exe" -UseBasicParsing
+              Invoke-WebRequest -Uri $alyUrl -OutFile "stage/$app/UpdateFolder/aly-client.exe" -UseBasicParsing -ErrorAction Stop -TimeoutSec 120
               Write-Host "Downloaded aly-client.exe ($env:ALY_CLIENT_VERSION) for $app"
             } catch {
               Write-Warning "aly-client.exe download failed for ${app}: $($_.Exception.Message)"
@@ -99,59 +168,147 @@ jobs:
           }
 
           $required = @(
-            "stage/client/ApplicationFolder/EasyRDP.Client.Wpf.exe",
-            "stage/server/ApplicationFolder/EasyRDP.Server.Wpf.exe",
-            "stage/server/ApplicationFolder/openh264/x86/openh264.dll",
-            "stage/client/ApplicationFolder/openh264/x64/openh264.dll"
+            'stage/client/ApplicationFolder/EasyRDP.Client.Wpf.exe',
+            'stage/server/ApplicationFolder/EasyRDP.Server.Wpf.exe',
+            'stage/server/ApplicationFolder/openh264/x86/openh264.dll',
+            'stage/server/ApplicationFolder/openh264/x64/openh264.dll',
+            'stage/client/ApplicationFolder/openh264/x64/openh264.dll'
           )
           $missing = $required | Where-Object { -not (Test-Path $_) }
           if ($missing) {
             Write-Error "Missing build output: $($missing -join ', ')"
             exit 1
           }
-          if (-not (Test-Path "stage/server/UpdateFolder/aly-client.exe")) {
-            Write-Warning "aly-client.exe 未下载成功：安装包将不含自动更新器（主功能不受影响）"
-          }
+
+          # Trim debug symbols / XML docs from all staging folders. The IS 5
+          # script does not use the [Files] "Excludes" parameter, so cleaning
+          # here keeps all three installers identical and smaller.
+          Get-ChildItem 'stage/client/ApplicationFolder','stage/server/ApplicationFolder' -Recurse -File |
+            Where-Object { $_.Extension -in @('.pdb', '.xml') } |
+            Remove-Item -Force
+
           Get-ChildItem stage -Recurse -File | Measure-Object -Property Length -Sum |
             ForEach-Object { Write-Host ("Staged {0} files, {1:N1} MB" -f $_.Count, ($_.Sum / 1MB)) }
 
-      - name: Install Inno Setup (if missing)
+      # ------------------------------------------------------- Inno Setup 6.x
+      - name: Install Inno Setup 6 (modern installers)
         shell: pwsh
         run: |
-          $iscc = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"
+          $dir = $env:INNO6_DIR
+          $iscc = Join-Path $dir 'ISCC.exe'
           if (-not (Test-Path $iscc)) {
-            choco install innosetup --no-progress -y
-            $iscc = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"
+            $setup = Join-Path $env:RUNNER_TEMP 'innosetup-6.7.4.exe'
+            try {
+              Invoke-WebRequest -Uri $env:INNO6_URL -OutFile $setup -UseBasicParsing -ErrorAction Stop -TimeoutSec 180
+              $installArgs = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', "/DIR=$dir")
+              $p = Start-Process -FilePath $setup -ArgumentList $installArgs -Wait -PassThru
+              if ($p.ExitCode -ne 0) { throw "IS6 installer exited with code $($p.ExitCode)" }
+            } catch {
+              Write-Warning "Official Inno Setup 6 download/install failed: $($_.Exception.Message)"
+              Write-Warning 'Falling back to Chocolatey (pinned 6.3.1).'
+              choco install innosetup --version=6.3.1 --no-progress -y
+            }
           }
-          if (-not (Test-Path $iscc)) { throw "ISCC.exe not found" }
+          if (-not (Test-Path $iscc)) {
+            # Last resort: any IS 6/7 compiler already present on the runner.
+            $found = Get-ChildItem -Path @(
+              "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+              "${env:ProgramFiles(x86)}\Inno Setup 7\ISCC.exe",
+              "${env:ProgramFiles}\Inno Setup 6\ISCC.exe",
+              "${env:ProgramFiles}\Inno Setup 7\ISCC.exe"
+            ) -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($found) { $iscc = $found.FullName }
+          }
+          if (-not (Test-Path $iscc)) {
+            throw 'Inno Setup 6 ISCC.exe not found (required by installer/client.iss and installer/server.iss).'
+          }
+          "ISCC6=$iscc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Inno Setup 6 ready: $iscc"
 
+      # ---------------------------------------------------- Inno Setup 5.6.1
+      # Installed into a separate directory so both compilers coexist.
+      - name: Install Inno Setup 5.6.1 (Windows XP installers)
+        shell: pwsh
+        run: |
+          $dir = $env:INNO5_DIR
+          $iscc = Join-Path $dir 'ISCC.exe'
+          if (-not (Test-Path $iscc)) {
+            $setup = Join-Path $env:RUNNER_TEMP 'innosetup-5.6.1-unicode.exe'
+            Invoke-WebRequest -Uri $env:INNO5_URL -OutFile $setup -UseBasicParsing -ErrorAction Stop -TimeoutSec 180
+            $installArgs = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', "/DIR=$dir")
+            $p = Start-Process -FilePath $setup -ArgumentList $installArgs -Wait -PassThru
+            if ($p.ExitCode -ne 0) { throw "Inno Setup 5.6.1 installer exited with code $($p.ExitCode)" }
+          }
+          if (-not (Test-Path $iscc)) { throw "ISCC.exe (Inno Setup 5.6.1) not found at: $iscc" }
+          "ISCC5=$iscc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Inno Setup 5.6.1 (Unicode) ready: $iscc"
+
+      # ------------------------------------------------------------ 生成安装包
       - name: Build installers
         shell: pwsh
         run: |
-          $v = "${{ steps.ver.outputs.version }}"
-          $iscc = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-          foreach ($app in @("client", "server")) {
-            & $iscc "/DMyAppVersion=$v" "/DSourceDir=$PWD/stage/$app" "/DOutputDir=$PWD/dist" "installer/$app.iss"
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
+          $v = '${{ steps.ver.outputs.version }}'
+          $root = (Get-Location).Path
+          $dist = Join-Path $root 'dist'
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          $srcClient = Join-Path $root 'stage\client'
+          $srcServer = Join-Path $root 'stage\server'
 
-      - name: Build portable zip (server, Windows XP compatible)
+          # Client: Win10/11 x64, Inno Setup 6
+          & $env:ISCC6 "/DMyAppVersion=$v" "/DSourceDir=$srcClient" "/DOutputDir=$dist" 'installer/client.iss'
+          if ($LASTEXITCODE -ne 0) { throw 'client.iss (Inno Setup 6) failed' }
+
+          # Server: Win7+ modern wizard, Inno Setup 6 (unchanged existing script)
+          & $env:ISCC6 "/DMyAppVersion=$v" "/DSourceDir=$srcServer" "/DOutputDir=$dist" 'installer/server.iss'
+          if ($LASTEXITCODE -ne 0) { throw 'server.iss (Inno Setup 6) failed' }
+
+          # Server: Windows XP SP3+ installer, Inno Setup 5.6.1 ONLY
+          & $env:ISCC5 "/DMyAppVersion=$v" "/DSourceDir=$srcServer" "/DOutputDir=$dist" 'installer/server-xp.iss'
+          if ($LASTEXITCODE -ne 0) { throw 'server-xp.iss (Inno Setup 5.6.1) failed' }
+
+      # ------------------------------------------- XP 免安装 ZIP + 校验和 + 摘要
+      - name: Build portable ZIP and checksums
         shell: pwsh
         run: |
-          $v = "${{ steps.ver.outputs.version }}"
-          Compress-Archive -Path "stage/server/*" -DestinationPath "dist/EasyRDP-Server-$v-portable.zip" -CompressionLevel Optimal
+          $v = '${{ steps.ver.outputs.version }}'
+          Compress-Archive -Path 'stage/server/*' -DestinationPath "dist/EasyRDP-Server-$v-portable.zip" -CompressionLevel Optimal
 
-      - name: Upload artifacts
+          $hashLines = Get-ChildItem 'dist' -File | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)"
+          }
+          $hashLines | Out-File -FilePath 'dist/SHA256SUMS.txt' -Encoding ascii
+
+          $summary = @(
+            "## EasyRDP v${v} 构建产物",
+            '',
+            '| 文件 | 适用系统 | 说明 |',
+            '| --- | --- | --- |',
+            "| EasyRDP-Client-${v}-Setup.exe | Windows 10 1607+ / 11 x64 | 客户端，自包含 .NET 8，免装运行时 |",
+            "| EasyRDP-Server-${v}-Setup.exe | Windows 7+ | 服务端，Inno Setup 6 现代向导 |",
+            "| EasyRDP-Server-${v}-XP-Setup.exe | **Windows XP SP3+** | 服务端 XP 安装包，Inno Setup 5.6.1 编译 |",
+            "| EasyRDP-Server-${v}-portable.zip | Windows XP SP3+ | 免安装，解压即用 |",
+            '| SHA256SUMS.txt | - | 全部产物校验和 |',
+            '',
+            '> XP 机器需预装 .NET Framework 4.0（XP 安装包会自动检测并提示）；XP 用户下载带 XP 字样的安装包或 portable zip。',
+            '> 客户端为 .NET 8 / WPF，无法在 XP 上运行。'
+          )
+          $summary -join "`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+          Get-ChildItem 'dist' -File | Select-Object Name, @{N='MB';E={[math]::Round($_.Length/1MB,2)}} | Format-Table -AutoSize
+
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: EasyRDP-${{ steps.ver.outputs.version }}
           path: dist/*
           if-no-files-found: error
+          retention-days: 30
 
       - name: Attach to GitHub Release
-        if: github.event_name == 'release'
+        if: steps.ver.outputs.upload == 'true'
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.ver.outputs.release_tag }}
           files: dist/*
-          fail_on_unmatched_files: false
+          fail_on_unmatched_files: true
