@@ -35,6 +35,13 @@
 ; The [Code] section below only warns when .NET Framework 4.0 is missing.
 ; XP never shipped with it, and an install that cannot start is a bad first
 ; impression. "Yes" is the default button so silent installs are never blocked.
+;
+; NOTE: inside [Code] only Pascal comments (// or { }) are valid. A leading
+; ";" is a statement separator there, not a comment, and makes IS 5 abort with
+; "'BEGIN' expected". Keep all prose comments OUTSIDE the [Code] section.
+;
+; Uninstalling leaves %APPDATA%\EasyRDP\server (settings) and the audit logs
+; in place, so switching between installer variants never loses data.
 ; ============================================================================
 
 #ifndef MyAppVersion
@@ -140,6 +147,3 @@ begin
       mbConfirmation, MB_YESNO) = IDYES;
   end;
 end;
-
-; Uninstalling keeps %APPDATA%\EasyRDP\server (settings) and the audit logs,
-; so reinstalling or switching installer variants never loses data.
