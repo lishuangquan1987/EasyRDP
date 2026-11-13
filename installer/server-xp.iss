@@ -26,6 +26,10 @@
 ;   - no skipifsourcedoesntexist flag (IS 6.1+)
 ;   - Compression=lzma/max instead of lzma2/max
 ;   - MinVersion uses the simple "major.minor" form
+;   - no {auto*} shell folder constants (autodesktop, autoappdata, autopf,
+;     autoprograms, ...): all of them were introduced in IS 6.0. Use the
+;     explicit {user*} / {common*} forms instead. This is a per-user install,
+;     so {userdesktop} matches {localappdata} and the HKCU Run entry.
 ;   - PrivilegesRequired=lowest is fine: it was added in IS 5.3.7
 ;
 ; The [Code] section below only warns when .NET Framework 4.0 is missing.
@@ -94,7 +98,7 @@ Source: "{#SourceDir}\UpdateFolder\*"; DestDir: "{app}\UpdateFolder"; Flags: ign
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\ApplicationFolder\{#MyAppExeName}"
 Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\ApplicationFolder\{#MyAppExeName}"; Tasks: desktopicon
+Name: "{userdesktop}\{#MyAppName}"; Filename: "{app}\ApplicationFolder\{#MyAppExeName}"; Tasks: desktopicon
 
 [Registry]
 ; Optional auto-start (HKCU\Run - same key used by the in-app AutoStart option)
